@@ -248,6 +248,15 @@ mod tests {
             assert!(w.next().is_ok());
             let b2: [u8; 40000] = [3; 40000];
             assert!(w.write(&b2).is_ok());
+        }
+        assert_eq!(buf.len(), 10024+32768); // 10024 + 1 block
+        buf.truncate(10024);
+
+        {
+            let mut w = Writer::new(&mut buf);
+            assert!(w.next().is_ok());
+            let b2: [u8; 40000] = [3; 40000];
+            assert!(w.write(&b2).is_ok());
             assert!(w.flush().is_ok());
         }
         assert_eq!(buf.len(), 50038); // 50038 = 10024 + 2*7 + 40000
