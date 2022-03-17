@@ -23,10 +23,9 @@
 
 use byteorder::{ByteOrder, LittleEndian};
 use crc::{Crc, CRC_32_ISCSI};
-use std::boxed::Box;
 use std::io;
 
-pub const HEADER_SIZE: usize = 7;
+const HEADER_SIZE: usize = 7;
 const BLOCK_SIZE: usize = 32 * 1024;
 
 const FULL_CHUNK_TYPE: u8 = 1;
@@ -36,11 +35,21 @@ const LAST_CHUNK_TYPE: u8 = 4;
 
 const CASTAGNOLI: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
 
-pub struct Writer {
-    w: Box<dyn io::Write>,
+pub struct Writer<'a> {
+    w: &'a mut (dyn io::Write),
 
+    // buf[i:j] is the bytes that will become the current chunk.
+    // The low bound, i, includes the chunk header.
     i: usize,
     j: usize,
+
+    // seq is the sequence number of the current journal.
+    seq: i32,
+    // seq current
+    cur_seq: i32,
+
+    // pending is whether a chunk is buffered but not yet written.
+    pending: bool,
 
     // buf[:written] has already been written to w.
     // written is zero unless Flush has been called.
@@ -52,22 +61,50 @@ pub struct Writer {
     first: bool,
 }
 
-impl Writer {
-    pub fn new(write: Box<dyn io::Write>) -> Self {
+impl<'a> Writer<'a> {
+    pub fn new(write: &'a mut dyn io::Write) -> Self {
         Self {
             w: write,
             i: 0,
             j: 0,
+            seq: 0,
+            cur_seq: 0,
+            pending: false,
             written: 0,
             buf: [0; BLOCK_SIZE],
             first: false,
         }
     }
 
-    pub fn next(&self) -> Result<impl io::Write, JournalError> {}
+    // next journal
+    // The writer stale after the next Close, Flush or Next call,
+    // and should no longer be used.
+    pub fn next(&mut self) -> io::Result<()> {
+        self.seq += 1;
+
+        if self.pending {
+            self.fill_header(true);
+        }
+        self.i = self.j;
+        self.j = self.j + HEADER_SIZE;
+
+        // Check if there is room in the block for the header.
+        if self.j > BLOCK_SIZE {
+            // Fill in the rest of the block with zeroes.
+            for k in self.i..BLOCK_SIZE {
+                self.buf[k] = 0;
+            }
+            self.write_block()?
+        }
+
+        self.first = true;
+        self.pending = true;
+        self.cur_seq = self.seq;
+        Ok(())
+    }
 
     // fillHeader fills in the header for the pending chunk.
-    fn fillHeader(&mut self, last: bool) {
+    fn fill_header(&mut self, last: bool) {
         if self.i + HEADER_SIZE > self.j || self.j > BLOCK_SIZE {
             panic!("leveldb/journal: bad writer state")
         }
@@ -99,42 +136,120 @@ impl Writer {
 
     // writeBlock writes the buffered block to the underlying writer, and reserves
     // space for the next chunk's header.
-    fn writeBlock(&mut self) -> Result<(), JournalError> {
+    fn write_block(&mut self) -> io::Result<()> {
         if self.written + 1 == BLOCK_SIZE {
             panic!("no bytes to written")
         }
 
-        let n = self.w.write(&self.buf[self.written..])?;
-
-        if n != BLOCK_SIZE - self.written {
-            return Err(JournalError::WriteError(String::from(
-                "not finish writting block",
-            )));
-        }
+        self.w.write_all(&self.buf[self.written..])?;
 
         self.i = 0;
         self.j = HEADER_SIZE;
         self.written = 0;
         Ok(())
     }
-}
 
-#[derive(Debug)]
-pub enum JournalError {
-    WriteError(String),
-}
-
-impl From<io::Error> for JournalError {
-    fn from(error: io::Error) -> Self {
-        JournalError::WriteError(error.to_string())
+    // flush the current journal, writes to the underlying writer.
+    pub fn flush(&mut self) -> io::Result<()> {
+        self.seq += 1;
+        self.write_pending()?;
+        self.w.flush()?;
+        Ok(())
     }
-}
 
-/* impl fmt::Display for JournalError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            JournalError::WriteError(s) => write!(f, "journal write error {}", s),
-            JournalError::ReadError(s) => write!(f, "journal read error {}", s),
+    // finishes the current journal and writes the buffer to the
+    // underlying writer.
+    fn write_pending(&mut self) -> io::Result<()> {
+        if self.pending {
+            self.fill_header(true);
+            self.pending = false;
         }
+
+        self.w.write_all(&self.buf[self.written..self.j])?;
+        self.written = self.j;
+        Ok(())
     }
-} */
+
+    // write all buf
+    pub fn write(&mut self, buf: &[u8]) -> io::Result<()> {
+        if self.cur_seq != self.seq || self.seq == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "new or staled writer, call next first",
+            ));
+        }
+
+        let mut p = buf;
+        while !p.is_empty() {
+            // write a block, if it is full.
+            if self.j == BLOCK_SIZE {
+                self.fill_header(false);
+                self.write_block()?;
+                self.first = false;
+            }
+            // Copy bytes into the buffer.
+            let mut n = p.len();
+            if p.len() > BLOCK_SIZE - self.j {
+                n = BLOCK_SIZE - self.j;
+            }
+            self.buf[self.j..self.j + n].copy_from_slice(&p[..n]);
+            self.j += n;
+            p = &p[n..];
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::journal::Writer;
+
+    #[test]
+    fn test_flush() {
+        let mut buf: Vec<u8> = Vec::new();
+
+        {
+            let mut w = Writer::new(&mut buf);
+
+            assert!(w.next().is_ok());
+            let b0: [u8; 1] = [0];
+            assert!(w.write(&b0).is_ok());
+
+            assert!(w.next().is_ok());
+            let b1: [u8; 2] = [1, 1];
+            assert!(w.write(&b1).is_ok());
+
+            assert!(w.flush().is_ok());
+        }
+        assert_eq!(buf.len(), 17); // 2*7 + 1 + 2
+
+        {
+            let mut w = Writer::new(&mut buf);
+            assert!(w.next().is_ok());
+            let b2: [u8; 1000] = [2; 1000];
+            assert!(w.write(&b2).is_ok());
+        }
+        assert_eq!(buf.len(), 17); // not flush to buf yet
+
+        {
+            let mut w = Writer::new(&mut buf);
+            assert!(w.next().is_ok());
+            let b2: [u8; 10000] = [2; 10000];
+            assert!(w.write(&b2).is_ok());
+            assert!(w.flush().is_ok());
+        }
+        assert_eq!(buf.len(), 10024);
+
+        // Do a bigger write, one that completes the current block.
+        // We should now have 32768 bytes (a complete block), without
+        // an explicit flush.
+        {
+            let mut w = Writer::new(&mut buf);
+            assert!(w.next().is_ok());
+            let b2: [u8; 40000] = [3; 40000];
+            assert!(w.write(&b2).is_ok());
+            assert!(w.flush().is_ok());
+        }
+        assert_eq!(buf.len(), 50038); // 50038 = 10024 + 2*7 + 40000
+    }
+}
