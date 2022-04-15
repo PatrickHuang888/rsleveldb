@@ -3,7 +3,6 @@ use std;
 #[derive(Debug)]
 pub enum DbError {
     IoError(String),
-    NotFoundError,
 }
 
 impl From<std::io::Error> for DbError {

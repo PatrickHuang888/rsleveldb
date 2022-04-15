@@ -1,6 +1,4 @@
 use crate::errors;
-use rand::prelude::*;
-use std::borrow::BorrowMut;
 use std::cmp;
 use std::io::Write;
 use std::sync::Arc;
@@ -16,40 +14,39 @@ const N_NEXT: usize = 4;
 pub type Key = Vec<u8>;
 pub type Value = Vec<u8>;
 
-pub struct MemDb {
-    inner: Arc<RwLock<SkipList>>,
+pub struct MemDb<'a> {
+    inner: Arc<RwLock<SkipList<'a>>>,
 }
 
-impl MemDb {
-    pub fn new() -> Self {
-        let cmp: BytesComparer = Default::default();
+impl<'a> MemDb<'a> {
+    pub fn new(cmp: &'a dyn Comparer) -> Self {
         Self {
-            inner: Arc::new(RwLock::new(SkipList::new(Box::new(cmp)))),
+            inner: Arc::new(RwLock::new(SkipList::new(cmp))),
         }
     }
 
-    pub fn put(&mut self, key: Key, value: Value) -> errors::Result<()> {
+    pub fn put(&mut self, key: &Key, value: &Value) -> errors::Result<()> {
         let mut db = self.inner.write().unwrap();
-        db.put(&key, &value)
+        db.put(key, value)
     }
 
-    pub fn delete(&mut self, key: Key) -> errors::Result<()> {
+    pub fn delete(&mut self, key: &Key) -> Result<(), String> {
         let mut db = self.inner.write().unwrap();
-        db.delete(&key)
+        db.delete(key)
     }
 
     // It is safe to modify the contents of the argument after Get returns.
-    pub fn get(&self, key: Key) -> Option<Value> {
+    pub fn get(&self, key: &Key) -> Option<Value> {
         let db = self.inner.read().unwrap();
-        match db.get(&key) {
+        match db.get(key) {
             None => None,
             Some(v) => Some(v.to_vec()),
         }
     }
 
-    pub fn contains(&self, key: Key) -> bool {
+    pub fn contains(&self, key: &Key) -> bool {
         let db = self.inner.read().unwrap();
-        let (_, exact) = db.find_ge(&key, None);
+        let (_, exact) = db.find_ge(key, None);
         exact
     }
 
@@ -75,9 +72,14 @@ impl MemDb {
         let db = self.inner.read().unwrap();
         db.size()
     }
+
+    pub fn len(&self) -> usize {
+        let db = self.inner.read().unwrap();
+        db.len()
+    }
 }
 
-struct SkipList {
+struct SkipList<'a> {
     kv_data: Vec<u8>,
 
     // Node data:
@@ -91,7 +93,7 @@ struct SkipList {
     //prev_node: [usize; MAX_HEIGHT],
     max_height: usize,
 
-    cmp: Box<dyn Comparer>,
+    cmp: &'a dyn Comparer,
 
     kv_size: usize,
 
@@ -106,12 +108,12 @@ pub trait Comparer {
     fn compare(&self, a: &[u8], b: &[u8]) -> cmp::Ordering;
 }
 
-impl SkipList {
-    fn new(cmp: Box<dyn Comparer>) -> Self {
+impl<'a> SkipList<'a> {
+    fn new(cmp: &'a dyn Comparer) -> Self {
         Self {
             kv_data: Vec::new(),
-            node_data: Vec::new(),
-            max_height: 0,
+            node_data: vec![0; 4 + MAX_HEIGHT],
+            max_height: 1,
             cmp: cmp,
             kv_size: 0,
             n: 0,
@@ -213,7 +215,7 @@ impl SkipList {
                     .compare(&self.kv_data[o..o + self.node_data[next + N_KEY]], key);
             }
 
-            if cmp.is_le() {
+            if cmp.is_lt() {
                 // keep searching
                 node = next;
             } else {
@@ -249,11 +251,11 @@ impl SkipList {
         self.n
     }
 
-    fn delete(&mut self, key: &[u8]) -> errors::Result<()> {
+    fn delete(&mut self, key: &[u8]) -> Result<(), String> {
         let mut prevs: [usize; MAX_HEIGHT] = [0; MAX_HEIGHT];
         let (node, exact) = self.find_ge(key, Some(&mut prevs));
         if !exact {
-            return Err(errors::DbError::NotFoundError);
+            return Err("not found".to_string());
         }
 
         let h = self.node_data[node + N_HEIGHT]; // top height
@@ -281,6 +283,8 @@ impl SkipList {
     }
 }
 
+//type DefaultComparer = BytesComparer;
+
 #[derive(Default)]
 struct BytesComparer {}
 
@@ -293,5 +297,358 @@ impl Comparer for BytesComparer {
             }
         }
         cmp::Ordering::Equal
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cmp::Ordering;
+    use std::vec;
+
+    use rand::prelude::ThreadRng;
+    use rand::{thread_rng, Rng};
+
+    use crate::memdb::Value;
+    use crate::memdb::{Key, SkipList};
+
+    use super::BytesComparer;
+    use super::Comparer;
+    use super::MemDb;
+
+    #[derive(Clone, Copy)]
+    enum DbAct {
+        Put,
+        None,
+        Delete,
+        DeleteNa,
+        Overwrite,
+    }
+
+    struct DbTesting<'a> {
+        //cmp: &'a dyn Comparer,
+        deleted: KeyValue<'a>,
+        present: KeyValue<'a>,
+
+        act: DbAct,
+        last_act: DbAct,
+
+        act_key: Key,
+        last_act_key: Key,
+
+        db: MemDb<'a>,
+
+        rng: ThreadRng,
+
+        post:fn(&DbTesting),
+    }
+
+    struct KeyValueEntry {
+        key: Key,
+        value: Value,
+    }
+
+    struct KeyValue<'a> {
+        entries: Vec<KeyValueEntry>,
+        n_bytes: usize,
+
+        cmp: &'a dyn Comparer,
+    }
+
+    impl<'a> KeyValue<'a> {
+        fn new(cmp: &'a dyn Comparer) -> Self {
+            KeyValue {
+                entries: Vec::new(),
+                n_bytes: 0,
+                cmp: cmp,
+            }
+        }
+
+        fn len(&self) -> usize {
+            self.entries.len()
+        }
+
+        fn size(&self) -> usize {
+            self.n_bytes
+        }
+
+        fn key_at(&self, i: usize) -> Key {
+            self.entries[i].key.clone()
+        }
+
+        fn index_at(&self, i: usize) -> (Key, Value) {
+            (self.entries[i].key.clone(), self.entries[i].value.clone())
+        }
+
+        fn value_at(&self, i: usize) -> Value {
+            self.entries[i].value.clone()
+        }
+
+        fn search(&self, key: &Key) -> Result<usize, usize> {
+            self.entries
+                .binary_search_by(|entry| self.cmp.compare(&entry.key, &key))
+        }
+
+        /* fn get(&self, key:Key) -> Option<usize> {
+            self.search(key)
+        } */
+
+        fn delete_index(&mut self, i: usize) -> Option<Value> {
+            if i < self.len() {
+                self.n_bytes -= self.key_at(i).len() + self.value_at(i).len();
+                return Some(self.entries.remove(i).value);
+            }
+            None
+        }
+
+        fn delete(&mut self, key: &Key) -> Option<Value> {
+            match self.search(&key) {
+                Err(_) => None,
+                Ok(i) => self.delete_index(i),
+            }
+        }
+
+        // insert return true, update return false
+        fn put_u(&mut self, key: &Key, value: &Value) -> bool {
+            match self.search(&key) {
+                Ok(i) => {
+                    self.n_bytes += value.len() - self.value_at(i).len();
+                    self.entries[i].value = value.clone();
+                }
+                Err(i) => {
+                    self.n_bytes += key.len() + value.len();
+                    self.entries.insert(
+                        i,
+                        KeyValueEntry {
+                            key: key.clone(),
+                            value: value.clone(),
+                        },
+                    );
+                    return true;
+                }
+            }
+            false
+        }
+
+        fn append(&mut self, key: &Key, value: &Value) {
+            let n = self.entries.len();
+            if n > 0 && self.cmp.compare(key, &self.entries[n - 1].key).is_le() {
+                panic!("append, keys not in increasing order");
+            }
+            self.entries.push(KeyValueEntry {
+                key: key.clone(),
+                value: value.clone(),
+            });
+            self.n_bytes += key.len() + value.len();
+        }
+    }
+
+    impl<'a> DbTesting<'a> {
+        fn set_act(&mut self, act: DbAct, key: &Key) {
+            self.last_act = self.act;
+            self.act = act;
+            self.last_act_key = self.act_key.clone();
+            self.act_key = key.clone();
+        }
+
+        /* fn delete(&mut self, key: &Key) {
+            match self.present.delete(key) {
+                None => self.set_act(DbAct::DeleteNa, &key),
+                Some(v) => {
+                    self.set_act(DbAct::Delete, &key);
+                    self.deleted.put_u(key, &v);
+                }
+            }
+
+            self.do_delete(key);
+        } */
+
+        fn do_delete(&mut self, key: &Key) {
+            assert!(self.db.delete(key).is_ok());
+            assert_eq!(self.db.get(key), None);
+        }
+
+        fn put(&mut self, key: &Key, value: &Value) {
+            if self.present.put_u(key, value) {
+                self.set_act(DbAct::Put, key);
+            } else {
+                self.set_act(DbAct::Overwrite, key);
+            }
+            self.deleted.delete(key);
+
+            assert!(self.db.put(key, value).is_ok());
+
+            self.test_present_kv(key, value);
+
+            (self.post)(self);
+        }
+
+        fn delete(&mut self, key:&Key) {
+            match self.present.delete(key) {
+                Some(v) => {
+                    self.set_act(DbAct::Delete, key);
+                    self.deleted.put_u(key, &v);
+                },
+                None => self.set_act(DbAct::DeleteNa, key),
+            }
+
+            assert!(self.db.delete(key).is_ok());
+
+            self.test_deleted_key(key);
+
+            (self.post)(self);
+        }
+
+        fn test_deleted_key(&self, key:&Key) {
+            match self.db.get(key) {
+                None => {},
+                Some(_) => panic!("key should be deleted!"),
+            }
+        }
+
+        fn test_present_kv(&self, key: &Key, value: &Value) {
+            match self.db.get(key) {
+                None => panic!("should present key, value"),
+                Some(v) => assert_eq!(v[..], value[..]),
+            }
+        }
+
+        fn put_random(&mut self) {
+            if self.deleted.len() > 0 {
+                let i = self.rng.gen_range(0..self.deleted.len());
+                let (key, value) = self.deleted.index_at(i);
+                self.put(&key, &value);
+            }
+        }
+
+        fn delete_random(&mut self) {
+            if self.present.len() >  0 {
+                let i = self.rng.gen_range(0..self.present.len());
+                let key= self.present.key_at(i);
+                self.delete(&key);
+            }
+        }
+
+        fn random_act(&mut self, round :usize) {
+            for _ in 0..round {
+                let r:bool= self.rng.gen();
+                if r {
+                    self.put_random();
+                }else {
+                    self.delete_random();
+                }
+            }
+        }
+
+        fn do_testing(&mut self) {
+            self.delete_random();
+            self.put_random();
+            self.delete_random();
+            self.delete_random(); 
+
+            for _ in 0..self.deleted.len()/2 {
+                self.put_random();
+            }
+
+            self.random_act((self.deleted.len()+self.present.len())*10);
+        }
+
+    }
+
+    const KEY_MAP: &[u8] = "012345678ABCDEFGHIJKLMNOPQRSTUVWXYabcdefghijklmnopqrstuvwxy".as_bytes();
+
+    fn generate_keyvalue(
+        cmp: &dyn Comparer,
+        n: usize,
+        min_len: usize,
+        max_len: usize,
+        v_min_len: usize,
+        v_max_len: usize,
+    ) -> KeyValue {
+        //let default_cmp: BytesComparer = Default::default();
+        let mut kv = KeyValue::new(cmp);
+
+        let mut rng = thread_rng();
+
+        for i in 0..n {
+            let key_size = rng.gen_range(min_len..max_len) + min_len;
+
+            loop {
+                let mut key = vec![0; key_size];
+                for j in 0..key_size {
+                    let x = rng.gen_range(0..KEY_MAP.len());
+                    key[j] = KEY_MAP[x]
+                }
+
+                let mut vm: usize = 0;
+                if v_min_len == v_max_len {
+                    vm = v_min_len
+                } else {
+                    vm = rng.gen_range(v_min_len..v_max_len) + v_min_len;
+                }
+                let mut value: Vec<u8> = Vec::with_capacity(vm);
+                let s = format!("v{}", i);
+                let bs = s.as_bytes();
+                for j in 0..bs.len() {
+                    value.push(bs[j])
+                }
+                for _ in value.len()..vm {
+                    value.push(b'x');
+                }
+
+                if kv.put_u(&key, &value) {
+                    break;
+                }
+            }
+        }
+
+        kv
+    }
+
+    #[test]
+    fn test_write() {
+        let default_cmp: BytesComparer = Default::default();
+        let memdb = MemDb::new(&default_cmp);
+        let deleted = generate_keyvalue(&default_cmp, 1000, 1, 30, 5, 5);
+
+        let mut db_testing = DbTesting {
+            db: memdb,
+            deleted: deleted,
+            present: KeyValue::new(&default_cmp),
+            act: DbAct::None,
+            last_act: DbAct::None,
+            act_key: vec![],
+            last_act_key: vec![],
+            rng: thread_rng(),
+            post: write_post,
+        };
+
+        fn write_post(testing: &DbTesting) {
+            assert_eq!(testing.db.len(), testing.present.len());
+            assert_eq!(testing.db.size(), testing.present.size());
+
+            match testing.act {
+                DbAct::Put => assert!(testing.db.contains(&testing.act_key)),
+                DbAct::Overwrite => assert!(testing.db.contains(&testing.act_key)),
+                _ => assert!(!testing.db.contains(&testing.act_key)),
+            }
+        }
+
+        db_testing.do_testing();
+    }
+
+    #[test]
+    fn test_basic() {
+        let default_cmp: BytesComparer = Default::default();
+        let key1 = vec![11, 22, 33];
+        let value1 = vec![44, 55, 66];
+        let key1_1 = key1.clone();
+        let cmp = default_cmp.compare(&key1, &key1_1);
+        assert_eq!(cmp, Ordering::Equal);
+
+        let mut db = SkipList::new(&default_cmp);
+        assert!(db.put(&key1, &value1).is_ok());
+        let v = db.get(&key1).unwrap();
+        assert_eq!(v, value1);
+        assert!(db.delete(&key1).is_ok());
     }
 }
