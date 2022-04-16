@@ -77,6 +77,62 @@ impl<'a> MemDb<'a> {
         let db = self.inner.read().unwrap();
         db.len()
     }
+
+    pub fn iter(&self) -> MemDbIter<'a> {
+        MemDbIter::new(self.inner.clone())
+    }
+}
+
+pub struct MemDbIter<'a> {
+    node:usize,
+    inner: Arc<RwLock<SkipList<'a>>>
+}
+
+impl<'a> MemDbIter<'a> {
+    fn new(inner: Arc<RwLock<SkipList<'a>>>) ->Self {
+        MemDbIter { node: 0, inner:inner }
+    }
+}
+
+impl<'a> Iterator for MemDbIter<'a> {
+    type Item = (Key, Value);
+
+    fn next(&mut self) -> Option<(Key, Value)> {
+        let db = self.inner.read().unwrap();
+
+        self.node= db.node_data[self.node+N_NEXT];
+        if self.node!=0 {
+            let o= db.node_data[self.node];
+            let k = db.node_data[self.node+N_KEY];
+            let key= &db.kv_data[o..o+k];
+            let value= &db.kv_data[k..k+db.node_data[self.node+N_VAL]];
+            return Some((key.to_vec(), value.to_vec()))
+        }
+        None
+    }
+}
+
+struct SkipListIter<'a> {
+    node:usize,
+    db: &'a SkipList<'a>,
+}
+
+impl<'a> SkipListIter<'a>{
+    fn new(db:&'a SkipList<'a>) ->Self {
+        SkipListIter { node: 0, db: db }
+    }
+
+    fn next(&mut self) -> Option<(Key, Value)> {
+        self.node= self.db.node_data[self.node+N_NEXT];
+        if self.node!=0 {
+            let o= self.db.node_data[self.node];
+            let k = self.db.node_data[self.node+N_KEY];
+            let key= &self.db.kv_data[o..o+k];
+            let value= &self.db.kv_data[k..k+self.db.node_data[self.node+N_VAL]];
+            return Some((key.to_vec(), value.to_vec()))
+        }
+        None
+    }
 }
 
 struct SkipList<'a> {
@@ -539,6 +595,10 @@ mod tests {
             }
         }
 
+        fn iter_testing(&self) {
+            
+        }
+
         fn do_testing(&mut self) {
             self.delete_random();
             self.put_random();
@@ -550,6 +610,8 @@ mod tests {
             }
 
             self.random_act((self.deleted.len()+self.present.len())*10);
+
+            self.iter_testing();
         }
 
     }
