@@ -1,3 +1,3 @@
 mod errors;
 mod journal;
-mod memdb;
+pub mod memdb;

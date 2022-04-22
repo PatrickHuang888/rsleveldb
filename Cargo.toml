@@ -9,3 +9,11 @@ edition = "2021"
 byteorder = "1.4.3"
 crc = "2.1.0"
 rand = "0.8.5"
+
+
+[dev-dependencies]
+criterion = "0.3"
+
+[[bench]]
+name = "memdb"
+harness = false

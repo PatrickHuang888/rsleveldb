@@ -366,7 +366,7 @@ impl<'a> SkipList<'a> {
 //type DefaultComparer = BytesComparer;
 
 #[derive(Default)]
-struct BytesComparer {}
+pub struct BytesComparer {}
 
 impl Comparer for BytesComparer {
     fn compare(&self, a: &[u8], b: &[u8]) -> cmp::Ordering {
