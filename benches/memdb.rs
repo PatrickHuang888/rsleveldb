@@ -93,7 +93,7 @@ fn get(db: &MemDb, keys: &Vec<Vec<u8>>) {
 }
 
 fn get_random(db: &MemDb, rng: &mut ThreadRng, keys: &Vec<Vec<u8>>) {
-    // goleveldb random get testcase has random generation code in it, 
+    // goleveldb random get testcase has random generation code in it,
     for _ in 0..1_000_000 {
         let r = rng.gen_range(0..1_000_000); // fix: random gen should not be here
         db.get(&keys[r]);

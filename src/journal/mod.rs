@@ -33,7 +33,7 @@ const FIRST_CHUNK_TYPE: u8 = 2;
 const MIDDLE_CHUNK_TYPE: u8 = 3;
 const LAST_CHUNK_TYPE: u8 = 4;
 
-const CASTAGNOLI: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
+pub const CASTAGNOLI: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
 
 pub struct Writer<'a> {
     w: &'a mut (dyn io::Write),
