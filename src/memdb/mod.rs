@@ -175,14 +175,6 @@ struct SkipList<'a> {
     n: usize,
 }
 
-pub trait Comparer {
-    // Compare returns -1, 0, or +1 depending on whether a is 'less than',
-    // 'equal to' or 'greater than' b. The two arguments can only be 'equal'
-    // if their contents are exactly equal. Furthermore, the empty slice
-    // must be 'less than' any non-empty slice.
-    fn compare(&self, a: &[u8], b: &[u8]) -> cmp::Ordering;
-}
-
 impl<'a> SkipList<'a> {
     fn new(cmp: &'a dyn Comparer) -> Self {
         Self {
@@ -363,6 +355,33 @@ impl<'a> SkipList<'a> {
     }
 }
 
+pub trait Comparer {
+    // Compare returns -1, 0, or +1 depending on whether a is 'less than',
+    // 'equal to' or 'greater than' b. The two arguments can only be 'equal'
+    // if their contents are exactly equal. Furthermore, the empty slice
+    // must be 'less than' any non-empty slice.
+    fn compare(&self, a: &[u8], b: &[u8]) -> cmp::Ordering;
+
+    // Bellow are advanced functions used to reduce the space requirements
+    // for internal data structures such as index blocks.
+
+    // Separator appends a sequence of bytes x to dst such that a <= x && x < b,
+    // where 'less than' is consistent with Compare. An implementation should
+    // return nil if x equal to a.
+    //
+    // Either contents of a or b should not by any means modified. Doing so
+    // may cause corruption on the internal state.
+    fn separator(&self, a: &[u8], b: &[u8]) -> Vec<u8>;
+
+    // Successor appends a sequence of bytes x to dst such that x >= b, where
+    // 'less than' is consistent with Compare. An implementation should return
+    // nil if x equal to b.
+    //
+    // Contents of b should not by any means modified. Doing so may cause
+    // corruption on the internal state.
+    fn successor(&self, b: &[u8]) -> Vec<u8>;
+}
+
 //type DefaultComparer = BytesComparer;
 
 #[derive(Default)]
@@ -371,6 +390,40 @@ pub struct BytesComparer {}
 impl Comparer for BytesComparer {
     fn compare(&self, a: &[u8], b: &[u8]) -> cmp::Ordering {
         a.iter().cmp(b.iter())
+    }
+
+    fn separator(&self, a: &[u8], b: &[u8]) -> Vec<u8> {
+        // should a < b
+        let mut n = a.len();
+        if n > b.len() {
+            n = b.len()
+        }
+        let mut i = 0;
+        while i < n && a[i] == b[i] {
+            i += 1;
+        }
+        if i < n {
+            let mut r = Vec::new();
+            let c = a[i];
+            if c < 0xff && c + 1 < b[i] {
+                let _ = r.write_all(&a[..i + 1]);
+                r[i] += 1;
+                return r;
+            }
+        }
+        a.clone().to_vec()
+    }
+
+    fn successor(&self, b: &[u8]) -> Vec<u8> {
+        for i in 0..b.len() {
+            if b[i] != 0xff {
+                let mut r = Vec::new();
+                let _ = r.write_all(&b[..i + 1]);
+                r[i] += 1;
+                return r;
+            }
+        }
+        b.clone().to_vec()
     }
 }
 
