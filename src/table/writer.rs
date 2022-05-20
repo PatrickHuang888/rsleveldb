@@ -264,9 +264,9 @@ struct BlockHandle {
 
 impl BlockHandle {
     fn encode(&self) -> Vec<u8> {
-        let mut v = vec![0; 20];
-        put_varint64(&mut v[0..10], self.offset as u64);
-        put_varint64(&mut v[10..20], self.length as u64);
+        let mut v = Vec::with_capacity(20);
+        super::put_uvarint(&mut v, self.offset as u64);
+        super::put_uvarint(&mut v, self.length as u64);
         v
     }
 
@@ -538,17 +538,4 @@ fn put_uvarint(buf: &mut Vec<u8>, v: u64) {
         x >>= 7;
     }
     buf.push(x as u8);
-}
-
-fn put_varint64(dst: &mut [u8], v: u64) {
-    assert_eq!(dst.len(), 10);
-    let mut x = v;
-    let mut i = 0;
-    while x >= 0x80 {
-        // large than 0b1000_0000
-        dst[i] = x as u8 | 0x80; // continuation
-        x >>= 7;
-        i += 1;
-    }
-    dst[i + 1] = x as u8;
 }

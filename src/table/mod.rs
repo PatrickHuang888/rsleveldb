@@ -152,6 +152,10 @@ NOTE: All fixed-length integer are little-endian.
 //     num_restarts: uint32
 // restarts[i] contains the offset within the block of the ith restart point.
 
+use crate::errors::DbError;
+use crate::memdb::{Key, Value};
+
+mod reader;
 mod writer;
 
 const BLOCK_TRAILER_LEN: usize = 5;
@@ -170,3 +174,63 @@ const FOOTER_LEN: usize = 48;
 //    echo http://code.google.com/p/leveldb/ | sha1sum
 // and taking the leading 64 bits.
 const MAGIC: u64 = 0xdb4775248b80fb57_u64;
+
+pub fn put_uvarint(dst: &mut Vec<u8>, v: u64) {
+    let mut x = v;
+    //let mut i = 0;
+    while x >= 0x80 {
+        // large than 0b1000_0000
+        dst.push(x as u8 | 0x80); // continuation
+        x >>= 7;
+        //i += 1;
+    }
+    dst.push(x as u8);
+    //i+=1;
+    //i
+}
+
+const MAX_VARINT_LEN64: usize = 10;
+
+// copy goland binary.Uvarint()
+// Uvarint decodes a uint64 from buf and returns that value and the
+// number of bytes read (> 0). If an error occurred, the value is 0
+// and the number of bytes n is <= 0 meaning:
+//
+// 	n == 0: buf too small
+// 	n  < 0: value larger than 64 bits (overflow)
+// 	        and -n is the number of bytes read
+//
+pub fn get_uvarint(buf: &[u8]) -> (u64, isize) {
+    let mut x: u64 = 0;
+    let mut s: usize = 0;
+
+    for i in 0..buf.len() {
+        if i == MAX_VARINT_LEN64 {
+            return (0, -(i as isize + 1)); // overflow
+        }
+
+        let b = buf[i];
+        if b < 0x80 {
+            if i == MAX_VARINT_LEN64 - 1 && b > 1 {
+                return (0, -(i as isize + 1)); // overflow
+            }
+            return (x | (b as u64) << s, i as isize + 1);
+        }
+        x |= ((b & 0x7f) as u64) << s; //0b0111_1111
+        s += 7;
+    }
+    (0, 0)
+}
+
+type Result<E> = std::result::Result<E, DbError>;
+pub trait Iterator{
+    fn next(&mut self) -> Result<()>;
+    fn prev(&mut self) -> Result<()>;
+    fn seek(&mut self, key: &Key) -> Result<()>;
+
+    fn key(&self) -> &Key;
+    fn value(&self) -> &Value;
+
+    fn valid(&self) -> Result<bool>;
+}
+
