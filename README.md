@@ -1,6 +1,7 @@
 # rsleveldb
 
-rust leveldb from [goleveldb](https://github.com/syndtr/goleveldb)
+rust version of  [leveldb](https://github.com/google/leveldb)  
+some idea from [goleveldb](https://github.com/syndtr/goleveldb)
 
 ## benchmark
 ### memdb
