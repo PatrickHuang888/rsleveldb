@@ -6,7 +6,7 @@ use crate::errors::DbError;
 use crate::journal::CASTAGNOLI;
 use crate::memdb::{Comparer, Key, Value};
 
-use super::{BLOCK_TRAILER_LEN, FOOTER_LEN};
+use super::{BLOCK_TRAILER_LEN, FOOTER_LEN, TableOption};
 use super::{BLOCK_TYPE_NO_COMPRESSION, DEFAULT_BLOCK_SIZE};
 use crate::table::MAGIC;
 
@@ -44,18 +44,20 @@ struct Writer<'a, 'b, 'c> {
     compressed_buf: Vec<u8>,
 
     last_key: Key,
+
+    opt: TableOption,
 }
 
 impl<'a, 'b, 'c> Writer<'a, 'b, 'c> {
-    fn new(w: &'a mut dyn Write, cmp: &'b dyn Comparer) -> Self {
+    fn new(w: &'a mut dyn Write, cmp: &'b dyn Comparer, opt:TableOption) -> Self {
         Writer {
             closed: false,
             status: None,
             writer: w,
             cmp: cmp,
             block_size: DEFAULT_BLOCK_SIZE,
-            data_block: BlockWriter::new(),
-            index_block: BlockWriter::new(),
+            data_block: BlockWriter::new(opt.block_restart_interval),
+            index_block: BlockWriter::new(opt.block_restart_interval),
             filter_block: None,
             pending_index_entry: false,
             pending_handle: BlockHandle {
@@ -67,6 +69,8 @@ impl<'a, 'b, 'c> Writer<'a, 'b, 'c> {
             compression: CompressionType::NoCompression,
             compressed_buf: Vec::new(),
             last_key: Vec::new(),
+
+            opt:opt,
         }
     }
 
@@ -180,7 +184,7 @@ impl<'a, 'b, 'c> Writer<'a, 'b, 'c> {
         }
 
         // todo: write metaindex block
-        let mut meta_index_block: BlockWriter = BlockWriter::new();
+        let mut meta_index_block: BlockWriter = BlockWriter::new(self.opt.block_restart_interval);
         match &self.filter_block {
             None => {}
             Some(fb) => {
@@ -284,142 +288,6 @@ impl BlockHandle {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum CompressionType {
-    SnappyCompression,
-    NoCompression,
-}
-
-struct BlockWriter {
-    buf: Vec<u8>,
-    compressed_buf: Vec<u8>,
-
-    counter: usize,
-    restart_interval: usize,
-    restarts: Vec<u32>,
-
-    last_key: Key,
-
-    finished: bool,
-}
-
-impl BlockWriter {
-    fn new() -> Self {
-        let mut r = Vec::new();
-        r.push(0);
-        Self {
-            buf: Vec::new(),
-            compressed_buf: Vec::new(),
-            counter: 0,
-            restart_interval: 0,
-            restarts: r,
-            last_key: Vec::new(),
-            finished: false,
-        }
-    }
-
-    fn append(&mut self, key: &Key, value: &Value) {
-        assert!(!self.finished);
-        assert!(self.counter <= self.restart_interval);
-        // todo: key ascend verificaton
-
-        let mut shared: usize = 0;
-
-        if self.counter < self.restart_interval {
-            self.restarts.push(self.buf.len() as u32);
-            self.counter = 0;
-        } else {
-            shared = share_prefix_len(&self.last_key, key);
-        }
-
-        // Add "<shared><non_shared><value_size>" to buffer
-        put_uvarint(&mut self.buf, shared as u64);
-        put_uvarint(&mut self.buf, (key.len() - shared) as u64);
-        put_uvarint(&mut self.buf, value.len() as u64);
-
-        // Add string delta to buffer_ followed by value
-        let _ = self.buf.write_all(&key[shared..]);
-        let _ = self.buf.write_all(value);
-
-        // refactor: no need rewrite all, just write no_shared
-        self.last_key.clear();
-        let _ = self.last_key.write_all(key);
-
-        self.counter += 1;
-    }
-
-    fn finish(&mut self) {
-        for x in &self.restarts {
-            let _ = self.buf.write_u32::<LittleEndian>(*x);
-        }
-        let _ = self
-            .buf
-            .write_u32::<LittleEndian>(self.restarts.len() as u32);
-        self.finished = true;
-    }
-
-    fn is_empty(&self) -> bool {
-        self.buf.is_empty()
-    }
-
-    fn bytes_len(&self) -> usize {
-        self.buf.len() + 4 * self.restarts.len() + 4 // block trailer every restart has 4 bytes, and 4 bytes restart points len.
-    }
-
-    fn reset(&mut self) {
-        self.buf.clear();
-        self.compressed_buf.clear();
-
-        self.counter = 0;
-        self.restarts.clear();
-        self.restarts.push(0); // First restart point is at offset 0
-
-        self.finished = false;
-        self.last_key.clear();
-    }
-
-    fn write(
-        &mut self,
-        writer: &mut dyn Write,
-        compression: CompressionType,
-    ) -> Result<usize, std::io::Error> {
-        self.finish();
-
-        let mut trailer = [0; BLOCK_TRAILER_LEN];
-        let l;
-
-        match compression {
-            CompressionType::SnappyCompression => {
-                {
-                    let mut w = snap::write::FrameEncoder::new(&mut self.compressed_buf);
-                    w.write_all(&self.buf)?;
-                    w.flush()?;
-                }
-
-                writer.write_all(&self.compressed_buf)?;
-
-                let checksum = CASTAGNOLI.checksum(&self.compressed_buf);
-                LittleEndian::write_u32(&mut trailer[1..], checksum);
-                writer.write_all(&trailer)?;
-                l = self.compressed_buf.len();
-            }
-
-            CompressionType::NoCompression => {
-                writer.write_all(&self.buf)?;
-
-                trailer[0] = BLOCK_TYPE_NO_COMPRESSION;
-                let checksum = CASTAGNOLI.checksum(&self.buf);
-                LittleEndian::write_u32(&mut trailer[1..], checksum);
-                writer.write_all(&trailer)?;
-                l = self.buf.len();
-            }
-        }
-
-        self.reset();
-        Ok(l)
-    }
-}
-
 struct FilterBlock<'c> {
     policy: &'c dyn FilterPolicy,
     num_keys: usize,
@@ -503,39 +371,4 @@ trait FilterPolicy {
     fn create_filter(&self, key: &Vec<Key>, n: usize, buf: &mut Vec<u8>);
 }
 
-fn share_prefix_len(a: &[u8], b: &[u8]) -> usize {
-    let mut n = a.len();
-    if n > b.len() {
-        n = b.len();
-    }
-    let mut i: usize = 0;
-    while i < n && a[i] == b[i] {
-        i += 1;
-    }
-    i
-}
 
-// Copy from golang binary.putUvarint()
-// PutUvarint encodes a uint64 into buf and returns the number of bytes written.
-// If the buffer is too small, PutUvarint will panic.
-// unsigned integers are serialized 7 bits at a time, starting with the
-//   least significant bits
-// - the most significant bit (msb) in each output byte indicates if there
-//   is a continuation byte (msb = 1)
-// Design note:
-// At most 10 bytes are needed for 64-bit values. The encoding could
-// be more dense: a full 64-bit value needs an extra byte just to hold bit 63.
-// Instead, the msb of the previous byte could be used to hold bit 63 since we
-// know there can't be more than 64 bits. This is a trivial improvement and
-// would reduce the maximum encoding length to 9 bytes. However, it breaks the
-// invariant that the msb is always the "continuation bit" and thus makes the
-// format incompatible with a varint encoding for larger numbers (say 128-bit).
-fn put_uvarint(buf: &mut Vec<u8>, v: u64) {
-    let mut x = v;
-    while x >= 0x80 {
-        // large than 0b1000_0000
-        buf.push(x as u8 | 0x80); // continuation
-        x >>= 7;
-    }
-    buf.push(x as u8);
-}

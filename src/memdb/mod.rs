@@ -1,3 +1,6 @@
+use crate::api::Comparer;
+use crate::api::Key;
+use crate::api::Value;
 use crate::errors;
 use std::cmp;
 use std::io::Write;
@@ -10,9 +13,6 @@ const N_KEY: usize = 1;
 const N_VAL: usize = 2;
 const N_HEIGHT: usize = 3;
 const N_NEXT: usize = 4;
-
-pub type Key = Vec<u8>;
-pub type Value = Vec<u8>;
 
 pub struct MemDb<'a> {
     inner: Arc<RwLock<SkipList<'a>>>,
@@ -355,33 +355,6 @@ impl<'a> SkipList<'a> {
     }
 }
 
-pub trait Comparer {
-    // Compare returns -1, 0, or +1 depending on whether a is 'less than',
-    // 'equal to' or 'greater than' b. The two arguments can only be 'equal'
-    // if their contents are exactly equal. Furthermore, the empty slice
-    // must be 'less than' any non-empty slice.
-    fn compare(&self, a: &[u8], b: &[u8]) -> cmp::Ordering;
-
-    // Bellow are advanced functions used to reduce the space requirements
-    // for internal data structures such as index blocks.
-
-    // Separator appends a sequence of bytes x to dst such that a <= x && x < b,
-    // where 'less than' is consistent with Compare. An implementation should
-    // return nil if x equal to a.
-    //
-    // Either contents of a or b should not by any means modified. Doing so
-    // may cause corruption on the internal state.
-    fn separator(&self, a: &[u8], b: &[u8]) -> Vec<u8>;
-
-    // Successor appends a sequence of bytes x to dst such that x >= b, where
-    // 'less than' is consistent with Compare. An implementation should return
-    // nil if x equal to b.
-    //
-    // Contents of b should not by any means modified. Doing so may cause
-    // corruption on the internal state.
-    fn successor(&self, b: &[u8]) -> Vec<u8>;
-}
-
 //type DefaultComparer = BytesComparer;
 
 #[derive(Default)]
@@ -437,6 +410,7 @@ mod tests {
 
     use crate::memdb::Value;
     use crate::memdb::{Key, SkipList};
+    use crate::test::KeyValue;
 
     use super::BytesComparer;
     use super::Comparer;
@@ -467,111 +441,6 @@ mod tests {
         rng: ThreadRng,
 
         post: fn(&DbTesting),
-    }
-
-    struct KeyValueEntry {
-        key: Key,
-        value: Value,
-    }
-
-    struct KeyValue<'a> {
-        entries: Vec<KeyValueEntry>, // entries in ascend order
-        n_bytes: usize,
-
-        cmp: &'a dyn Comparer,
-    }
-
-    impl<'a> KeyValue<'a> {
-        fn new(cmp: &'a dyn Comparer) -> Self {
-            KeyValue {
-                entries: Vec::new(),
-                n_bytes: 0,
-                cmp: cmp,
-            }
-        }
-
-        fn len(&self) -> usize {
-            self.entries.len()
-        }
-
-        fn size(&self) -> usize {
-            self.n_bytes
-        }
-
-        fn key_at(&self, i: usize) -> Key {
-            self.entries[i].key.clone()
-        }
-
-        fn index_at(&self, i: usize) -> (Key, Value) {
-            (self.entries[i].key.clone(), self.entries[i].value.clone())
-        }
-
-        fn value_at(&self, i: usize) -> Value {
-            self.entries[i].value.clone()
-        }
-
-        fn search(&self, key: &Key) -> Result<usize, usize> {
-            self.entries
-                .binary_search_by(|entry| self.cmp.compare(&entry.key, &key))
-        }
-
-        /* fn get(&self, key:Key) -> Option<usize> {
-            self.search(key)
-        } */
-
-        fn delete_index(&mut self, i: usize) -> Option<Value> {
-            if i < self.len() {
-                self.n_bytes -= self.key_at(i).len() + self.value_at(i).len();
-                return Some(self.entries.remove(i).value);
-            }
-            None
-        }
-
-        fn delete(&mut self, key: &Key) -> Option<Value> {
-            match self.search(&key) {
-                Err(_) => None,
-                Ok(i) => self.delete_index(i),
-            }
-        }
-
-        // insert return true, update return false
-        fn put_u(&mut self, key: &Key, value: &Value) -> bool {
-            match self.search(&key) {
-                Ok(i) => {
-                    self.n_bytes += value.len() - self.value_at(i).len();
-                    self.entries[i].value = value.clone();
-                }
-                Err(i) => {
-                    self.n_bytes += key.len() + value.len();
-                    self.entries.insert(
-                        i,
-                        KeyValueEntry {
-                            key: key.clone(),
-                            value: value.clone(),
-                        },
-                    );
-                    return true;
-                }
-            }
-            false
-        }
-
-        fn append(&mut self, key: &Key, value: &Value) {
-            let n = self.entries.len();
-            if n > 0 && self.cmp.compare(key, &self.entries[n - 1].key).is_le() {
-                panic!("append, keys not in increasing order");
-            }
-            self.entries.push(KeyValueEntry {
-                key: key.clone(),
-                value: value.clone(),
-            });
-            self.n_bytes += key.len() + value.len();
-        }
-
-        fn clear(&mut self) {
-            self.entries.clear();
-            self.n_bytes = 0;
-        }
     }
 
     impl<'a> DbTesting<'a> {
@@ -647,7 +516,9 @@ mod tests {
         fn put_random(&mut self) {
             if self.deleted.len() > 0 {
                 let i = self.rng.gen_range(0..self.deleted.len());
-                let (key, value) = self.deleted.index_at(i);
+                let (k, v) = self.deleted.index_at(i);
+                let key = k.clone();
+                let value = v.clone();
                 self.put(&key, &value);
             }
         }
@@ -677,7 +548,7 @@ mod tests {
             let i = self.rng.gen_range(0..kv.len());
             let (key, value) = kv.index_at(i);
             let v = self.db.get(&key).unwrap();
-            assert_eq!(&v, &value);
+            assert_eq!(&v, value);
 
             if i > 0 {
                 let (key1, _) = kv.index_at(i - 1);
@@ -859,11 +730,12 @@ mod tests {
         for i in &indexs {
             let (key, value) = kv.index_at(*i);
             let (k, v) = db.find(&key).unwrap();
-            assert_eq!(&k, &key);
-            assert_eq!(&v, &value);
+            assert_eq!(&k, key);
+            assert_eq!(&v, value);
 
             if *i > 0 {
-                let (mut key1, _) = kv.index_at(i - 1);
+                let (key, _) = kv.index_at(i - 1);
+                let mut key1 = key.clone();
                 key1.append(&mut key.clone());
                 let (k1, v1) = db.find(&key1).unwrap();
                 assert_eq!(k, k1);
