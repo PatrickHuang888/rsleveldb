@@ -1,3 +1,6 @@
+use crate::api::Comparator;
+use crate::api::Key;
+use crate::api::Value;
 use crate::errors;
 use std::cmp;
 use std::io::Write;
@@ -11,15 +14,12 @@ const N_VAL: usize = 2;
 const N_HEIGHT: usize = 3;
 const N_NEXT: usize = 4;
 
-pub type Key = Vec<u8>;
-pub type Value = Vec<u8>;
-
-pub struct MemDb<'a> {
-    inner: Arc<RwLock<SkipList<'a>>>,
+pub struct MemDb<C: Comparator> {
+    inner: Arc<RwLock<SkipList<C>>>,
 }
 
-impl<'a> MemDb<'a> {
-    pub fn new(cmp: &'a dyn Comparer) -> Self {
+impl<C: Comparator> MemDb<C> {
+    pub fn new(cmp: &C) -> Self {
         Self {
             inner: Arc::new(RwLock::new(SkipList::new(cmp))),
         }
@@ -94,18 +94,18 @@ impl<'a> MemDb<'a> {
         db.len()
     }
 
-    pub fn iter(&self) -> MemDbIter<'a> {
+    pub fn iter(&self) -> MemDbIter<C> {
         MemDbIter::new(self.inner.clone())
     }
 }
 
-pub struct MemDbIter<'a> {
+pub struct MemDbIter<C: Comparator> {
     node: usize,
-    inner: Arc<RwLock<SkipList<'a>>>,
+    inner: Arc<RwLock<SkipList<C>>>,
 }
 
-impl<'a> MemDbIter<'a> {
-    fn new(inner: Arc<RwLock<SkipList<'a>>>) -> Self {
+impl<C: Comparator> MemDbIter<C> {
+    fn new(inner: Arc<RwLock<SkipList<C>>>) -> Self {
         MemDbIter {
             node: 0,
             inner: inner,
@@ -113,7 +113,7 @@ impl<'a> MemDbIter<'a> {
     }
 }
 
-impl<'a> Iterator for MemDbIter<'a> {
+impl<C: Comparator> Iterator for MemDbIter<C> {
     type Item = (Key, Value);
 
     fn next(&mut self) -> Option<(Key, Value)> {
@@ -131,13 +131,13 @@ impl<'a> Iterator for MemDbIter<'a> {
     }
 }
 
-struct SkipListIter<'a> {
+struct SkipListIter<'a, C: Comparator> {
     node: usize,
-    db: &'a SkipList<'a>,
+    db: &'a SkipList<C>,
 }
 
-impl<'a> SkipListIter<'a> {
-    fn new(db: &'a SkipList<'a>) -> Self {
+impl<'a, C: Comparator> SkipListIter<'a, C> {
+    fn new(db: &'a SkipList<C>) -> Self {
         SkipListIter { node: 0, db: db }
     }
 
@@ -154,7 +154,7 @@ impl<'a> SkipListIter<'a> {
     }
 }
 
-struct SkipList<'a> {
+struct SkipList<C: Comparator> {
     kv_data: Vec<u8>,
 
     // Node data:
@@ -168,20 +168,20 @@ struct SkipList<'a> {
     //prev_node: [usize; MAX_HEIGHT],
     max_height: usize,
 
-    cmp: &'a dyn Comparer,
+    comparator: C,
 
     kv_size: usize,
 
     n: usize,
 }
 
-impl<'a> SkipList<'a> {
-    fn new(cmp: &'a dyn Comparer) -> Self {
+impl<C: Comparator> SkipList<C> {
+    fn new(cmp: &C) -> Self {
         Self {
             kv_data: Vec::new(),
             node_data: vec![0; 4 + MAX_HEIGHT],
             max_height: 1,
-            cmp: cmp,
+            comparator: cmp.clone(),
             kv_size: 0,
             n: 0,
         }
@@ -278,7 +278,7 @@ impl<'a> SkipList<'a> {
                 // have node at this level
                 let o = self.node_data[next];
                 cmp = self
-                    .cmp
+                    .comparator
                     .compare(&self.kv_data[o..o + self.node_data[next + N_KEY]], key);
             }
 
@@ -355,78 +355,6 @@ impl<'a> SkipList<'a> {
     }
 }
 
-pub trait Comparer {
-    // Compare returns -1, 0, or +1 depending on whether a is 'less than',
-    // 'equal to' or 'greater than' b. The two arguments can only be 'equal'
-    // if their contents are exactly equal. Furthermore, the empty slice
-    // must be 'less than' any non-empty slice.
-    fn compare(&self, a: &[u8], b: &[u8]) -> cmp::Ordering;
-
-    // Bellow are advanced functions used to reduce the space requirements
-    // for internal data structures such as index blocks.
-
-    // Separator appends a sequence of bytes x to dst such that a <= x && x < b,
-    // where 'less than' is consistent with Compare. An implementation should
-    // return nil if x equal to a.
-    //
-    // Either contents of a or b should not by any means modified. Doing so
-    // may cause corruption on the internal state.
-    fn separator(&self, a: &[u8], b: &[u8]) -> Vec<u8>;
-
-    // Successor appends a sequence of bytes x to dst such that x >= b, where
-    // 'less than' is consistent with Compare. An implementation should return
-    // nil if x equal to b.
-    //
-    // Contents of b should not by any means modified. Doing so may cause
-    // corruption on the internal state.
-    fn successor(&self, b: &[u8]) -> Vec<u8>;
-}
-
-//type DefaultComparer = BytesComparer;
-
-#[derive(Default)]
-pub struct BytesComparer {}
-
-impl Comparer for BytesComparer {
-    fn compare(&self, a: &[u8], b: &[u8]) -> cmp::Ordering {
-        a.iter().cmp(b.iter())
-    }
-
-    fn separator(&self, a: &[u8], b: &[u8]) -> Vec<u8> {
-        // should a < b
-        let mut n = a.len();
-        if n > b.len() {
-            n = b.len()
-        }
-        let mut i = 0;
-        while i < n && a[i] == b[i] {
-            i += 1;
-        }
-        if i < n {
-            let mut r = Vec::new();
-            let c = a[i];
-            if c < 0xff && c + 1 < b[i] {
-                let _ = r.write_all(&a[..i + 1]);
-                r[i] += 1;
-                return r;
-            }
-        }
-        a.clone().to_vec()
-    }
-
-    fn successor(&self, b: &[u8]) -> Vec<u8> {
-        for i in 0..b.len() {
-            if b[i] != 0xff {
-                let mut r = Vec::new();
-                let _ = r.write_all(&b[..i + 1]);
-                r[i] += 1;
-                return r;
-            }
-        }
-        b.clone().to_vec()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::cmp::Ordering;
@@ -437,10 +365,11 @@ mod tests {
 
     use crate::memdb::Value;
     use crate::memdb::{Key, SkipList};
+    use crate::test::KeyValue;
 
-    use super::BytesComparer;
-    use super::Comparer;
+    use super::Comparator;
     use super::MemDb;
+    use crate::api::BytesComparator;
 
     #[derive(Clone, Copy)]
     enum DbAct {
@@ -451,10 +380,10 @@ mod tests {
         Overwrite,
     }
 
-    struct DbTesting<'a> {
+    struct DbTesting<'a, C: Comparator> {
         //cmp: &'a dyn Comparer,
-        deleted: KeyValue<'a>,
-        present: KeyValue<'a>,
+        deleted: KeyValue<'a, C>,
+        present: KeyValue<'a, C>,
 
         act: DbAct,
         last_act: DbAct,
@@ -462,119 +391,14 @@ mod tests {
         act_key: Key,
         last_act_key: Key,
 
-        db: MemDb<'a>,
+        db: MemDb<C>,
 
         rng: ThreadRng,
 
-        post: fn(&DbTesting),
+        post: fn(&DbTesting<'a, C>),
     }
 
-    struct KeyValueEntry {
-        key: Key,
-        value: Value,
-    }
-
-    struct KeyValue<'a> {
-        entries: Vec<KeyValueEntry>, // entries in ascend order
-        n_bytes: usize,
-
-        cmp: &'a dyn Comparer,
-    }
-
-    impl<'a> KeyValue<'a> {
-        fn new(cmp: &'a dyn Comparer) -> Self {
-            KeyValue {
-                entries: Vec::new(),
-                n_bytes: 0,
-                cmp: cmp,
-            }
-        }
-
-        fn len(&self) -> usize {
-            self.entries.len()
-        }
-
-        fn size(&self) -> usize {
-            self.n_bytes
-        }
-
-        fn key_at(&self, i: usize) -> Key {
-            self.entries[i].key.clone()
-        }
-
-        fn index_at(&self, i: usize) -> (Key, Value) {
-            (self.entries[i].key.clone(), self.entries[i].value.clone())
-        }
-
-        fn value_at(&self, i: usize) -> Value {
-            self.entries[i].value.clone()
-        }
-
-        fn search(&self, key: &Key) -> Result<usize, usize> {
-            self.entries
-                .binary_search_by(|entry| self.cmp.compare(&entry.key, &key))
-        }
-
-        /* fn get(&self, key:Key) -> Option<usize> {
-            self.search(key)
-        } */
-
-        fn delete_index(&mut self, i: usize) -> Option<Value> {
-            if i < self.len() {
-                self.n_bytes -= self.key_at(i).len() + self.value_at(i).len();
-                return Some(self.entries.remove(i).value);
-            }
-            None
-        }
-
-        fn delete(&mut self, key: &Key) -> Option<Value> {
-            match self.search(&key) {
-                Err(_) => None,
-                Ok(i) => self.delete_index(i),
-            }
-        }
-
-        // insert return true, update return false
-        fn put_u(&mut self, key: &Key, value: &Value) -> bool {
-            match self.search(&key) {
-                Ok(i) => {
-                    self.n_bytes += value.len() - self.value_at(i).len();
-                    self.entries[i].value = value.clone();
-                }
-                Err(i) => {
-                    self.n_bytes += key.len() + value.len();
-                    self.entries.insert(
-                        i,
-                        KeyValueEntry {
-                            key: key.clone(),
-                            value: value.clone(),
-                        },
-                    );
-                    return true;
-                }
-            }
-            false
-        }
-
-        fn append(&mut self, key: &Key, value: &Value) {
-            let n = self.entries.len();
-            if n > 0 && self.cmp.compare(key, &self.entries[n - 1].key).is_le() {
-                panic!("append, keys not in increasing order");
-            }
-            self.entries.push(KeyValueEntry {
-                key: key.clone(),
-                value: value.clone(),
-            });
-            self.n_bytes += key.len() + value.len();
-        }
-
-        fn clear(&mut self) {
-            self.entries.clear();
-            self.n_bytes = 0;
-        }
-    }
-
-    impl<'a> DbTesting<'a> {
+    impl<'a, C: Comparator> DbTesting<'a, C> {
         fn set_act(&mut self, act: DbAct, key: &Key) {
             self.last_act = self.act;
             self.act = act;
@@ -647,7 +471,9 @@ mod tests {
         fn put_random(&mut self) {
             if self.deleted.len() > 0 {
                 let i = self.rng.gen_range(0..self.deleted.len());
-                let (key, value) = self.deleted.index_at(i);
+                let (k, v) = self.deleted.index_at(i);
+                let key = k.clone();
+                let value = v.clone();
                 self.put(&key, &value);
             }
         }
@@ -673,11 +499,11 @@ mod tests {
 
         fn iter_testing(&self) {}
 
-        fn test_get(&mut self, kv: &KeyValue) {
+        fn test_get(&mut self, kv: &KeyValue<'a, C>) {
             let i = self.rng.gen_range(0..kv.len());
             let (key, value) = kv.index_at(i);
             let v = self.db.get(&key).unwrap();
-            assert_eq!(&v, &value);
+            assert_eq!(&v, value);
 
             if i > 0 {
                 let (key1, _) = kv.index_at(i - 1);
@@ -685,7 +511,7 @@ mod tests {
             }
         }
 
-        fn test_findlt(&mut self, kv: &KeyValue) {
+        fn test_findlt(&mut self, kv: &KeyValue<'a, C>) {
             let i = self.rng.gen_range(0..kv.len() - 1);
             let (key, value) = kv.index_at(i);
         }
@@ -708,14 +534,14 @@ mod tests {
 
     const KEY_MAP: &[u8] = "012345678ABCDEFGHIJKLMNOPQRSTUVWXYabcdefghijklmnopqrstuvwxy".as_bytes();
 
-    fn generate_keyvalue(
-        cmp: &dyn Comparer,
+    fn generate_keyvalue<'a, C: Comparator>(
+        cmp: &'a C,
         n: usize,
         min_len: usize,
         max_len: usize,
         v_min_len: usize,
         v_max_len: usize,
-    ) -> KeyValue {
+    ) -> KeyValue<'a, C> {
         //let default_cmp: BytesComparer = Default::default();
         let mut kv = KeyValue::new(cmp);
 
@@ -758,7 +584,7 @@ mod tests {
 
     #[test]
     fn test_write() {
-        let default_cmp: BytesComparer = Default::default();
+        let default_cmp: BytesComparator = Default::default();
         let memdb = MemDb::new(&default_cmp);
         let deleted = generate_keyvalue(&default_cmp, 1000, 1, 30, 5, 5);
 
@@ -774,7 +600,7 @@ mod tests {
             post: write_post,
         };
 
-        fn write_post(testing: &DbTesting) {
+        fn write_post<'a, C: Comparator>(testing: &DbTesting<'a, C>) {
             assert_eq!(testing.db.len(), testing.present.len());
             assert_eq!(testing.db.size(), testing.present.size());
 
@@ -790,7 +616,7 @@ mod tests {
 
     #[test]
     fn test_read() {
-        let default_cmp: BytesComparer = Default::default();
+        let default_cmp: BytesComparator = Default::default();
 
         let mut kv = KeyValue::new(&default_cmp);
         test_find(&default_cmp, &kv);
@@ -838,7 +664,7 @@ mod tests {
         }
     }
 
-    fn test_find(cmp: &dyn Comparer, kv: &KeyValue) {
+    fn test_find<'a, C: Comparator>(cmp: &C, kv: &KeyValue<'a, C>) {
         let mut db = MemDb::new(cmp);
         let mut rng = thread_rng();
 
@@ -859,11 +685,12 @@ mod tests {
         for i in &indexs {
             let (key, value) = kv.index_at(*i);
             let (k, v) = db.find(&key).unwrap();
-            assert_eq!(&k, &key);
-            assert_eq!(&v, &value);
+            assert_eq!(&k, key);
+            assert_eq!(&v, value);
 
             if *i > 0 {
-                let (mut key1, _) = kv.index_at(i - 1);
+                let (key, _) = kv.index_at(i - 1);
+                let mut key1 = key.clone();
                 key1.append(&mut key.clone());
                 let (k1, v1) = db.find(&key1).unwrap();
                 assert_eq!(k, k1);
@@ -874,7 +701,7 @@ mod tests {
 
     #[test]
     fn test_basic() {
-        let default_cmp: BytesComparer = Default::default();
+        let default_cmp: BytesComparator = Default::default();
         let key1 = vec![11, 22, 33];
         let value1 = vec![44, 55, 66];
         let key1_1 = key1.clone();

@@ -1,4 +1,4 @@
-use std;
+use std::{self, fmt};
 
 #[derive(Debug)]
 pub struct DbError {
@@ -24,6 +24,12 @@ impl Clone for DbError {
         Self {
             reason: self.reason.clone(),
         }
+    }
+}
+
+impl std::fmt::Display for DbError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "({})", self.reason)
     }
 }
 
