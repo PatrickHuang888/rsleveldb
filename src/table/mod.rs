@@ -156,6 +156,7 @@ use crate::api::{Key, Value};
 use crate::errors::DbError;
 
 mod block;
+mod table;
 
 const BLOCK_TRAILER_LEN: usize = 5;
 
@@ -235,6 +236,3 @@ pub trait Iterator {
     fn valid(&self) -> Result<bool>;
 }
 
-pub struct TableOption {
-    block_restart_interval: usize,
-}

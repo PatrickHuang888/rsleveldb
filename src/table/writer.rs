@@ -49,77 +49,10 @@ struct Writer<'a, 'b, 'c> {
 }
 
 impl<'a, 'b, 'c> Writer<'a, 'b, 'c> {
-    fn new(w: &'a mut dyn Write, cmp: &'b dyn Comparer, opt:TableOption) -> Self {
-        Writer {
-            closed: false,
-            status: None,
-            writer: w,
-            cmp: cmp,
-            block_size: DEFAULT_BLOCK_SIZE,
-            data_block: BlockWriter::new(opt.block_restart_interval),
-            index_block: BlockWriter::new(opt.block_restart_interval),
-            filter_block: None,
-            pending_index_entry: false,
-            pending_handle: BlockHandle {
-                offset: 0,
-                length: 0,
-            },
-            offset: 0,
-            n_entries: 0,
-            compression: CompressionType::NoCompression,
-            compressed_buf: Vec::new(),
-            last_key: Vec::new(),
 
-            opt:opt,
-        }
-    }
 
-    // append appends key/value pair to the table. The keys passed must
-    // be in increasing order.
-    fn append(&mut self, key: &Key, value: &Value) -> Result<(), DbError> {
-        assert!(!self.closed);
-        self.ok()?;
 
-        if self.n_entries > 0 && self.cmp.compare(&self.data_block.last_key, key).is_ge() {
-            return Err("Writer: keys are not in increasing order"
-                .to_string()
-                .into());
-        }
-
-        if self.pending_index_entry {
-            assert!(self.data_block.buf.is_empty());
-            let k = self.cmp.separator(&self.last_key, key);
-            let v = self.pending_handle.encode();
-            self.index_block.append(&k, &v);
-            self.pending_index_entry = false;
-        }
-
-        match &mut self.filter_block {
-            None => {}
-            Some(fb) => {
-                fb.add(key);
-            }
-        }
-
-        self.last_key = key.clone();
-        self.n_entries += 1;
-        self.data_block.append(key, value);
-
-        // finish the data block if block size target reached.
-        let size = self.data_block.bytes_len();
-        if size >= self.block_size {
-            self.flush()?;
-        }
-
-        Ok(())
-    }
-
-    fn ok(&self) -> Result<(), DbError> {
-        match &self.status {
-            None => Ok(()),
-            Some(s) => Err(s.clone().into()),
-        }
-    }
+    
 
     // Advanced operation: flush any buffered key/value pairs to file.
     // Can be used to ensure that two adjacent entries never live in

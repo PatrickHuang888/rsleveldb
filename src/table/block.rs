@@ -3,6 +3,7 @@ use std::{io::Write, rc::Rc};
 
 use byteorder::{ByteOrder, LittleEndian, ReadBytesExt, WriteBytesExt};
 
+use crate::CompressionType;
 use crate::api::{Comparer, Key, Value};
 use crate::errors::{DbError, Result};
 use crate::memdb::BytesComparer;
@@ -11,13 +12,7 @@ use super::{BLOCK_TRAILER_LEN, BLOCK_TYPE_NO_COMPRESSION};
 
 use crate::journal::CASTAGNOLI;
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum CompressionType {
-    SnappyCompression,
-    NoCompression,
-}
-
-struct BlockWriter {
+pub struct BlockWriter {
     buf: Vec<u8>,
     compressed_buf: Vec<u8>,
 
@@ -32,6 +27,8 @@ struct BlockWriter {
 
 impl BlockWriter {
     pub fn new(restart_interval: usize) -> Self {
+        assert!(restart_interval>=1);
+
         let mut r = Vec::new();
         r.push(0);
         Self {
