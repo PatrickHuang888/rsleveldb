@@ -1,4 +1,4 @@
-use crate::api::Comparer;
+use crate::api::Comparator;
 use crate::api::Key;
 use crate::api::Value;
 use crate::errors;
@@ -19,7 +19,7 @@ pub struct MemDb<'a> {
 }
 
 impl<'a> MemDb<'a> {
-    pub fn new(cmp: &'a dyn Comparer) -> Self {
+    pub fn new(cmp: &'a dyn Comparator) -> Self {
         Self {
             inner: Arc::new(RwLock::new(SkipList::new(cmp))),
         }
@@ -168,7 +168,7 @@ struct SkipList<'a> {
     //prev_node: [usize; MAX_HEIGHT],
     max_height: usize,
 
-    cmp: &'a dyn Comparer,
+    cmp: &'a dyn Comparator,
 
     kv_size: usize,
 
@@ -176,7 +176,7 @@ struct SkipList<'a> {
 }
 
 impl<'a> SkipList<'a> {
-    fn new(cmp: &'a dyn Comparer) -> Self {
+    fn new(cmp: &'a dyn Comparator) -> Self {
         Self {
             kv_data: Vec::new(),
             node_data: vec![0; 4 + MAX_HEIGHT],
@@ -355,50 +355,6 @@ impl<'a> SkipList<'a> {
     }
 }
 
-//type DefaultComparer = BytesComparer;
-
-#[derive(Default)]
-pub struct BytesComparer {}
-
-impl Comparer for BytesComparer {
-    fn compare(&self, a: &[u8], b: &[u8]) -> cmp::Ordering {
-        a.iter().cmp(b.iter())
-    }
-
-    fn separator(&self, a: &[u8], b: &[u8]) -> Vec<u8> {
-        // should a < b
-        let mut n = a.len();
-        if n > b.len() {
-            n = b.len()
-        }
-        let mut i = 0;
-        while i < n && a[i] == b[i] {
-            i += 1;
-        }
-        if i < n {
-            let mut r = Vec::new();
-            let c = a[i];
-            if c < 0xff && c + 1 < b[i] {
-                let _ = r.write_all(&a[..i + 1]);
-                r[i] += 1;
-                return r;
-            }
-        }
-        a.clone().to_vec()
-    }
-
-    fn successor(&self, b: &[u8]) -> Vec<u8> {
-        for i in 0..b.len() {
-            if b[i] != 0xff {
-                let mut r = Vec::new();
-                let _ = r.write_all(&b[..i + 1]);
-                r[i] += 1;
-                return r;
-            }
-        }
-        b.clone().to_vec()
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -412,8 +368,8 @@ mod tests {
     use crate::memdb::{Key, SkipList};
     use crate::test::KeyValue;
 
-    use super::BytesComparer;
-    use super::Comparer;
+    use crate::api::BytesComparator;
+    use super::Comparator;
     use super::MemDb;
 
     #[derive(Clone, Copy)]
@@ -580,7 +536,7 @@ mod tests {
     const KEY_MAP: &[u8] = "012345678ABCDEFGHIJKLMNOPQRSTUVWXYabcdefghijklmnopqrstuvwxy".as_bytes();
 
     fn generate_keyvalue(
-        cmp: &dyn Comparer,
+        cmp: &dyn Comparator,
         n: usize,
         min_len: usize,
         max_len: usize,
@@ -629,7 +585,7 @@ mod tests {
 
     #[test]
     fn test_write() {
-        let default_cmp: BytesComparer = Default::default();
+        let default_cmp: BytesComparator = Default::default();
         let memdb = MemDb::new(&default_cmp);
         let deleted = generate_keyvalue(&default_cmp, 1000, 1, 30, 5, 5);
 
@@ -661,7 +617,7 @@ mod tests {
 
     #[test]
     fn test_read() {
-        let default_cmp: BytesComparer = Default::default();
+        let default_cmp: BytesComparator = Default::default();
 
         let mut kv = KeyValue::new(&default_cmp);
         test_find(&default_cmp, &kv);
@@ -709,7 +665,7 @@ mod tests {
         }
     }
 
-    fn test_find(cmp: &dyn Comparer, kv: &KeyValue) {
+    fn test_find(cmp: &dyn Comparator, kv: &KeyValue) {
         let mut db = MemDb::new(cmp);
         let mut rng = thread_rng();
 
@@ -746,7 +702,7 @@ mod tests {
 
     #[test]
     fn test_basic() {
-        let default_cmp: BytesComparer = Default::default();
+        let default_cmp: BytesComparator = Default::default();
         let key1 = vec![11, 22, 33];
         let value1 = vec![44, 55, 66];
         let key1_1 = key1.clone();

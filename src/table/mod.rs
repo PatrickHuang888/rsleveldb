@@ -158,7 +158,8 @@ use crate::errors::DbError;
 mod block;
 mod table;
 
-const BLOCK_TRAILER_LEN: usize = 5;
+// 1-byte type + 32-bit crc
+const BLOCK_TRAILER_SIZE: usize = 5;
 
 // The block type gives the per-block compression format.
 // These constants are part of the file format and should not be changed.

@@ -1,4 +1,4 @@
-use api::Comparer;
+use api::{Comparator, BytesComparator};
 
 mod api;
 mod errors;
@@ -42,21 +42,25 @@ pub struct Options<'a> {
   // REQUIRES: The client must ensure that the comparator supplied
   // here has the same name and orders keys *exactly* the same as the
   // comparator provided to previous open calls on the same DB.
-  comparer: &'a dyn Comparer,
+  comparator: &'a dyn Comparator,
 
 }
 
 impl<'a> Default for Options<'a> {
     fn default() -> Self {
-        Self { block_restart_interval: 16, block_size: 4*1024, compression: CompressionType::SnappyCompression }
+        Self { block_restart_interval: 16, block_size: 4*1024, compression: CompressionType::SnappyCompression, comparator:&BytesComparator::default() }
     }
 }
 
-
-
+// DB contents are stored in a set of blocks, each of which holds a
+// sequence of key,value pairs.  Each block may be compressed before
+// being stored in a file.  The following enum describes which
+// compression method (if any) is used to compress a block.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum CompressionType {
-    NoCompression= 0,
-    SnappyCompression= 1,
+    // NOTE: do not change the values of existing entries, as these are
+    // part of the persistent format on disk.
+    NoCompression= 0x0,
+    SnappyCompression= 0x1,
 }
 

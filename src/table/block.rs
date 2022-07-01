@@ -1,20 +1,21 @@
 use std::cmp::Ordering;
+use std::result;
 use std::{io::Write, rc::Rc};
 
 use byteorder::{ByteOrder, LittleEndian, ReadBytesExt, WriteBytesExt};
 
 use crate::CompressionType;
-use crate::api::{Comparer, Key, Value};
+use crate::api::{Comparator, Key, Value};
 use crate::errors::{DbError, Result};
-use crate::memdb::BytesComparer;
+use crate::api::BytesComparator;
 
-use super::{BLOCK_TRAILER_LEN, BLOCK_TYPE_NO_COMPRESSION};
+use super::{BLOCK_TRAILER_SIZE, BLOCK_TYPE_NO_COMPRESSION};
 
 use crate::journal::CASTAGNOLI;
 
 pub struct BlockWriter {
     buf: Vec<u8>,
-    compressed_buf: Vec<u8>,
+    //compressed_buf: Vec<u8>,
 
     counter: usize,
     restart_interval: usize,
@@ -33,7 +34,7 @@ impl BlockWriter {
         r.push(0);
         Self {
             buf: Vec::new(),
-            compressed_buf: Vec::new(),
+            //compressed_buf: Vec::new(),
             counter: 0,
             restart_interval: restart_interval,
             restarts: r,
@@ -74,7 +75,7 @@ impl BlockWriter {
         self.counter += 1;
     }
 
-    pub fn finish(&mut self) {
+    pub fn finish(&mut self) -> &[u8]{
         for x in &self.restarts {
             let _ = self.buf.write_u32::<LittleEndian>(*x);
         }
@@ -82,19 +83,20 @@ impl BlockWriter {
             .buf
             .write_u32::<LittleEndian>(self.restarts.len() as u32);
         self.finished = true;
+        &self.buf
     }
 
-    fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.buf.is_empty()
     }
 
-    fn bytes_len(&self) -> usize {
+    pub fn bytes_len(&self) -> usize {
         self.buf.len() + 4 * self.restarts.len() + 4 // block trailer every restart has 4 bytes, and 4 bytes restart points len.
     }
 
     fn reset(&mut self) {
         self.buf.clear();
-        self.compressed_buf.clear();
+        //self.compressed_buf.clear();
 
         self.counter = 0;
         self.restarts.clear();
@@ -104,14 +106,14 @@ impl BlockWriter {
         self.last_key.clear();
     }
 
-    fn write(
+    /* pub fn write(
         &mut self,
         writer: &mut dyn Write,
         compression: CompressionType,
-    ) -> std::result::Result<usize, std::io::Error> {
+    ) -> result::Result<usize, std::io::Error> {
         self.finish();
 
-        let mut trailer = [0; BLOCK_TRAILER_LEN];
+        let mut trailer = [0; BLOCK_TRAILER_SIZE];
         let l;
 
         match compression {
@@ -143,7 +145,7 @@ impl BlockWriter {
 
         self.reset();
         Ok(l)
-    }
+    } */
 }
 
 fn share_prefix_len(a: &[u8], b: &[u8]) -> usize {
@@ -187,7 +189,7 @@ pub struct BlockReader<'a> {
     data: &'a Vec<u8>,
     num_restarts: usize,
     restart_offset: usize,
-    cmp: Rc<dyn Comparer>,
+    cmp: Rc<dyn Comparator>,
 }
 
 impl<'a> BlockReader<'a> {
@@ -202,7 +204,7 @@ impl<'a> BlockReader<'a> {
             data: data,
             num_restarts: num_restarts as usize,
             restart_offset: restart_offset,
-            cmp: Rc::new(BytesComparer {}),
+            cmp: Rc::new(BytesComparator {}),
         }
     }
 
@@ -230,11 +232,11 @@ struct BlockIter<'a> {
 
     data: &'a Vec<u8>, // underlying block contents
 
-    cmp: Rc<dyn Comparer>,
+    cmp: Rc<dyn Comparator>,
 }
 
 impl<'a> BlockIter<'a> {
-    fn new(data: &'a Vec<u8>, num_restarts: usize, restarts: usize, cmp: Rc<dyn Comparer>) -> Self {
+    fn new(data: &'a Vec<u8>, num_restarts: usize, restarts: usize, cmp: Rc<dyn Comparator>) -> Self {
         assert!(num_restarts > 0);
         Self {
             key: Vec::new(),
@@ -516,9 +518,9 @@ mod tests {
     use rand::thread_rng;
     use rand::Rng;
 
+    use crate::api::BytesComparator;
     use crate::api::Key;
     use crate::api::Value;
-    use crate::memdb::BytesComparer;
     use crate::table::Iterator;
     use crate::test::KeyValue;
 
@@ -529,7 +531,7 @@ mod tests {
 
     #[test]
     fn test_block_empty() {
-        let cmp = BytesComparer::default();
+        let cmp = BytesComparator::default();
         let kv = KeyValue::new(&cmp);
 
         test(&kv)
@@ -537,7 +539,7 @@ mod tests {
 
     #[test]
     fn test_simple_single() {
-        let cmp = BytesComparer::default();
+        let cmp = BytesComparator::default();
         let mut kv = KeyValue::new(&cmp);
         kv.append(&"abc".as_bytes().to_vec(), &"v".as_bytes().to_vec());
 
@@ -546,7 +548,7 @@ mod tests {
 
     #[test]
     fn test_simple_specical_key() {
-        let cmp = BytesComparer::default();
+        let cmp = BytesComparator::default();
         let mut kv = KeyValue::new(&cmp);
         let key = vec![0xff, 0xff];
         kv.append(&key, &"v3".as_bytes().to_vec());
@@ -556,7 +558,7 @@ mod tests {
 
     #[test]
     fn test_simple_multi() {
-        let cmp = BytesComparer::default();
+        let cmp = BytesComparator::default();
         let mut kv = KeyValue::new(&cmp);
         kv.append(&"abc".as_bytes().to_vec(), &"v".as_bytes().to_vec());
         kv.append(&"abcd".as_bytes().to_vec(), &"v".as_bytes().to_vec());
@@ -567,7 +569,7 @@ mod tests {
 
     #[test]
     fn test_randomized() {
-        let cmp = BytesComparer::default();
+        let cmp = BytesComparator::default();
         let mut kv = KeyValue::new(&cmp);
 
         let mut rng = thread_rng();

@@ -1,4 +1,4 @@
-use crate::api::{Comparer, Key, Value};
+use crate::api::{Comparator, Key, Value};
 
 struct KeyValueEntry {
     key: Key,
@@ -9,11 +9,11 @@ pub struct KeyValue<'a> {
     entries: Vec<KeyValueEntry>, // entries in ascend order
     n_bytes: usize,
 
-    cmp: &'a dyn Comparer,
+    cmp: &'a dyn Comparator,
 }
 
 impl<'a> KeyValue<'a> {
-    pub fn new(cmp: &'a dyn Comparer) -> Self {
+    pub fn new(cmp: &'a dyn Comparator) -> Self {
         KeyValue {
             entries: Vec::new(),
             n_bytes: 0,

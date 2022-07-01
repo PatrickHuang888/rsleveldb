@@ -58,40 +58,7 @@ impl<'a, 'b, 'c> Writer<'a, 'b, 'c> {
     // Can be used to ensure that two adjacent entries never live in
     // the same data block.  Most clients should not need to use this method.
     // REQUIRES: Finish(), Abandon() have not been called
-    pub fn flush(&mut self) -> Result<(), DbError> {
-        assert!(!self.closed);
-        assert!(!self.pending_index_entry);
-        self.ok()?;
-
-        if self.data_block.is_empty() {
-            return Ok(());
-        }
-
-        let bl = match self.data_block.write(self.writer, self.compression) {
-            Ok(n) => n,
-            Err(e) => {
-                self.set_status(format!("status error: {}", e.to_string()));
-                return Err(e.into());
-            }
-        };
-        self.pending_handle.offset = self.offset;
-        self.pending_handle.length = bl - BLOCK_TRAILER_LEN;
-        self.pending_index_entry = true;
-        self.offset += bl;
-
-        match self.writer.flush() {
-            Ok(()) => {}
-            Err(e) => {
-                self.set_status(format!("status error: {}", e.to_string()));
-                return Err(e.into());
-            }
-        }
-
-        // todo:
-        //self.filter_block.flush(self.offset);
-
-        Ok(())
-    }
+    
 
     fn set_status(&mut self, msg: String) {
         self.status = Some(msg);
