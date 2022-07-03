@@ -15,7 +15,7 @@ use crate::journal::CASTAGNOLI;
 
 pub struct BlockWriter {
     buf: Vec<u8>,
-    //compressed_buf: Vec<u8>,
+    compressed_buf: Vec<u8>,
 
     counter: usize,
     restart_interval: usize,
@@ -34,7 +34,7 @@ impl BlockWriter {
         r.push(0);
         Self {
             buf: Vec::new(),
-            //compressed_buf: Vec::new(),
+            compressed_buf: Vec::new(),
             counter: 0,
             restart_interval: restart_interval,
             restarts: r,
@@ -94,7 +94,7 @@ impl BlockWriter {
         self.buf.len() + 4 * self.restarts.len() + 4 // block trailer every restart has 4 bytes, and 4 bytes restart points len.
     }
 
-    fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.buf.clear();
         //self.compressed_buf.clear();
 
@@ -146,6 +146,39 @@ impl BlockWriter {
         self.reset();
         Ok(l)
     } */
+
+
+    fn write_raw_block(&mut self, compression_type: CompressionType, handle:&mut BlockHandle) -> std::io::Result<()> {
+        handle.offset= self.offset;
+        handle.size= block_contents.len();
+        
+        let mut count=0;
+        while count < block_contents.len() {
+            // todo: handling Interrupted error and n==0
+            count += self.writer.write(&block_contents[count..])?;
+        }
+
+        let mut trailer:[u8;BLOCK_TRAILER_SIZE]= [0; BLOCK_TRAILER_SIZE];
+        trailer[0]= compression_type as u8;
+        
+        let mut digest= CASTAGNOLI.digest();
+        digest.update(block_contents);
+        digest.update(&trailer[0..1]);
+        let crc= digest.finalize();
+        // fixme: leveldb has a mask operation
+
+        LittleEndian::write_u32(&mut trailer[1..], crc);
+
+        count= 0;
+        while count < BLOCK_TRAILER_SIZE {
+            // todo: handling Interrupted error and n==0
+            count += self.writer.write(&trailer)?
+        }
+
+        self.offset += block_contents.len() + BLOCK_TRAILER_SIZE;
+
+        Ok(())
+    }
 }
 
 fn share_prefix_len(a: &[u8], b: &[u8]) -> usize {

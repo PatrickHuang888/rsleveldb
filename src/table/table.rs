@@ -38,22 +38,21 @@ struct TableWriter<'a, 'b> {
     status: Option<String>,
 
     opts: Options<'a>,
-    index_opts:Options<'a>,
+    //index_opts:Options<'a>,
 
     //filter_block: Option<FilterBlock<'c>>,
 }
 
 impl<'a, 'b> TableWriter<'a, 'b> {
-    fn new(w: &'b mut dyn Write, opt:&Options<'a>) -> Self {
-        let opts= opt.clone();
-        let mut index_opts= opt.clone();
-        index_opts.block_restart_interval= 1;
+    fn new(w: &'b mut dyn Write, options:&'a Options<'a>) -> Self {
+        let opts= options.clone();
 
         Self {
             writer: w,
 
-            data_block: BlockWriter::new(opts.block_restart_interval),
-            index_block: BlockWriter::new(index_opts.block_restart_interval),
+            data_block: BlockWriter::new( opts.block_restart_interval),
+            index_block: BlockWriter::new(1),
+
             //filter_block: None,
 
             pending_index_entry: false,
@@ -71,7 +70,6 @@ impl<'a, 'b> TableWriter<'a, 'b> {
             last_key: Vec::new(),
 
             opts:opts,
-            index_opts:index_opts,
         }
     }
 
@@ -120,48 +118,45 @@ impl<'a, 'b> TableWriter<'a, 'b> {
 
     pub fn flush(&mut self) -> Result<(), DbError> {
         assert!(!self.closed);
-        assert!(!self.pending_index_entry);
         self.ok()?;
 
         if self.data_block.is_empty() {
             return Ok(());
         }
 
-        let bl = match self.data_block.write(self.writer, self.opts.compression) {
+        assert!(!self.pending_index_entry);
+
+        //self.write_block(& mut self.data_block, &mut self.pending_handle)?;
+
+
+        /* let bl = match self.data_block.write(self.writer, self.opts.compression) {
             Ok(n) => n,
             Err(e) => {
                 self.set_status(format!("status error: {}", e.to_string()));
                 return Err(e.into());
             }
-        };
+        }; */
 
         self.pending_index_entry = true;
-        self.pending_handle.offset = self.offset;
-        self.pending_handle.length = bl - BLOCK_TRAILER_LEN;
-        
-        self.offset += bl;
-
-        match self.writer.flush() {
-            Ok(()) => {}
-            Err(e) => {
-                self.set_status(format!("status error: {}", e.to_string()));
-                return Err(e.into());
-            }
-        }
+        self.writer.flush()?;
 
         // todo:
         //self.filter_block.flush(self.offset);
 
+        /* self.pending_handle.offset = self.offset;
+        self.pending_handle.length = bl - BLOCK_TRAILER_LEN;
+        
+        self.offset += bl; */
+        
         Ok(())
     }
 
-    fn  write_block(&mut self, block:&mut BlockWriter, handle : &BlockHandle) -> errors::Result<()> {
+    fn  write_block(&mut self, block:&mut BlockWriter, handle : &mut BlockHandle) -> errors::Result<()> {
         // File format contains a sequence of blocks where each block has:
         //    block_data: uint8[n]
         //    type: uint8
         //    crc: uint32
         self.ok()?;
-
         let raw= block.finish();
 
         let mut  block_contents:&[u8];
@@ -170,12 +165,22 @@ impl<'a, 'b> TableWriter<'a, 'b> {
                 block_contents= raw;
             },
             CompressionType::SnappyCompression => {
+                {
+                let mut w = snap::write::FrameEncoder::new(&mut self.compressed_buf);
+                    w.write_all(raw)?;
+                    // no need flush, w will flush when drop
+                }
 
+                // TODO: Snappy not supported, or compressed less than 12.5%, so just
+                // store uncompressed form
+
+                block_contents= &self.compressed_buf;
             }
         }
 
-        self.write_raw_block(block_contents, compression_type, handle)
-
+        //self.write_raw_block(block_contents, self.opts.compression, handle)?;
+        self.compressed_buf.clear();
+        block.reset();
         Ok(())
     }
     
@@ -196,7 +201,7 @@ impl<'a, 'b> TableWriter<'a, 'b> {
         digest.update(block_contents);
         digest.update(&trailer[0..1]);
         let crc= digest.finalize();
-        // leveldb has a mask operation
+        // fixme: leveldb has a mask operation
 
         LittleEndian::write_u32(&mut trailer[1..], crc);
 
@@ -212,7 +217,7 @@ impl<'a, 'b> TableWriter<'a, 'b> {
     }
 
     fn ok(&self) -> Result<(), DbError> {
-        match self.status {
+        match &self.status {
             None => Ok(()),
             Some(s) => {
                 Err(s.clone().into())
