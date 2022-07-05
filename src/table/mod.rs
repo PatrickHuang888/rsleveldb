@@ -236,4 +236,3 @@ pub trait Iterator {
 
     fn valid(&self) -> Result<bool>;
 }
-

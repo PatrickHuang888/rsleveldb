@@ -6,9 +6,9 @@ pub type Value = Vec<u8>;
 
 pub trait Comparator {
     // Three-way comparison.  Returns value:
-  //   Less iff "a" < "b",
-  //   Equal iff "a" == "b",
-  //   Greater iff "a" > "b"
+    //   Less iff "a" < "b",
+    //   Equal iff "a" == "b",
+    //   Greater iff "a" > "b"
     fn compare(&self, a: &[u8], b: &[u8]) -> cmp::Ordering;
 
     // Bellow are advanced functions used to reduce the space requirements
@@ -28,7 +28,7 @@ pub trait Comparator {
     //
     // Contents of b should not by any means modified. Doing so may cause
     // corruption on the internal state.
-    fn find_short_successor(&self, b: & mut [u8]);
+    fn find_short_successor(&self, b: &mut [u8]);
 }
 
 #[derive(Default)]
@@ -39,8 +39,8 @@ impl Comparator for BytesComparator {
         a.iter().cmp(b.iter())
     }
 
-    fn find_shortest_separator(&self, start: & mut [u8], limit: &[u8]){
-        let min_length= cmp::min(start.len(), limit.len());        
+    fn find_shortest_separator(&self, mut start: &mut [u8], limit: &[u8]) {
+        let min_length = cmp::min(start.len(), limit.len());
         let mut diff_index = 0;
         while diff_index < min_length && start[diff_index] == limit[diff_index] {
             diff_index += 1;
@@ -49,22 +49,20 @@ impl Comparator for BytesComparator {
             let c = start[diff_index];
             if c < 0xff && c + 1 < limit[diff_index] {
                 diff_index += 1;
-                start= &mut start[diff_index..];
+                start = &mut start[diff_index..];
                 assert!(self.compare(start, limit).is_lt());
             }
         }
     }
 
-    fn find_short_successor(&self, key: & mut [u8]) {
+    fn find_short_successor(&self, mut key: &mut [u8]) {
         for i in 0..key.len() {
             if key[i] != 0xff {
                 key[i] += 1;
-                key= &mut key[..i+1];
-                return
+                key = &mut key[..i + 1];
+                return;
             }
         }
         // *key is a run of 0xffs.  Leave it alone.
     }
-
 }
-

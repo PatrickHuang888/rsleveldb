@@ -355,7 +355,6 @@ impl<'a> SkipList<'a> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::cmp::Ordering;
@@ -368,9 +367,9 @@ mod tests {
     use crate::memdb::{Key, SkipList};
     use crate::test::KeyValue;
 
-    use crate::api::BytesComparator;
     use super::Comparator;
     use super::MemDb;
+    use crate::api::BytesComparator;
 
     #[derive(Clone, Copy)]
     enum DbAct {

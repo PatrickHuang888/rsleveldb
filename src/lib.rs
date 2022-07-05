@@ -1,4 +1,6 @@
-use api::{Comparator, BytesComparator};
+use std::rc::Rc;
+
+use api::{BytesComparator, Comparator};
 
 mod api;
 mod errors;
@@ -8,47 +10,51 @@ mod table;
 mod test;
 
 #[derive(Clone)]
-pub struct Options<'a> {
-  // Number of keys between restart points for delta encoding of keys.
-  // This parameter can be changed dynamically.  Most clients should
-  // leave this parameter alone.  
-  block_restart_interval: usize,
+pub struct Options {
+    // Number of keys between restart points for delta encoding of keys.
+    // This parameter can be changed dynamically.  Most clients should
+    // leave this parameter alone.
+    block_restart_interval: usize,
 
     // Approximate size of user data packed per block.  Note that the
-  // block size specified here corresponds to uncompressed data.  The
-  // actual size of the unit read from disk may be smaller if
-  // compression is enabled.  This parameter can be changed dynamically.
-  block_size:usize,
+    // block size specified here corresponds to uncompressed data.  The
+    // actual size of the unit read from disk may be smaller if
+    // compression is enabled.  This parameter can be changed dynamically.
+    block_size: usize,
 
-  // Compress blocks using the specified compression algorithm.  This
-  // parameter can be changed dynamically.
-  //
-  // Default: kSnappyCompression, which gives lightweight but fast
-  // compression.
-  //
-  // Typical speeds of kSnappyCompression on an Intel(R) Core(TM)2 2.4GHz:
-  //    ~200-500MB/s compression
-  //    ~400-800MB/s decompression
-  // Note that these speeds are significantly faster than most
-  // persistent storage speeds, and therefore it is typically never
-  // worth switching to kNoCompression.  Even if the input data is
-  // incompressible, the kSnappyCompression implementation will
-  // efficiently detect that and will switch to uncompressed mode.
-  compression: CompressionType,
+    // Compress blocks using the specified compression algorithm.  This
+    // parameter can be changed dynamically.
+    //
+    // Default: kSnappyCompression, which gives lightweight but fast
+    // compression.
+    //
+    // Typical speeds of kSnappyCompression on an Intel(R) Core(TM)2 2.4GHz:
+    //    ~200-500MB/s compression
+    //    ~400-800MB/s decompression
+    // Note that these speeds are significantly faster than most
+    // persistent storage speeds, and therefore it is typically never
+    // worth switching to kNoCompression.  Even if the input data is
+    // incompressible, the kSnappyCompression implementation will
+    // efficiently detect that and will switch to uncompressed mode.
+    compression: CompressionType,
 
-  // Comparator used to define the order of keys in the table.
-  // Default: a comparator that uses lexicographic byte-wise ordering
-  //
-  // REQUIRES: The client must ensure that the comparator supplied
-  // here has the same name and orders keys *exactly* the same as the
-  // comparator provided to previous open calls on the same DB.
-  comparator: &'a dyn Comparator,
-
+    // Comparator used to define the order of keys in the table.
+    // Default: a comparator that uses lexicographic byte-wise ordering
+    //
+    // REQUIRES: The client must ensure that the comparator supplied
+    // here has the same name and orders keys *exactly* the same as the
+    // comparator provided to previous open calls on the same DB.
+    comparator: Rc<dyn Comparator>,
 }
 
-impl<'a> Default for Options<'a> {
+impl Default for Options {
     fn default() -> Self {
-        Self { block_restart_interval: 16, block_size: 4*1024, compression: CompressionType::SnappyCompression, comparator:&BytesComparator::default() }
+        Self {
+            block_restart_interval: 16,
+            block_size: 4 * 1024,
+            compression: CompressionType::SnappyCompression,
+            comparator: Rc::new(BytesComparator::default()),
+        }
     }
 }
 
@@ -60,7 +66,6 @@ impl<'a> Default for Options<'a> {
 enum CompressionType {
     // NOTE: do not change the values of existing entries, as these are
     // part of the persistent format on disk.
-    NoCompression= 0x0,
-    SnappyCompression= 0x1,
+    NoCompression = 0x0,
+    SnappyCompression = 0x1,
 }
-

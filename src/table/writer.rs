@@ -67,73 +67,11 @@ impl<'a, 'b, 'c> Writer<'a, 'b, 'c> {
     // Finalize the table. calling append is not possible
     // after finalize, but calling blocks_len, entries_len and bytes_len
     // is still possible.
-    pub fn finish(&mut self) -> Result<(), DbError> {
-        self.flush()?;
+    
 
-        assert!(!self.closed);
-        self.closed = true;
+    
 
-        self.ok()?;
-
-        match &mut self.filter_block {
-            None => {}
-            Some(fb) => {
-                fb.finish();
-                fb.write(self.writer)? // no compression
-            }
-        }
-
-        // todo: write metaindex block
-        let mut meta_index_block: BlockWriter = BlockWriter::new(self.opt.block_restart_interval);
-        match &self.filter_block {
-            None => {}
-            Some(fb) => {
-                // todo:
-                /* let mut k= "filter.".to_string();
-                let buf= fb.encode();
-                meta_index_block.append(&k, &buf) */
-            }
-        }
-        let bl = meta_index_block.write(self.writer, self.compression)?;
-        let metaindex_handle: BlockHandle = BlockHandle {
-            offset: self.offset,
-            length: bl - BLOCK_TRAILER_LEN,
-        };
-        self.offset += bl;
-
-        // write index block
-        if self.pending_index_entry {
-            let k = self.cmp.successor(&self.last_key);
-            let v = self.pending_handle.encode();
-            self.index_block.append(&k, &v);
-            self.pending_index_entry = false;
-        }
-        let bl = self.index_block.write(self.writer, self.compression)?;
-        let indexblock_handle = BlockHandle {
-            offset: self.offset,
-            length: bl - BLOCK_TRAILER_LEN,
-        };
-        self.offset += bl;
-
-        // write footer
-        let footer = Footer {
-            metaindex_handle: metaindex_handle,
-            index_handle: indexblock_handle,
-        };
-        let mut footer_buf = footer.encode();
-        self.writer.write_all(&footer_buf)?;
-        self.offset += footer_buf.len();
-
-        Ok(())
-    }
-
-    fn entries_len(&self) -> usize {
-        self.n_entries
-    }
-
-    fn bytes_len(&self) -> usize {
-        self.offset
-    }
+    
 
     // blocks_len returns number of blocks written so far.
     fn blocks_len(&self) -> usize {
@@ -142,49 +80,6 @@ impl<'a, 'b, 'c> Writer<'a, 'b, 'c> {
             n += 1;
         }
         n
-    }
-}
-
-struct Footer {
-    metaindex_handle: BlockHandle,
-    index_handle: BlockHandle,
-}
-
-impl Footer {
-    fn encode(&self) -> Vec<u8> {
-        let mut v = Vec::new();
-        let _ = v.write_all(&self.metaindex_handle.encode());
-        let _ = v.write_all(&self.index_handle.encode());
-        let _ = v.write_u64::<LittleEndian>(MAGIC);
-        assert_eq!(v.len(), FOOTER_LEN);
-        v
-    }
-}
-
-struct BlockHandle {
-    offset: usize,
-    length: usize,
-}
-
-impl BlockHandle {
-    fn encode(&self) -> Vec<u8> {
-        let mut v = Vec::with_capacity(20);
-        super::put_uvarint(&mut v, self.offset as u64);
-        super::put_uvarint(&mut v, self.length as u64);
-        v
-    }
-
-    fn decode(buf: &[u8]) -> Self {
-        //todo:
-        Self {
-            offset: 0,
-            length: 0,
-        }
-    }
-
-    fn clear(&mut self) {
-        self.offset = 0;
-        self.length = 0;
     }
 }
 

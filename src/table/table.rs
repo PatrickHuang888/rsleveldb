@@ -1,16 +1,23 @@
-use std::{io::Write, vec};
-use crate::errors;
+use crate::{
+    errors,
+    table::{FOOTER_LEN, MAGIC},
+};
+use std::{fmt::format, io::Write, vec};
 
-use byteorder::{LittleEndian, ByteOrder};
+use byteorder::{ByteOrder, LittleEndian, WriteBytesExt};
 
-use crate::{api::{Comparator, Key, Value}, errors::DbError, Options, table::MAX_VARINT_LEN64, CompressionType, journal::CASTAGNOLI};
+use crate::{
+    api::{Comparator, Key, Value},
+    errors::DbError,
+    journal::CASTAGNOLI,
+    table::MAX_VARINT_LEN64,
+    CompressionType, Options,
+};
 
 use super::{block::BlockWriter, BLOCK_TRAILER_SIZE};
 
-
-struct TableWriter<'a, 'b> {
-
-    writer: &'b mut dyn Write,
+struct TableWriter<'a> {
+    writer: &'a mut dyn Write,
 
     data_block: BlockWriter,
     index_block: BlockWriter,
@@ -27,7 +34,7 @@ struct TableWriter<'a, 'b> {
     // Invariant: r->pending_index_entry is true only if data_block is empty.
     pending_index_entry: bool,
     pending_handle: BlockHandle, // handle to add to index block
-    
+
     compressed_buf: Vec<u8>,
     last_key: Key,
 
@@ -37,29 +44,25 @@ struct TableWriter<'a, 'b> {
 
     status: Option<String>,
 
-    opts: Options<'a>,
+    opts: Options,
     //index_opts:Options<'a>,
 
     //filter_block: Option<FilterBlock<'c>>,
 }
 
-impl<'a, 'b> TableWriter<'a, 'b> {
-    fn new(w: &'b mut dyn Write, options:&'a Options<'a>) -> Self {
-        let opts= options.clone();
+impl<'a> TableWriter<'a> {
+    fn new(w: &'a mut dyn Write, options: &Options) -> Self {
+        let opts = options.clone();
 
         Self {
             writer: w,
 
-            data_block: BlockWriter::new( opts.block_restart_interval),
+            data_block: BlockWriter::new(opts.block_restart_interval),
             index_block: BlockWriter::new(1),
 
             //filter_block: None,
-
             pending_index_entry: false,
-            pending_handle: BlockHandle {
-                offset: 0,
-                size: 0,
-            },
+            pending_handle: BlockHandle { offset: 0, size: 0 },
 
             closed: false,
             status: None,
@@ -69,19 +72,19 @@ impl<'a, 'b> TableWriter<'a, 'b> {
             compressed_buf: Vec::new(),
             last_key: Vec::new(),
 
-            opts:opts,
+            opts: opts,
         }
     }
 
-  // Add key,value to the table being constructed.
-  // REQUIRES: key is after any previously added key according to comparator.
-  // REQUIRES: Finish(), Abandon() have not been called
-  fn add(&mut self, key: &Key, value: &Value) -> Result<(), DbError> {
+    // Add key,value to the table being constructed.
+    // REQUIRES: key is after any previously added key according to comparator.
+    // REQUIRES: Finish(), Abandon() have not been called
+    fn add(&mut self, key: &Key, value: &Value) -> Result<(), DbError> {
         assert!(!self.closed);
 
         self.ok()?;
 
-        if self.num_entries > 0 && self.opts.comparator.compare( key, &self.last_key).is_le() {
+        if self.num_entries > 0 && self.opts.comparator.compare(key, &self.last_key).is_le() {
             return Err("table writer: keys are not in increasing order"
                 .to_string()
                 .into());
@@ -89,9 +92,11 @@ impl<'a, 'b> TableWriter<'a, 'b> {
 
         if self.pending_index_entry {
             assert!(self.data_block.is_empty());
-            self.opts.comparator.find_shortest_separator(&mut self.last_key, key);
-            let mut handle_encoding= Vec::with_capacity(2*MAX_VARINT_LEN64);
-            self.pending_handle.encode_to(& mut handle_encoding);
+            self.opts
+                .comparator
+                .find_shortest_separator(&mut self.last_key, key);
+            let mut handle_encoding = Vec::with_capacity(2 * MAX_VARINT_LEN64);
+            self.pending_handle.encode_to(&mut handle_encoding);
             self.index_block.append(&self.last_key, &handle_encoding);
             self.pending_index_entry = false;
         }
@@ -126,92 +131,99 @@ impl<'a, 'b> TableWriter<'a, 'b> {
 
         assert!(!self.pending_index_entry);
 
-        //self.write_block(& mut self.data_block, &mut self.pending_handle)?;
+        let l = self
+            .data_block
+            .write(self.writer, self.opts.compression)
+            .map_err(|e| {
+                let s = format!("data block write error {}", e.to_string());
+                self.status = Some(s.clone());
+                s
+            })?;
 
-
-        /* let bl = match self.data_block.write(self.writer, self.opts.compression) {
-            Ok(n) => n,
-            Err(e) => {
-                self.set_status(format!("status error: {}", e.to_string()));
-                return Err(e.into());
-            }
-        }; */
-
+        self.pending_handle.offset = self.offset;
+        self.pending_handle.size = l - BLOCK_TRAILER_SIZE;
         self.pending_index_entry = true;
+        self.offset += l;
+
         self.writer.flush()?;
 
         // todo:
         //self.filter_block.flush(self.offset);
 
-        /* self.pending_handle.offset = self.offset;
-        self.pending_handle.length = bl - BLOCK_TRAILER_LEN;
-        
-        self.offset += bl; */
-        
         Ok(())
     }
 
-    fn  write_block(&mut self, block:&mut BlockWriter, handle : &mut BlockHandle) -> errors::Result<()> {
-        // File format contains a sequence of blocks where each block has:
-        //    block_data: uint8[n]
-        //    type: uint8
-        //    crc: uint32
+    pub fn finish(&mut self) -> crate::errors::Result<()> {
+        self.flush()?;
+
+        assert!(!self.closed);
+        self.closed = true;
+
         self.ok()?;
-        let raw= block.finish();
 
-        let mut  block_contents:&[u8];
-        match self.opts.compression {
-            CompressionType::NoCompression => {
-                block_contents= raw;
-            },
-            CompressionType::SnappyCompression => {
-                {
-                let mut w = snap::write::FrameEncoder::new(&mut self.compressed_buf);
-                    w.write_all(raw)?;
-                    // no need flush, w will flush when drop
-                }
-
-                // TODO: Snappy not supported, or compressed less than 12.5%, so just
-                // store uncompressed form
-
-                block_contents= &self.compressed_buf;
+        // todo: write filterindex block
+        /* match &mut self.filter_block {
+            None => {}
+            Some(fb) => {
+                fb.finish();
+                fb.write(self.writer)? // no compression
             }
+        } */
+
+        let mut meta_index_block: BlockWriter = BlockWriter::new(self.opts.block_restart_interval);
+        /* match &self.filter_block {
+            None => {}
+            Some(fb) => {
+                // todo:
+                let mut k= "filter.".to_string();
+                let buf= fb.encode();
+                meta_index_block.append(&k, &buf)
+            }
+        } */
+        let l = meta_index_block
+            .write(self.writer, self.opts.compression)
+            .map_err(|e| {
+                let s = format!("meta index block write error {}", e.to_string());
+                self.status = Some(s.clone());
+                s
+            })?;
+        let meta_index_handle: BlockHandle = BlockHandle {
+            offset: self.offset,
+            size: l - BLOCK_TRAILER_SIZE,
+        };
+        self.offset += l;
+
+        // write index block
+        let mut index_block_handle = BlockHandle { offset: 0, size: 0 };
+        if self.pending_index_entry {
+            self.opts
+                .comparator
+                .find_short_successor(&mut self.last_key);
+            let mut handle_encoding = Vec::with_capacity(2 * MAX_VARINT_LEN64);
+            self.pending_handle.encode_to(&mut handle_encoding);
+            self.index_block.append(&self.last_key, &handle_encoding);
+            self.pending_index_entry = false;
         }
+        let l = self
+            .index_block
+            .write(self.writer, self.opts.compression)
+            .map_err(|e| {
+                let s = format!("index block write error {}", e.to_string());
+                self.status = Some(s.clone());
+                s
+            })?;
+        index_block_handle.offset = self.offset;
+        index_block_handle.size = l - BLOCK_TRAILER_SIZE;
+        self.offset += l;
 
-        //self.write_raw_block(block_contents, self.opts.compression, handle)?;
-        self.compressed_buf.clear();
-        block.reset();
-        Ok(())
-    }
-    
-    fn write_raw_block(&mut self, block_contents : &[u8], compression_type: CompressionType, handle:&mut BlockHandle) -> std::io::Result<()> {
-        handle.offset= self.offset;
-        handle.size= block_contents.len();
-        
-        let mut count=0;
-        while count < block_contents.len() {
-            // todo: handling Interrupted error and n==0
-            count += self.writer.write(&block_contents[count..])?;
-        }
-
-        let mut trailer:[u8;BLOCK_TRAILER_SIZE]= [0; BLOCK_TRAILER_SIZE];
-        trailer[0]= compression_type as u8;
-        
-        let mut digest= CASTAGNOLI.digest();
-        digest.update(block_contents);
-        digest.update(&trailer[0..1]);
-        let crc= digest.finalize();
-        // fixme: leveldb has a mask operation
-
-        LittleEndian::write_u32(&mut trailer[1..], crc);
-
-        count= 0;
-        while count < BLOCK_TRAILER_SIZE {
-            // todo: handling Interrupted error and n==0
-            count += self.writer.write(&trailer)?
-        }
-
-        self.offset += block_contents.len() + BLOCK_TRAILER_SIZE;
+        // write footer
+        let footer = Footer {
+            metaindex_handle: meta_index_handle,
+            index_handle: index_block_handle,
+        };
+        let footer_encoding = footer.encode();
+        self.writer.write_all(&footer_encoding)?;
+        self.offset += footer_encoding.len();
 
         Ok(())
     }
@@ -219,17 +231,40 @@ impl<'a, 'b> TableWriter<'a, 'b> {
     fn ok(&self) -> Result<(), DbError> {
         match &self.status {
             None => Ok(()),
-            Some(s) => {
-                Err(s.clone().into())
-            },
+            Some(s) => Err(s.clone().into()),
         }
+    }
+
+    pub fn num_entries(&self) -> usize {
+        self.num_entries
+    }
+
+    pub fn file_size(&self) -> usize {
+        self.offset
     }
 
 }
 
-impl<'a, 'b> Drop for TableWriter<'a, 'b> {
+impl<'a> Drop for TableWriter<'a> {
     fn drop(&mut self) {
         assert!(self.closed) // Catch errors where caller forgot to call Finish()
+    }
+}
+
+struct Footer {
+    metaindex_handle: BlockHandle,
+    index_handle: BlockHandle,
+}
+
+impl Footer {
+    fn encode(&self) -> Vec<u8> {
+        let mut v = Vec::with_capacity(2 * MAX_VARINT_LEN64);
+        self.metaindex_handle.encode_to(&mut v);
+        self.index_handle.encode_to(&mut v);
+        v.resize(2 * MAX_VARINT_LEN64, 0); // Padding
+        let _ = v.write_u64::<LittleEndian>(MAGIC); // make sure is littlen endian
+        assert_eq!(v.len(), FOOTER_LEN);
+        v
     }
 }
 
@@ -241,27 +276,24 @@ struct BlockHandle {
 }
 
 impl BlockHandle {
-    fn encode_to(&self, dst:&mut Vec<u8>) {
-        assert!(self.offset!=0);
-        assert!(self.size!=0);
+    fn encode_to(&self, dst: &mut Vec<u8>) {
+        assert!(self.offset != 0);
+        assert!(self.size != 0);
 
         super::put_uvarint(dst, self.offset as u64);
         super::put_uvarint(dst, self.size as u64);
     }
 
     fn decode_from(buf: &[u8]) -> std::result::Result<BlockHandle, String> {
-        let (offset, num_offset)= super::get_uvarint(buf).map_err(|s|{
-            format!("bad block handle {}", s)
-        })?;
-        
-        let (size, _) = super::get_uvarint(&buf[num_offset..]).map_err(|s|{
-            format!("bad block handle {}", s)
-        })?;
-        
+        let (offset, num_offset) =
+            super::get_uvarint(buf).map_err(|s| format!("bad block handle {}", s))?;
+
+        let (size, _) = super::get_uvarint(&buf[num_offset..])
+            .map_err(|s| format!("bad block handle {}", s))?;
+
         Ok(BlockHandle {
             offset: offset as usize,
             size: size as usize,
         })
     }
-
 }

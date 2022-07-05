@@ -4,10 +4,10 @@ use std::{io::Write, rc::Rc};
 
 use byteorder::{ByteOrder, LittleEndian, ReadBytesExt, WriteBytesExt};
 
-use crate::CompressionType;
+use crate::api::BytesComparator;
 use crate::api::{Comparator, Key, Value};
 use crate::errors::{DbError, Result};
-use crate::api::BytesComparator;
+use crate::CompressionType;
 
 use super::{BLOCK_TRAILER_SIZE, BLOCK_TYPE_NO_COMPRESSION};
 
@@ -28,7 +28,7 @@ pub struct BlockWriter {
 
 impl BlockWriter {
     pub fn new(restart_interval: usize) -> Self {
-        assert!(restart_interval>=1);
+        assert!(restart_interval >= 1);
 
         let mut r = Vec::new();
         r.push(0);
@@ -75,7 +75,7 @@ impl BlockWriter {
         self.counter += 1;
     }
 
-    pub fn finish(&mut self) -> &[u8]{
+    pub fn finish(&mut self) {
         for x in &self.restarts {
             let _ = self.buf.write_u32::<LittleEndian>(*x);
         }
@@ -83,7 +83,6 @@ impl BlockWriter {
             .buf
             .write_u32::<LittleEndian>(self.restarts.len() as u32);
         self.finished = true;
-        &self.buf
     }
 
     pub fn is_empty(&self) -> bool {
@@ -96,7 +95,7 @@ impl BlockWriter {
 
     pub fn reset(&mut self) {
         self.buf.clear();
-        //self.compressed_buf.clear();
+        self.compressed_buf.clear();
 
         self.counter = 0;
         self.restarts.clear();
@@ -106,79 +105,67 @@ impl BlockWriter {
         self.last_key.clear();
     }
 
-    /* pub fn write(
+    pub fn write(
         &mut self,
         writer: &mut dyn Write,
         compression: CompressionType,
     ) -> result::Result<usize, std::io::Error> {
+        // File format contains a sequence of blocks where each block has:
+        //    block_data: uint8[n]
+        //    type: uint8
+        //    crc: uint32
         self.finish();
 
-        let mut trailer = [0; BLOCK_TRAILER_SIZE];
-        let l;
-
+        let contents: &[u8];
         match compression {
             CompressionType::SnappyCompression => {
                 {
                     let mut w = snap::write::FrameEncoder::new(&mut self.compressed_buf);
                     w.write_all(&self.buf)?;
-                    w.flush()?;
+                    // flush at drop
                 }
-
-                writer.write_all(&self.compressed_buf)?;
-
-                let checksum = CASTAGNOLI.checksum(&self.compressed_buf);
-                LittleEndian::write_u32(&mut trailer[1..], checksum);
-                writer.write_all(&trailer)?;
-                l = self.compressed_buf.len();
+                contents = &self.compressed_buf;
             }
 
             CompressionType::NoCompression => {
-                writer.write_all(&self.buf)?;
-
-                trailer[0] = BLOCK_TYPE_NO_COMPRESSION;
-                let checksum = CASTAGNOLI.checksum(&self.buf);
-                LittleEndian::write_u32(&mut trailer[1..], checksum);
-                writer.write_all(&trailer)?;
-                l = self.buf.len();
+                contents = &self.buf;
             }
         }
-
+        let n = write_raw_block(contents, compression, writer)?;
         self.reset();
-        Ok(l)
+        Ok(n)
+    }
+}
+
+fn write_raw_block(
+    contents: &[u8],
+    compression_type: CompressionType,
+    writer: &mut dyn std::io::Write,
+) -> std::io::Result<usize> {
+    let n = contents.len();
+
+    writer.write_all(contents)?;
+
+    let mut trailer: [u8; BLOCK_TRAILER_SIZE] = [0; BLOCK_TRAILER_SIZE];
+    trailer[0] = compression_type as u8;
+
+    let mut digest = CASTAGNOLI.digest();
+    digest.update(contents);
+    digest.update(&trailer[0..1]);
+    let crc = digest.finalize();
+    // fixme: leveldb has a mask operation
+
+    LittleEndian::write_u32(&mut trailer[1..], crc);
+
+    /* count= 0;
+    while count < BLOCK_TRAILER_SIZE {
+        // todo: handling Interrupted error and n==0
+        count += self.writer.write(&trailer)?
     } */
 
+    //self.offset += block_contents.len() + BLOCK_TRAILER_SIZE;
 
-    fn write_raw_block(&mut self, compression_type: CompressionType, handle:&mut BlockHandle) -> std::io::Result<()> {
-        handle.offset= self.offset;
-        handle.size= block_contents.len();
-        
-        let mut count=0;
-        while count < block_contents.len() {
-            // todo: handling Interrupted error and n==0
-            count += self.writer.write(&block_contents[count..])?;
-        }
-
-        let mut trailer:[u8;BLOCK_TRAILER_SIZE]= [0; BLOCK_TRAILER_SIZE];
-        trailer[0]= compression_type as u8;
-        
-        let mut digest= CASTAGNOLI.digest();
-        digest.update(block_contents);
-        digest.update(&trailer[0..1]);
-        let crc= digest.finalize();
-        // fixme: leveldb has a mask operation
-
-        LittleEndian::write_u32(&mut trailer[1..], crc);
-
-        count= 0;
-        while count < BLOCK_TRAILER_SIZE {
-            // todo: handling Interrupted error and n==0
-            count += self.writer.write(&trailer)?
-        }
-
-        self.offset += block_contents.len() + BLOCK_TRAILER_SIZE;
-
-        Ok(())
-    }
+    Ok(n + BLOCK_TRAILER_SIZE)
 }
 
 fn share_prefix_len(a: &[u8], b: &[u8]) -> usize {
@@ -269,7 +256,12 @@ struct BlockIter<'a> {
 }
 
 impl<'a> BlockIter<'a> {
-    fn new(data: &'a Vec<u8>, num_restarts: usize, restarts: usize, cmp: Rc<dyn Comparator>) -> Self {
+    fn new(
+        data: &'a Vec<u8>,
+        num_restarts: usize,
+        restarts: usize,
+        cmp: Rc<dyn Comparator>,
+    ) -> Self {
         assert!(num_restarts > 0);
         Self {
             key: Vec::new(),
