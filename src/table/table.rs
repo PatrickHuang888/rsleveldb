@@ -14,7 +14,7 @@ use crate::{
     CompressionType, Options,
 };
 
-use super::{block::BlockWriter, BLOCK_TRAILER_SIZE};
+use super::{block::{BlockWriter, BlockReader}, BLOCK_TRAILER_SIZE};
 
 struct TableWriter<'a> {
     writer: &'a mut dyn Write,
@@ -297,3 +297,20 @@ impl BlockHandle {
         })
     }
 }
+
+
+pub trait RandomAccessRead {
+    // Read up to "n" bytes from the file starting at "offset".
+    // Safe for concurrent use by multiple threads.
+    fn read(&self, offset:usize, n:usize, dst: &mut Vec<u8>) -> std::io::Result<()>;
+}
+
+/* struct TableReader<'a> {
+    opts:Options,
+    status:Option<String>,
+    
+    reader : &dyn RandomAccessRead,
+
+    meta_index_handle: BlockHandle,
+    index_block: BlockReader<'a>,
+} */
