@@ -2,9 +2,9 @@ use crate::{
     errors,
     table::{FOOTER_LEN, MAGIC},
 };
-use std::{fmt::format, io::Write, vec};
+use std::{fmt::format, io::{Write, Error, Read}, vec};
 
-use byteorder::{ByteOrder, LittleEndian, WriteBytesExt};
+use byteorder::{ByteOrder, LittleEndian, ReadBytesExt, WriteBytesExt};
 
 use crate::{
     api::{Comparator, Key, Value},
@@ -14,7 +14,10 @@ use crate::{
     CompressionType, Options,
 };
 
-use super::{block::{BlockWriter, BlockReader}, BLOCK_TRAILER_SIZE};
+use super::{
+    block::{BlockReader, BlockWriter},
+    BLOCK_TRAILER_SIZE,
+};
 
 struct TableWriter<'a> {
     writer: &'a mut dyn Write,
@@ -242,7 +245,6 @@ impl<'a> TableWriter<'a> {
     pub fn file_size(&self) -> usize {
         self.offset
     }
-
 }
 
 impl<'a> Drop for TableWriter<'a> {
@@ -251,6 +253,7 @@ impl<'a> Drop for TableWriter<'a> {
     }
 }
 
+#[derive(Default)]
 struct Footer {
     metaindex_handle: BlockHandle,
     index_handle: BlockHandle,
@@ -266,10 +269,26 @@ impl Footer {
         assert_eq!(v.len(), FOOTER_LEN);
         v
     }
+    fn decode_from(input: &[u8]) -> std::result::Result<Self, String> {
+        let magic = LittleEndian::read_u64(&input[FOOTER_LEN - 8..]);
+        if magic != MAGIC {
+            return Err("not an sstable (bad magic number)".to_string().into());
+        }
+        let mut metaindex_handle = BlockHandle::default();
+        let l = BlockHandle::decode_from(input, &mut metaindex_handle)?;
+        let mut index_handle = BlockHandle::default();
+        let _ = BlockHandle::decode_from(&input[l..], &mut index_handle)?;
+
+        Ok(Self {
+            metaindex_handle: metaindex_handle,
+            index_handle: index_handle,
+        })
+    }
 }
 
 // a pointer to the extent of a file that stores a data
 // block or a meta block.
+#[derive(Default)]
 struct BlockHandle {
     offset: usize,
     size: usize,
@@ -284,33 +303,96 @@ impl BlockHandle {
         super::put_uvarint(dst, self.size as u64);
     }
 
-    fn decode_from(buf: &[u8]) -> std::result::Result<BlockHandle, String> {
+    fn decode_from(buf: &[u8], handle: &mut BlockHandle) -> std::result::Result<usize, String> {
         let (offset, num_offset) =
             super::get_uvarint(buf).map_err(|s| format!("bad block handle {}", s))?;
 
-        let (size, _) = super::get_uvarint(&buf[num_offset..])
+        let (size, num_size) = super::get_uvarint(&buf[num_offset..])
             .map_err(|s| format!("bad block handle {}", s))?;
 
-        Ok(BlockHandle {
-            offset: offset as usize,
-            size: size as usize,
-        })
+        handle.offset = offset as usize;
+        handle.size = size as usize;
+
+        Ok(num_offset + num_size)
     }
 }
-
 
 pub trait RandomAccessRead {
     // Read up to "n" bytes from the file starting at "offset".
     // Safe for concurrent use by multiple threads.
-    fn read(&self, offset:usize, n:usize, dst: &mut Vec<u8>) -> std::io::Result<()>;
+    fn read(&self, offset: usize, n: usize, dst: &mut Vec<u8>) -> std::io::Result<()>;
 }
 
-/* struct TableReader<'a> {
-    opts:Options,
-    status:Option<String>,
-    
-    reader : &dyn RandomAccessRead,
+pub struct TableReader<'a, 'b> {
+    opts: Options,
+    status: Option<String>,
+
+    reader: &'b dyn RandomAccessRead,
 
     meta_index_handle: BlockHandle,
     index_block: BlockReader<'a>,
-} */
+}
+
+impl<'a, 'b> TableReader<'a, 'b> {
+    pub fn open(opts: &Options, file: &'b dyn RandomAccessRead, size: usize) -> crate::errors::Result<Self> {
+        if size < FOOTER_LEN {
+            return Err("Corruption: file is too short to be an sstable"
+                .to_string()
+                .into());
+        }
+
+        //let footer_space: [u8;FOOTER_LEN]= [0;FOOTER_LEN];
+        let mut footer_input=[0;FOOTER_LEN];
+        file.read(size - FOOTER_LEN, FOOTER_LEN, &mut footer_input)?;
+        let footer = Footer::decode_from(&footer_input)?;
+
+        // Read index block
+
+
+        /* let t= TableReader{
+
+        }
+        Ok(t) */
+    }
+}
+
+#[derive(Default)]
+struct ReadOptions {
+    // If true, all data read from underlying storage will be
+  // verified against corresponding checksums.
+  verify_checksums:bool,
+}
+
+fn read_block(file :&dyn RandomAccessRead, opts:&ReadOptions, handle: &mut BlockHandle, contents: &mut Vec<u8>) -> crate::errors::Result<()>{
+    // Read the block contents as well as the type/crc footer.
+    let n= handle.size;
+    let mut buf= Vec::with_capacity(n+BLOCK_TRAILER_SIZE);
+    file.read(handle.offset, n+BLOCK_TRAILER_SIZE, &mut buf)?;
+    if buf.len()!= n+BLOCK_TRAILER_SIZE {
+        return Err("Block Corruption: truncated block read".to_string().into());
+    }
+
+    // Check the crc of the type and the block contents
+    if opts.verify_checksums {
+        // fixme: unmask ??
+        let crc= LittleEndian::read_u32(&buf[n+1..]);
+        let actul = CASTAGNOLI.checksum(&buf[..n+1]);
+        if actul!=crc {
+            return Err("block checksum mismatch".to_string().into())
+        }
+    }
+
+    // think: heap allocated, cachable ?
+
+    match buf[n].into(){
+        CompressionType::NoCompression => {
+            buf.truncate(n);
+            contents= &mut buf;
+        },
+        CompressionType::SnappyCompression => {
+                let mut r = snap::read::FrameDecoder::new(&buf[..n]);
+                r.read_to_end(contents)?;
+        }
+    }
+    Ok(())
+}

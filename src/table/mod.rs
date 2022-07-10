@@ -169,6 +169,9 @@ const BLOCK_TYPE_SNAPPY_COMPRESSION: u8 = 1;
 const KiB: usize = 1024;
 const DEFAULT_BLOCK_SIZE: usize = 4 * KiB;
 
+// Encoded length of a Footer.  Note that the serialization of a
+// Footer will always occupy exactly this many bytes.  It consists
+// of two block handles and a magic number.
 const FOOTER_LEN: usize = 48;
 
 // kTableMagicNumber was picked by running

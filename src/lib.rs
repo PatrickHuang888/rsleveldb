@@ -53,7 +53,7 @@ impl Default for Options {
             block_restart_interval: 16,
             block_size: 4 * 1024,
             compression: CompressionType::SnappyCompression,
-            comparator: Rc::new(BytesComparator::default()),
+            comparator: Rc::new(BytesComparator {}),
         }
     }
 }
@@ -68,4 +68,13 @@ enum CompressionType {
     // part of the persistent format on disk.
     NoCompression = 0x0,
     SnappyCompression = 0x1,
+}
+
+impl From<u8> for CompressionType {
+    fn from(c: u8) -> Self {
+        match c {
+            0x0 => CompressionType::NoCompression,
+            0x01 => CompressionType::SnappyCompression,
+        }
+    }
 }

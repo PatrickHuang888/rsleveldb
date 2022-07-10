@@ -205,15 +205,14 @@ fn put_uvarint(buf: &mut Vec<u8>, v: u64) {
     buf.push(x as u8);
 }
 
-pub struct BlockReader {
-    data: Rc<Vec<u8>>,
+pub struct BlockReader<'a> {
+    data: &'a [u8],
     num_restarts: usize,
     restart_offset: usize,
-    cmp: Rc<dyn Comparator>,
 }
 
-impl BlockReader {
-    pub fn new(data: &Vec<u8>, cmp: &dyn Comparator) -> Self {
+impl<'a> BlockReader<'a> {
+    pub fn new(data: &'a [u8]) -> Self {
         let mut num_restarts = 0;
         let mut restart_offset = 0;
         if data.len() >= 4 {
@@ -224,21 +223,15 @@ impl BlockReader {
             data: data,
             num_restarts: num_restarts as usize,
             restart_offset: restart_offset,
-            cmp: cmp,
         }
     }
 
-    pub fn iter(&self) -> BlockIter {
-        BlockIter::new(
-            self.data.clone(),
-            self.num_restarts,
-            self.restart_offset,
-            self.cmp.clone(),
-        )
+    pub fn iter(&self, cmp: Rc<dyn Comparator>) -> BlockIter {
+        BlockIter::new(self.data, self.num_restarts, self.restart_offset, cmp)
     }
 }
 
-struct BlockIter {
+struct BlockIter<'a> {
     key: Vec<u8>,
     value: Vec<u8>,
 
@@ -250,18 +243,13 @@ struct BlockIter {
     num_restarts: usize,  // Number of uint32_t entries in restart array
     status: Option<String>,
 
-    data: Rc<Vec<u8>>, // underlying block contents
+    data: &'a [u8], // underlying block contents
 
     cmp: Rc<dyn Comparator>,
 }
 
-impl BlockIter {
-    fn new(
-        data: Rc<Vec<u8>>,
-        num_restarts: usize,
-        restarts: usize,
-        cmp: Rc<dyn Comparator>,
-    ) -> Self {
+impl<'a> BlockIter<'a> {
+    fn new(data: &'a [u8], num_restarts: usize, restarts: usize, cmp: Rc<dyn Comparator>) -> Self {
         assert!(num_restarts > 0);
         Self {
             key: Vec::new(),
@@ -539,11 +527,14 @@ mod rnd {
 
 #[cfg(test)]
 mod tests {
+    use std::rc::Rc;
+
     use rand::prelude::ThreadRng;
     use rand::thread_rng;
     use rand::Rng;
 
     use crate::api::BytesComparator;
+    use crate::api::Comparator;
     use crate::api::Key;
     use crate::api::Value;
     use crate::table::Iterator;
@@ -659,7 +650,7 @@ mod tests {
     }
 
     fn test_forward_scan(br: &BlockReader, kv: &KeyValue) {
-        let mut it = br.iter();
+        let mut it = br.iter(Rc::new(BytesComparator::default()));
         assert!(!it.valid().unwrap());
         assert!(it.seek_to_first().is_ok());
         let mut i = 0;
@@ -672,7 +663,7 @@ mod tests {
     }
 
     fn test_backward_scan(br: &BlockReader, kv: &KeyValue) {
-        let mut it = br.iter();
+        let mut it = br.iter(Rc::new(BytesComparator::default()));
         assert!(!it.valid().unwrap());
 
         assert!(it.seek_to_last().is_ok());
@@ -686,7 +677,7 @@ mod tests {
         let verbose = true;
         let mut kv_index = 0;
 
-        let mut it = br.iter();
+        let mut it = br.iter(Rc::new(BytesComparator::default()));
         assert!(!it.valid().unwrap());
 
         if verbose {
