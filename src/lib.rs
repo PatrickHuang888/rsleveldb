@@ -45,6 +45,13 @@ pub struct Options {
     // here has the same name and orders keys *exactly* the same as the
     // comparator provided to previous open calls on the same DB.
     comparator: Rc<dyn Comparator>,
+
+    // If true, the implementation will do aggressive checking of the
+  // data it is processing and will stop early if it detects any
+  // errors.  This may have unforeseen ramifications: for example, a
+  // corruption of one DB entry may cause a large number of entries to
+  // become unreadable or for the entire DB to become unopenable.
+  paranoid_checks:bool,
 }
 
 impl Default for Options {
@@ -54,6 +61,7 @@ impl Default for Options {
             block_size: 4 * 1024,
             compression: CompressionType::SnappyCompression,
             comparator: Rc::new(BytesComparator {}),
+            paranoid_checks:false,
         }
     }
 }
@@ -75,6 +83,7 @@ impl From<u8> for CompressionType {
         match c {
             0x0 => CompressionType::NoCompression,
             0x01 => CompressionType::SnappyCompression,
+            _ => CompressionType::NoCompression,
         }
     }
 }

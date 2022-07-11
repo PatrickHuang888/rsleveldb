@@ -327,14 +327,14 @@ pub struct TableReader<'a, 'b> {
     opts: Options,
     status: Option<String>,
 
-    reader: &'b dyn RandomAccessRead,
+    file: &'a dyn RandomAccessRead,
 
     meta_index_handle: BlockHandle,
-    index_block: BlockReader<'a>,
+    index_block: BlockReader<'b>,
 }
 
 impl<'a, 'b> TableReader<'a, 'b> {
-    pub fn open(opts: &Options, file: &'b dyn RandomAccessRead, size: usize) -> crate::errors::Result<Self> {
+    pub fn open(opts: &Options, file: &'a dyn RandomAccessRead, size: usize) -> crate::errors::Result<Self> {
         if size < FOOTER_LEN {
             return Err("Corruption: file is too short to be an sstable"
                 .to_string()
@@ -342,17 +342,31 @@ impl<'a, 'b> TableReader<'a, 'b> {
         }
 
         //let footer_space: [u8;FOOTER_LEN]= [0;FOOTER_LEN];
-        let mut footer_input=[0;FOOTER_LEN];
+        let mut footer_input=Vec::with_capacity(FOOTER_LEN);
         file.read(size - FOOTER_LEN, FOOTER_LEN, &mut footer_input)?;
-        let footer = Footer::decode_from(&footer_input)?;
+        let mut footer = Footer::decode_from(&footer_input)?;
 
         // Read index block
-
-
-        /* let t= TableReader{
-
+        let mut opt= ReadOptions::default();
+        if opts.paranoid_checks {
+            opt.verify_checksums= true;
         }
-        Ok(t) */
+        let index_data= read_block(file, &opt, &mut footer.index_handle)?;
+        let index_block= BlockReader::new(Box::new(index_data));
+        let r= TableReader{
+            opts:opts.clone(),
+            status:None,
+            file:file,
+            index_block:index_block,
+            meta_index_handle:footer.metaindex_handle,
+        };
+        r.read_meta()?;
+        Ok(r)
+    }
+
+    fn read_meta(&self) -> std::io::Result<()>{
+        // todo:
+        Ok(())
     }
 }
 
@@ -363,7 +377,7 @@ struct ReadOptions {
   verify_checksums:bool,
 }
 
-fn read_block(file :&dyn RandomAccessRead, opts:&ReadOptions, handle: &mut BlockHandle, contents: &mut Vec<u8>) -> crate::errors::Result<()>{
+fn read_block(file :&dyn RandomAccessRead, opts:&ReadOptions, handle: &mut BlockHandle) -> crate::errors::Result<Vec<u8>>{
     // Read the block contents as well as the type/crc footer.
     let n= handle.size;
     let mut buf= Vec::with_capacity(n+BLOCK_TRAILER_SIZE);
@@ -387,12 +401,14 @@ fn read_block(file :&dyn RandomAccessRead, opts:&ReadOptions, handle: &mut Block
     match buf[n].into(){
         CompressionType::NoCompression => {
             buf.truncate(n);
-            contents= &mut buf;
+            let contents= buf;
+            return Ok(contents);
         },
         CompressionType::SnappyCompression => {
+            let mut contents= Vec::new();
                 let mut r = snap::read::FrameDecoder::new(&buf[..n]);
-                r.read_to_end(contents)?;
+                r.read_to_end(&mut contents)?;
+            return Ok(contents);
         }
     }
-    Ok(())
 }

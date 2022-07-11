@@ -205,14 +205,14 @@ fn put_uvarint(buf: &mut Vec<u8>, v: u64) {
     buf.push(x as u8);
 }
 
-pub struct BlockReader<'a> {
-    data: &'a [u8],
+pub struct BlockReader<'a>{
+    data: &'a Vec<u8>,
     num_restarts: usize,
     restart_offset: usize,
 }
 
 impl<'a> BlockReader<'a> {
-    pub fn new(data: &'a [u8]) -> Self {
+    pub fn new(data: Box<Vec<u8>>) -> Self {
         let mut num_restarts = 0;
         let mut restart_offset = 0;
         if data.len() >= 4 {
@@ -220,14 +220,14 @@ impl<'a> BlockReader<'a> {
             restart_offset = data.len() - ((num_restarts + 1) * 4) as usize;
         }
         Self {
-            data: data,
+            data:data.as_ref(),
             num_restarts: num_restarts as usize,
             restart_offset: restart_offset,
         }
     }
 
     pub fn iter(&self, cmp: Rc<dyn Comparator>) -> BlockIter {
-        BlockIter::new(self.data, self.num_restarts, self.restart_offset, cmp)
+        BlockIter::new(&self.data, self.num_restarts, self.restart_offset, cmp)
     }
 }
 
@@ -243,13 +243,13 @@ struct BlockIter<'a> {
     num_restarts: usize,  // Number of uint32_t entries in restart array
     status: Option<String>,
 
-    data: &'a [u8], // underlying block contents
+    data: &'a Vec<u8>, // underlying block contents
 
     cmp: Rc<dyn Comparator>,
 }
 
 impl<'a> BlockIter<'a> {
-    fn new(data: &'a [u8], num_restarts: usize, restarts: usize, cmp: Rc<dyn Comparator>) -> Self {
+    fn new(data: &'a Vec<u8>, num_restarts: usize, restarts: usize, cmp: Rc<dyn Comparator>) -> Self {
         assert!(num_restarts > 0);
         Self {
             key: Vec::new(),
