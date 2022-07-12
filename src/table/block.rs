@@ -205,14 +205,14 @@ fn put_uvarint(buf: &mut Vec<u8>, v: u64) {
     buf.push(x as u8);
 }
 
-pub struct BlockReader<'a>{
-    data: &'a Vec<u8>,
+pub struct BlockReader{
+    data: Vec<u8>,
     num_restarts: usize,
     restart_offset: usize,
 }
 
-impl<'a> BlockReader<'a> {
-    pub fn new(data: Box<Vec<u8>>) -> Self {
+impl BlockReader{
+    pub fn new(data: Vec<u8>) -> Self {
         let mut num_restarts = 0;
         let mut restart_offset = 0;
         if data.len() >= 4 {
@@ -220,7 +220,7 @@ impl<'a> BlockReader<'a> {
             restart_offset = data.len() - ((num_restarts + 1) * 4) as usize;
         }
         Self {
-            data:data.as_ref(),
+            data:data,
             num_restarts: num_restarts as usize,
             restart_offset: restart_offset,
         }
@@ -639,7 +639,7 @@ mod tests {
             }
             w.finish();
 
-            let br = BlockReader::new(&w.buf);
+            let br = BlockReader::new(w.buf);
 
             test_forward_scan(&br, &kv);
             test_backward_scan(&br, &kv);

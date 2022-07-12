@@ -323,17 +323,17 @@ pub trait RandomAccessRead {
     fn read(&self, offset: usize, n: usize, dst: &mut Vec<u8>) -> std::io::Result<()>;
 }
 
-pub struct TableReader<'a, 'b> {
+pub struct TableReader<'a> {
     opts: Options,
     status: Option<String>,
 
     file: &'a dyn RandomAccessRead,
 
     meta_index_handle: BlockHandle,
-    index_block: BlockReader<'b>,
+    index_block: BlockReader,
 }
 
-impl<'a, 'b> TableReader<'a, 'b> {
+impl<'a> TableReader<'a> {
     pub fn open(opts: &Options, file: &'a dyn RandomAccessRead, size: usize) -> crate::errors::Result<Self> {
         if size < FOOTER_LEN {
             return Err("Corruption: file is too short to be an sstable"
@@ -351,13 +351,12 @@ impl<'a, 'b> TableReader<'a, 'b> {
         if opts.paranoid_checks {
             opt.verify_checksums= true;
         }
-        let index_data= read_block(file, &opt, &mut footer.index_handle)?;
-        let index_block= BlockReader::new(Box::new(index_data));
+        let index_contents= read_block(file, &opt, &mut footer.index_handle)?;
         let r= TableReader{
             opts:opts.clone(),
             status:None,
             file:file,
-            index_block:index_block,
+            index_block:BlockReader::new(index_contents),
             meta_index_handle:footer.metaindex_handle,
         };
         r.read_meta()?;
