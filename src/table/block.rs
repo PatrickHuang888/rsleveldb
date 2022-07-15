@@ -265,19 +265,6 @@ impl<'a> BlockIter<'a> {
         }
     }
 
-    fn seek_to_first(&mut self) -> Result<()> {
-        self.seek_to_restart_point(0);
-        self.parse_next_key().map(|_| ())
-    }
-
-    fn seek_to_last(&mut self) -> Result<()> {
-        self.seek_to_restart_point(self.num_restarts - 1);
-        while self.parse_next_key()? && self.next_entry_offset() < self.restarts {
-            // Keep skipping
-        }
-        Ok(())
-    }
-
     // return key offset
     fn decode_entry(
         &mut self,
@@ -496,6 +483,20 @@ impl<'a> super::Iterator for BlockIter<'a> {
                 return Ok(());
             }
         }
+    }
+
+    fn seek_to_first(&mut self) -> Result<()> {
+        self.seek_to_restart_point(0);
+        let _ = self.parse_next_key()?;
+        Ok(())
+    }
+
+    fn seek_to_last(&mut self) -> Result<()> {
+        self.seek_to_restart_point(self.num_restarts - 1);
+        while self.parse_next_key()? && self.next_entry_offset() < self.restarts {
+            // Keep skipping
+        }
+        Ok(())
     }
 
     fn key(&self) -> &Key {

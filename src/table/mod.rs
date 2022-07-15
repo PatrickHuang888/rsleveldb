@@ -232,7 +232,16 @@ type Result<E> = std::result::Result<E, DbError>;
 pub trait Iterator {
     fn next(&mut self) -> Result<()>;
     fn prev(&mut self) -> Result<()>;
+    
     fn seek(&mut self, key: &Key) -> Result<()>;
+
+    // Position at the first key in the source.  The iterator is Valid()
+    // after this call iff the source is not empty.
+    fn seek_to_first(&mut self) -> Result<()>;
+
+    // Position at the last key in the source.  The iterator is
+    // Valid() after this call iff the source is not empty.
+    fn seek_to_last(&mut self) -> Result<()>;
 
     fn key(&self) -> &Key;
     fn value(&self) -> &Value;

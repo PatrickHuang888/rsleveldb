@@ -16,7 +16,7 @@ use crate::{
 
 use super::{
     block::{BlockReader, BlockWriter},
-    BLOCK_TRAILER_SIZE,
+    BLOCK_TRAILER_SIZE, Iterator,
 };
 
 struct TableWriter<'a> {
@@ -367,9 +367,30 @@ impl<'a> TableReader<'a> {
         // todo:
         Ok(())
     }
+
+    pub fn new_iterator(&self, opts :&ReadOptions) -> Box<dyn Iterator> {
+        let it= TwoLevelIterator::new(&mut self.index_block.iter(self.opts.comparator.clone()), opts, block_reader);
+        Box::new(it)
+    }
+
 }
 
-#[derive(Default)]
+fn block_reader(file :&dyn RandomAccessRead, cmp:&dyn Comparator, opts: &ReadOptions, index_value: &Vec<u8>) -> super::Result<Box<dyn super::Iterator>> {
+    let mut handle= BlockHandle::default();
+    BlockHandle::decode_from(index_value, &mut handle)?;
+    
+    // We intentionally allow extra stuff in index_value so that we
+    // can add more features in the future.
+
+    // todo: block cache
+
+    let block_contents =read_block(file, opts, &mut handle)?;
+    let block= BlockReader::new(block_contents);
+    let it = block.iter(cmp);
+    Ok(Box::new(it))
+}
+
+#[derive(Default, Clone)]
 struct ReadOptions {
     // If true, all data read from underlying storage will be
   // verified against corresponding checksums.
@@ -411,3 +432,140 @@ fn read_block(file :&dyn RandomAccessRead, opts:&ReadOptions, handle: &mut Block
         }
     }
 }
+
+
+// Return a new two level iterator.  A two-level iterator contains an
+// index iterator whose values point to a sequence of blocks where
+// each block is itself a sequence of key,value pairs.  The returned
+// two-level iterator yields the concatenation of all key/value pairs
+// in the sequence of blocks.  Takes ownership of "index_iter" and
+// will delete it when no longer needed.
+//
+// Uses a supplied function to convert an index_iter value into
+// an iterator over the contents of the corresponding block.
+struct TwoLevelIterator<'a>{
+    opts: ReadOptions,
+    index_iter : &'a mut dyn super::Iterator,
+    data_iter: Option<Box<dyn super::Iterator>>,
+    data_block_handle: Vec<u8>,
+    block_func: BlockFunc,
+}
+
+impl<'a> TwoLevelIterator<'a> {
+    fn new (index_iter:&'a mut dyn super::Iterator, opts:&ReadOptions, block_func:BlockFunc, table:&TableReader) -> Self {
+        Self { opts: opts.clone(), index_iter: index_iter, data_iter: None, block_func:block_func, data_block_handle:vec![]}
+    }
+
+    fn init_data_block(&mut self) -> super::Result<()>{
+        if self.index_iter.valid()? {
+            // set error status ?
+            self.data_iter= None;
+        }else {
+            let handle= self.index_iter.value();
+            if self.data_iter.is_some() && handle.eq(&self.data_block_handle) {
+                // data_iter_ is already constructed with this iterator, so
+                // no need to change anything
+            }else {
+                let iter= (self.block_func) (self.file, &self.opts, handle)?;
+                self.data_block_handle= handle.clone();
+                self.data_iter= Some(iter);
+            }
+        }
+        Ok(())
+    }
+
+    fn skip_empty_data_block_forward(&mut self) -> super::Result<()>{
+        while self.data_iter.is_none() || !self.data_iter.as_ref().unwrap().valid()? {
+            // Move to next block
+            if !self.index_iter.valid()? {
+                self.data_iter= None;
+                return Ok(())
+            }
+            self.index_iter.next()?;
+            self.init_data_block()?;
+            if let Some(data_iter) = self.data_iter.as_mut() {
+                data_iter.seek_to_first()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn skip_empty_data_block_backward(&mut self) -> super::Result<()> {
+        while self.data_iter.is_none() || !self.data_iter.as_ref().unwrap().valid()? {
+            // Move to next block
+            if !self.index_iter.valid()? {
+                self.data_iter= None;
+                return Ok(());
+            }
+            self.index_iter.prev()?;
+            self.init_data_block()?;
+            if let Some(data_iter) = self.data_iter.as_mut() {
+                data_iter.seek_to_last()?;
+            }
+        }
+        Ok(())
+    }
+
+}
+
+impl<'a> super::Iterator for TwoLevelIterator<'a> {
+    fn next(&mut self) -> super::Result<()> {
+        assert!(self.valid()?);
+        self.data_iter.as_mut().unwrap().next()?;
+        self.skip_empty_data_block_forward()?;
+        Ok(())
+    }
+    
+    fn prev(&mut self) -> super::Result<()> {
+        assert!(self.valid()?);
+        self.data_iter.as_mut().unwrap().prev()?;
+        self.skip_empty_data_block_backward()?;
+        Ok(())
+    }
+
+    fn seek(&mut self, target: &Key) -> super::Result<()> {
+        self.index_iter.seek(target)?;
+        self.init_data_block()?;
+        if let Some(it)= self.data_iter.as_mut() {
+            it.seek(target)?;
+        }
+
+        Ok(())
+    }
+
+    fn seek_to_first(&mut self) -> super::Result<()> {
+        self.index_iter.seek_to_first()?;
+        self.init_data_block()?;
+        if let Some(data_it)= self.data_iter.as_mut() {
+            data_it.seek_to_first()?;
+        }
+        self.skip_empty_data_block_forward()?;
+        Ok(())
+    }
+
+    fn seek_to_last(&mut self) -> super::Result<()> {
+        self.index_iter.seek_to_last()?;
+        self.init_data_block()?;
+        if let Some(data_it)= self.data_iter.as_mut() {
+            data_it.seek_to_last()?;
+        }
+        self.skip_empty_data_block_backward()?;
+        Ok(())
+    }
+
+    fn key(&self) -> &Key {
+        assert!(self.valid().unwrap());
+        self.data_iter.as_ref().unwrap().key()
+    }
+
+    fn value(&self) -> &Value {
+        assert!(self.valid().unwrap());
+        self.data_iter.as_ref().unwrap().value()
+    }   
+
+    fn valid(&self) -> super::Result<bool> {
+        self.data_iter.as_ref().unwrap().valid()
+    }
+}
+
+type BlockFunc = fn (&dyn RandomAccessRead, &ReadOptions, &Vec<u8>) -> super::Result<Box<dyn super::Iterator>>;
