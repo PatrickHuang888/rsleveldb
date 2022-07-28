@@ -10,7 +10,7 @@ mod table;
 mod test;
 
 #[derive(Clone)]
-pub struct Options {
+pub struct Options{
     // Number of keys between restart points for delta encoding of keys.
     // This parameter can be changed dynamically.  Most clients should
     // leave this parameter alone.
@@ -44,7 +44,7 @@ pub struct Options {
     // REQUIRES: The client must ensure that the comparator supplied
     // here has the same name and orders keys *exactly* the same as the
     // comparator provided to previous open calls on the same DB.
-    comparator: Rc<dyn Comparator>,
+    //comparator: C,
 
     // If true, the implementation will do aggressive checking of the
   // data it is processing and will stop early if it detects any
@@ -54,13 +54,13 @@ pub struct Options {
   paranoid_checks:bool,
 }
 
-impl Default for Options {
+impl Options{
     fn default() -> Self {
-        Self {
+        Options {
             block_restart_interval: 16,
             block_size: 4 * 1024,
             compression: CompressionType::SnappyCompression,
-            comparator: Rc::new(BytesComparator {}),
+            //comparator: cmp,
             paranoid_checks:false,
         }
     }

@@ -2,7 +2,7 @@ use crate::{
     errors,
     table::{FOOTER_LEN, MAGIC},
 };
-use std::{fmt::format, io::{Write, Error, Read}, vec};
+use std::{fmt::format, io::{Write, Error, Read}, vec, rc::Rc};
 
 use byteorder::{ByteOrder, LittleEndian, ReadBytesExt, WriteBytesExt};
 
@@ -15,12 +15,13 @@ use crate::{
 };
 
 use super::{
-    block::{BlockReader, BlockWriter},
+    block::{BlockReader, BlockWriter, BlockIterator},
     BLOCK_TRAILER_SIZE, Iterator,
 };
 
-struct TableWriter<'a> {
-    writer: &'a mut dyn Write,
+struct TableWriter<'a, W:Write, C:Comparator> {
+    writer: &'a mut W,
+    comparator: &'a C,
 
     data_block: BlockWriter,
     index_block: BlockWriter,
@@ -53,12 +54,13 @@ struct TableWriter<'a> {
     //filter_block: Option<FilterBlock<'c>>,
 }
 
-impl<'a> TableWriter<'a> {
-    fn new(w: &'a mut dyn Write, options: &Options) -> Self {
+impl<'a, W:Write, C:Comparator> TableWriter<'a, W, C> {
+    fn new(w: &'a mut W, cmp:&'a C, options: &Options) -> Self {
         let opts = options.clone();
 
-        Self {
+        TableWriter {
             writer: w,
+            comparator:cmp,
 
             data_block: BlockWriter::new(opts.block_restart_interval),
             index_block: BlockWriter::new(1),
@@ -87,7 +89,7 @@ impl<'a> TableWriter<'a> {
 
         self.ok()?;
 
-        if self.num_entries > 0 && self.opts.comparator.compare(key, &self.last_key).is_le() {
+        if self.num_entries > 0 && self.comparator.compare(key, &self.last_key).is_le() {
             return Err("table writer: keys are not in increasing order"
                 .to_string()
                 .into());
@@ -95,8 +97,7 @@ impl<'a> TableWriter<'a> {
 
         if self.pending_index_entry {
             assert!(self.data_block.is_empty());
-            self.opts
-                .comparator
+            self.comparator
                 .find_shortest_separator(&mut self.last_key, key);
             let mut handle_encoding = Vec::with_capacity(2 * MAX_VARINT_LEN64);
             self.pending_handle.encode_to(&mut handle_encoding);
@@ -199,8 +200,7 @@ impl<'a> TableWriter<'a> {
         // write index block
         let mut index_block_handle = BlockHandle { offset: 0, size: 0 };
         if self.pending_index_entry {
-            self.opts
-                .comparator
+            self.comparator
                 .find_short_successor(&mut self.last_key);
             let mut handle_encoding = Vec::with_capacity(2 * MAX_VARINT_LEN64);
             self.pending_handle.encode_to(&mut handle_encoding);
@@ -247,7 +247,7 @@ impl<'a> TableWriter<'a> {
     }
 }
 
-impl<'a> Drop for TableWriter<'a> {
+impl<'a, W:Write, C:Comparator> Drop for TableWriter<'a, W, C> {
     fn drop(&mut self) {
         assert!(self.closed) // Catch errors where caller forgot to call Finish()
     }
@@ -323,18 +323,19 @@ pub trait RandomAccessRead {
     fn read(&self, offset: usize, n: usize, dst: &mut Vec<u8>) -> std::io::Result<()>;
 }
 
-pub struct TableReader<'a> {
+pub struct TableReader<'a, C, F> {
     opts: Options,
     status: Option<String>,
 
-    file: &'a dyn RandomAccessRead,
+    comparator: &'a C,
+    file: &'a F,
 
     meta_index_handle: BlockHandle,
     index_block: BlockReader,
 }
 
-impl<'a> TableReader<'a> {
-    pub fn open(opts: &Options, file: &'a dyn RandomAccessRead, size: usize) -> crate::errors::Result<Self> {
+impl<'a, C:Comparator, F:RandomAccessRead> TableReader<'a, C, F> {
+    pub fn open(opts: Options, cmp: &'a C, file: &'a F, size: usize) -> crate::errors::Result<Self> {
         if size < FOOTER_LEN {
             return Err("Corruption: file is too short to be an sstable"
                 .to_string()
@@ -356,6 +357,7 @@ impl<'a> TableReader<'a> {
             opts:opts.clone(),
             status:None,
             file:file,
+            comparator:cmp,
             index_block:BlockReader::new(index_contents),
             meta_index_handle:footer.metaindex_handle,
         };
@@ -368,14 +370,13 @@ impl<'a> TableReader<'a> {
         Ok(())
     }
 
-    pub fn new_iterator(&self, opts :&ReadOptions) -> Box<dyn Iterator> {
-        let it= TwoLevelIterator::new(&mut self.index_block.iter(self.opts.comparator.clone()), opts, block_reader);
-        Box::new(it)
+    pub fn new_iterator (&'a self, opts :&ReadOptions) -> TableIterator<'a, F, C>{
+        TableIterator::new(&mut self.index_block.iter(&self.comparator), self.file, &self.comparator,  opts)
     }
 
 }
 
-fn block_reader(file :&dyn RandomAccessRead, cmp:&dyn Comparator, opts: &ReadOptions, index_value: &Vec<u8>) -> super::Result<Box<dyn super::Iterator>> {
+fn block_reader<'a, F:RandomAccessRead, C:Comparator>(file :&'a F, cmp:&'a C, opts: &ReadOptions, index_value: &Vec<u8>) -> super::Result<BlockIterator<'a, C>> {
     let mut handle= BlockHandle::default();
     BlockHandle::decode_from(index_value, &mut handle)?;
     
@@ -386,8 +387,7 @@ fn block_reader(file :&dyn RandomAccessRead, cmp:&dyn Comparator, opts: &ReadOpt
 
     let block_contents =read_block(file, opts, &mut handle)?;
     let block= BlockReader::new(block_contents);
-    let it = block.iter(cmp);
-    Ok(Box::new(it))
+    Ok(block.iter(cmp))
 }
 
 #[derive(Default, Clone)]
@@ -443,17 +443,18 @@ fn read_block(file :&dyn RandomAccessRead, opts:&ReadOptions, handle: &mut Block
 //
 // Uses a supplied function to convert an index_iter value into
 // an iterator over the contents of the corresponding block.
-struct TwoLevelIterator<'a>{
+struct TableIterator<'a, F:RandomAccessRead, C:Comparator>{
     opts: ReadOptions,
-    index_iter : &'a mut dyn super::Iterator,
-    data_iter: Option<Box<dyn super::Iterator>>,
+    index_iter : &'a mut BlockIterator<'a, C>,
+    data_iter: Option<BlockIterator<'a, C>>,
     data_block_handle: Vec<u8>,
-    block_func: BlockFunc,
+    file: &'a F,
+    cmp: &'a C,
 }
 
-impl<'a> TwoLevelIterator<'a> {
-    fn new (index_iter:&'a mut dyn super::Iterator, opts:&ReadOptions, block_func:BlockFunc, table:&TableReader) -> Self {
-        Self { opts: opts.clone(), index_iter: index_iter, data_iter: None, block_func:block_func, data_block_handle:vec![]}
+impl<'a, F, C> TableIterator<'a, F, C> where F:RandomAccessRead, C:Comparator{
+    fn new (index_iter:&'a mut BlockIterator<'a, C>, file: &'a F, cmp:&'a C, opts:&ReadOptions) -> Self {
+        TableIterator { opts: opts.clone(), index_iter: index_iter, data_iter: None, data_block_handle:vec![], file:file, cmp:cmp}
     }
 
     fn init_data_block(&mut self) -> super::Result<()>{
@@ -466,7 +467,7 @@ impl<'a> TwoLevelIterator<'a> {
                 // data_iter_ is already constructed with this iterator, so
                 // no need to change anything
             }else {
-                let iter= (self.block_func) (self.file, &self.opts, handle)?;
+                let iter= block_reader (self.file, self.cmp, &self.opts, handle)?;
                 self.data_block_handle= handle.clone();
                 self.data_iter= Some(iter);
             }
@@ -508,7 +509,7 @@ impl<'a> TwoLevelIterator<'a> {
 
 }
 
-impl<'a> super::Iterator for TwoLevelIterator<'a> {
+impl<'a, F, C> super::Iterator for TableIterator<'a, F, C> where F:RandomAccessRead, C:Comparator {
     fn next(&mut self) -> super::Result<()> {
         assert!(self.valid()?);
         self.data_iter.as_mut().unwrap().next()?;

@@ -31,7 +31,7 @@ pub trait Comparator {
     fn find_short_successor(&self, b: &mut [u8]);
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct BytesComparator {}
 
 impl Comparator for BytesComparator {

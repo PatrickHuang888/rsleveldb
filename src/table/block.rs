@@ -226,12 +226,12 @@ impl BlockReader{
         }
     }
 
-    pub fn iter(&self, cmp: Rc<dyn Comparator>) -> BlockIter {
-        BlockIter::new(&self.data, self.num_restarts, self.restart_offset, cmp)
+    pub fn iter<'a, C:Comparator> (&'a self, cmp: &'a C) -> BlockIterator<'a, C> {
+        BlockIterator::new(&self.data, self.num_restarts, self.restart_offset, cmp)
     }
 }
 
-struct BlockIter<'a> {
+pub struct BlockIterator<'a, C:Comparator> {
     key: Vec<u8>,
     value: Vec<u8>,
 
@@ -245,11 +245,11 @@ struct BlockIter<'a> {
 
     data: &'a Vec<u8>, // underlying block contents
 
-    cmp: Rc<dyn Comparator>,
+    cmp: &'a C,
 }
 
-impl<'a> BlockIter<'a> {
-    fn new(data: &'a Vec<u8>, num_restarts: usize, restarts: usize, cmp: Rc<dyn Comparator>) -> Self {
+impl<'a, C:Comparator> BlockIterator<'a, C> {
+    fn new(data: &'a Vec<u8>, num_restarts: usize, restarts: usize, cmp: &'a C) -> Self {
         assert!(num_restarts > 0);
         Self {
             key: Vec::new(),
@@ -381,7 +381,7 @@ impl<'a> BlockIter<'a> {
     }
 }
 
-impl<'a> super::Iterator for BlockIter<'a> {
+impl<'a, C:Comparator> super::Iterator for BlockIterator<'a, C> {
     fn next(&mut self) -> Result<()> {
         if !self.valid()? {
             return Err("Iterator invalid".to_string().into());
@@ -650,8 +650,8 @@ mod tests {
         }
     }
 
-    fn test_forward_scan(br: &BlockReader, kv: &KeyValue) {
-        let mut it = br.iter(Rc::new(BytesComparator::default()));
+    fn test_forward_scan(br: &'static BlockReader, kv: &KeyValue) {
+        let mut it = br.iter(&BytesComparator::default());
         assert!(!it.valid().unwrap());
         assert!(it.seek_to_first().is_ok());
         let mut i = 0;
@@ -664,7 +664,7 @@ mod tests {
     }
 
     fn test_backward_scan(br: &BlockReader, kv: &KeyValue) {
-        let mut it = br.iter(Rc::new(BytesComparator::default()));
+        let mut it = br.iter(&BytesComparator::default());
         assert!(!it.valid().unwrap());
 
         assert!(it.seek_to_last().is_ok());
@@ -678,7 +678,7 @@ mod tests {
         let verbose = true;
         let mut kv_index = 0;
 
-        let mut it = br.iter(Rc::new(BytesComparator::default()));
+        let mut it = br.iter(&BytesComparator::default());
         assert!(!it.valid().unwrap());
 
         if verbose {
