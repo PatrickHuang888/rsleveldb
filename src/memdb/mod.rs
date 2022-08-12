@@ -1,7 +1,7 @@
+use crate::api;
 use crate::api::Comparator;
 use crate::api::Key;
 use crate::api::Value;
-use crate::errors;
 use std::cmp;
 use std::io::Write;
 use std::sync::Arc;
@@ -25,7 +25,7 @@ impl<C: Comparator> MemDb<C> {
         }
     }
 
-    pub fn put(&mut self, key: &Key, value: &Value) -> errors::Result<()> {
+    pub fn put(&mut self, key: &Key, value: &Value) -> api::Result<()> {
         let mut db = self.inner.write().unwrap();
         db.put(key, value)
     }
@@ -189,7 +189,7 @@ impl<C: Comparator> SkipList<C> {
 
     // Sets the value for the given key. It overwrites any previous value
     // for that key.
-    fn put(&mut self, key: &[u8], value: &[u8]) -> errors::Result<()> {
+    fn put(&mut self, key: &[u8], value: &[u8]) -> api::Result<()> {
         let mut prevs: [usize; MAX_HEIGHT] = [0; MAX_HEIGHT];
         let (node, exact) = self.find_ge(key, Some(&mut prevs));
 

@@ -1,5 +1,5 @@
 use crate::{
-    errors,
+    api,
     table::{FOOTER_LEN, MAGIC},
 };
 use std::{
@@ -12,8 +12,9 @@ use std::{
 use byteorder::{ByteOrder, LittleEndian, ReadBytesExt, WriteBytesExt};
 
 use crate::{
+    api::DbError,
+    api::Iterator,
     api::{Comparator, Key, Value},
-    errors::DbError,
     journal::CASTAGNOLI,
     table::MAX_VARINT_LEN64,
     CompressionType, Options,
@@ -21,7 +22,7 @@ use crate::{
 
 use super::{
     block::{BlockIterator, BlockReader, BlockWriter},
-    Iterator, BLOCK_TRAILER_SIZE,
+    BLOCK_TRAILER_SIZE,
 };
 
 pub struct TableWriter<'a, W: Write, C: Comparator> {
@@ -161,7 +162,7 @@ impl<'a, W: Write, C: Comparator> TableWriter<'a, W, C> {
         Ok(())
     }
 
-    pub fn finish(&mut self) -> crate::errors::Result<()> {
+    pub fn finish(&mut self) -> crate::api::Result<()> {
         self.flush()?;
 
         assert!(!self.closed);
@@ -347,7 +348,7 @@ pub struct TableReader<'f, C: Comparator, F> {
 }
 
 impl<'f, C: Comparator, F: RandomAccessRead> TableReader<'f, C, F> {
-    pub fn open(opts: Options<C>, file: &'f F, size: usize) -> crate::errors::Result<Self> {
+    pub fn open(opts: Options<C>, file: &'f F, size: usize) -> crate::api::Result<Self> {
         if size < FOOTER_LEN {
             return Err("Corruption: file is too short to be an sstable"
                 .to_string()
@@ -396,7 +397,7 @@ fn block_reader<'a, 'data, F: RandomAccessRead>(
     file: &F,
     opts: &ReadOptions,
     index_value: &Vec<u8>,
-) -> super::Result<BlockReader> {
+) -> api::Result<BlockReader> {
     let mut handle = BlockHandle::default();
     BlockHandle::decode_from(index_value, &mut handle)?;
 
@@ -421,7 +422,7 @@ fn read_block_content<'a, F: RandomAccessRead>(
     file: &'a F,
     opts: &ReadOptions,
     handle: &mut BlockHandle,
-) -> crate::errors::Result<Vec<u8>> {
+) -> api::Result<Vec<u8>> {
     // Read the block contents as well as the type/crc footer.
     let n = handle.size;
     let mut buf = Vec::with_capacity(n + BLOCK_TRAILER_SIZE);
@@ -491,7 +492,7 @@ where
         }
     }
 
-    fn init_data_block(&mut self) -> super::Result<()> {
+    fn init_data_block(&mut self) -> api::Result<()> {
         if !self.index_iter.valid()? {
             // set error status ?
             self.data_iter = None;
@@ -509,7 +510,7 @@ where
         Ok(())
     }
 
-    fn skip_empty_data_block_forward(&mut self) -> super::Result<()> {
+    fn skip_empty_data_block_forward(&mut self) -> api::Result<()> {
         while self.data_iter.is_none() || !self.data_iter.as_ref().unwrap().valid()? {
             // Move to next block
             if !self.index_iter.valid()? {
@@ -525,7 +526,7 @@ where
         Ok(())
     }
 
-    fn skip_empty_data_block_backward(&mut self) -> super::Result<()> {
+    fn skip_empty_data_block_backward(&mut self) -> api::Result<()> {
         while self.data_iter.is_none() || !self.data_iter.as_ref().unwrap().valid()? {
             // Move to next block
             if !self.index_iter.valid()? {
@@ -542,26 +543,26 @@ where
     }
 }
 
-impl<'f, F, C> super::Iterator for TableIterator<'f, F, C>
+impl<'f, F, C> api::Iterator for TableIterator<'f, F, C>
 where
     F: RandomAccessRead,
     C: Comparator,
 {
-    fn next(&mut self) -> super::Result<()> {
+    fn next(&mut self) -> api::Result<()> {
         assert!(self.valid()?);
         self.data_iter.as_mut().unwrap().next()?;
         self.skip_empty_data_block_forward()?;
         Ok(())
     }
 
-    fn prev(&mut self) -> super::Result<()> {
+    fn prev(&mut self) -> api::Result<()> {
         assert!(self.valid()?);
         self.data_iter.as_mut().unwrap().prev()?;
         self.skip_empty_data_block_backward()?;
         Ok(())
     }
 
-    fn seek(&mut self, target: &Key) -> super::Result<()> {
+    fn seek(&mut self, target: &Key) -> api::Result<()> {
         self.index_iter.seek(target)?;
         self.init_data_block()?;
         if let Some(it) = self.data_iter.as_mut() {
@@ -571,7 +572,7 @@ where
         Ok(())
     }
 
-    fn seek_to_first(&mut self) -> super::Result<()> {
+    fn seek_to_first(&mut self) -> api::Result<()> {
         self.index_iter.seek_to_first()?;
         self.init_data_block()?;
         if let Some(data_it) = self.data_iter.as_mut() {
@@ -581,7 +582,7 @@ where
         Ok(())
     }
 
-    fn seek_to_last(&mut self) -> super::Result<()> {
+    fn seek_to_last(&mut self) -> api::Result<()> {
         self.index_iter.seek_to_last()?;
         self.init_data_block()?;
         if let Some(data_it) = self.data_iter.as_mut() {
@@ -601,7 +602,7 @@ where
         self.data_iter.as_ref().unwrap().value()
     }
 
-    fn valid(&self) -> super::Result<bool> {
+    fn valid(&self) -> api::Result<bool> {
         match &self.data_iter {
             None => Ok(false),
             Some(it) => it.valid(),

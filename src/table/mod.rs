@@ -152,8 +152,8 @@ NOTE: All fixed-length integer are little-endian.
 //     num_restarts: uint32
 // restarts[i] contains the offset within the block of the ith restart point.
 
+use crate::api::DbError;
 use crate::api::{Key, Value};
-use crate::errors::DbError;
 
 mod block;
 mod table;
@@ -228,27 +228,6 @@ pub fn get_uvarint(buf: &[u8]) -> std::result::Result<(u64, usize), String> {
     Err("buf too small".to_string()) //0,0
 }
 
-type Result<E> = std::result::Result<E, DbError>;
-pub trait Iterator {
-    fn next(&mut self) -> Result<()>;
-    fn prev(&mut self) -> Result<()>;
-
-    fn seek(&mut self, key: &Key) -> Result<()>;
-
-    // Position at the first key in the source.  The iterator is Valid()
-    // after this call iff the source is not empty.
-    fn seek_to_first(&mut self) -> Result<()>;
-
-    // Position at the last key in the source.  The iterator is
-    // Valid() after this call iff the source is not empty.
-    fn seek_to_last(&mut self) -> Result<()>;
-
-    fn key(&self) -> &Key;
-    fn value(&self) -> &Value;
-
-    fn valid(&self) -> Result<bool>;
-}
-
 #[cfg(test)]
 mod tests {
     use std::io::{Error, ErrorKind, Write};
@@ -256,7 +235,7 @@ mod tests {
     use rand::{rngs::ThreadRng, thread_rng, Rng};
 
     use crate::{
-        api::{BytesComparator, Comparator, Key, Value},
+        api::{BytesComparator, Comparator, Iterator, Key, Value},
         table::{
             table::{ReadOptions, TableReader},
             BLOCK_TRAILER_SIZE,
@@ -268,7 +247,6 @@ mod tests {
     use super::{
         block::{BlockReader, BlockWriter},
         table::{RandomAccessRead, TableWriter},
-        Iterator,
     };
 
     struct BufferSource {

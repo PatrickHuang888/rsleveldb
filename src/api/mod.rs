@@ -1,5 +1,4 @@
-use std::cmp;
-use std::io::Write;
+use std::{cmp, fmt};
 
 pub type Key = Vec<u8>;
 pub type Value = Vec<u8>;
@@ -67,5 +66,59 @@ impl Comparator for BytesComparator {
             }
         }
         // *key is a run of 0xffs.  Leave it alone.
+    }
+}
+
+pub type Result<E> = std::result::Result<E, DbError>;
+pub trait Iterator {
+    fn next(&mut self) -> Result<()>;
+    fn prev(&mut self) -> Result<()>;
+
+    fn seek(&mut self, key: &Key) -> Result<()>;
+
+    // Position at the first key in the source.  The iterator is Valid()
+    // after this call iff the source is not empty.
+    fn seek_to_first(&mut self) -> Result<()>;
+
+    // Position at the last key in the source.  The iterator is
+    // Valid() after this call iff the source is not empty.
+    fn seek_to_last(&mut self) -> Result<()>;
+
+    fn key(&self) -> &Key;
+    fn value(&self) -> &Value;
+
+    fn valid(&self) -> Result<bool>;
+}
+
+#[derive(Debug)]
+pub struct DbError {
+    reason: String,
+}
+
+impl From<std::io::Error> for DbError {
+    fn from(e: std::io::Error) -> Self {
+        Self {
+            reason: e.to_string(),
+        }
+    }
+}
+
+impl From<String> for DbError {
+    fn from(s: String) -> Self {
+        Self { reason: s }
+    }
+}
+
+impl Clone for DbError {
+    fn clone(&self) -> Self {
+        Self {
+            reason: self.reason.clone(),
+        }
+    }
+}
+
+impl std::fmt::Display for DbError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "({})", self.reason)
     }
 }

@@ -3,7 +3,7 @@ use std::rc::Rc;
 use api::{BytesComparator, Comparator};
 
 mod api;
-mod errors;
+mod db;
 mod journal;
 pub mod memdb;
 mod table;

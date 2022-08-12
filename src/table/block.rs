@@ -5,8 +5,8 @@ use std::{io::Write, rc::Rc};
 
 use byteorder::{ByteOrder, LittleEndian, ReadBytesExt, WriteBytesExt};
 
-use crate::api::{Comparator, Key, Value};
-use crate::errors::{DbError, Result};
+use crate::api::{self, Comparator, Key, Value};
+use crate::api::{DbError, Result};
 use crate::CompressionType;
 
 use super::{BLOCK_TRAILER_SIZE, BLOCK_TYPE_NO_COMPRESSION};
@@ -374,7 +374,7 @@ impl<C: Comparator> BlockIterator<C> {
     }
 }
 
-impl<C: Comparator> super::Iterator for BlockIterator<C> {
+impl<C: Comparator> api::Iterator for BlockIterator<C> {
     fn next(&mut self) -> Result<()> {
         if !self.valid()? {
             return Err("Iterator invalid".to_string().into());
