@@ -6,22 +6,34 @@ use std::{
 
 use rand::{thread_rng, Rng};
 
-trait Comparator<K: PartialEq>: Clone {
+pub trait Comparator<K: ?Sized> {
     fn compare(&self, a: &K, b: &K) -> cmp::Ordering;
 }
 
-struct Node<K> {
+/* trait Copy {
+    fn copy(&self) -> S;
+}
+
+impl Copy<[u8]> for [u8] {
+    fn copy(k:&[u8]) -> &[u8] {
+        let v= Vec::with_capacity(k.len());
+        v.extend_from_slice(k);
+        v.as_slice()
+    }
+} */
+
+struct Node<K: Clone> {
     key: K,
     nexts: Vec<AtomicPtr<Node<K>>>,
 }
 
-impl<K: Clone + PartialEq> PartialEq for Node<K> {
+/* impl<'a, K:PartialEq> PartialEq for Node<'a, K> {
     fn eq(&self, other: &Self) -> bool {
-        self.key == other.key
+        *self.key == *other.key
     }
-}
+} */
 
-impl<K: Clone + PartialEq> Node<K> {
+impl<K: Clone> Node<K> {
     fn new(key: &K, height: usize) -> Self {
         let mut v = Vec::with_capacity(height);
         for _ in 0..height {
@@ -57,18 +69,18 @@ impl<K: Clone + PartialEq> Node<K> {
 
 const MAX_HEIGHT: usize = 12;
 
-struct SkipList<C: Comparator<K>, K: Clone + PartialEq + Default> {
+pub struct SkipList<C: Comparator<K>, K: PartialEq + Clone> {
     comparator: C,
     max_height: AtomicUsize,
     head: Node<K>,
     head_ptr: *mut Node<K>,
 }
 
-impl<C: Comparator<K>, K: Clone + PartialEq + Default> SkipList<C, K> {
-    fn new(cmp: C) -> Self {
-        let head = Node::new(&Default::default(), MAX_HEIGHT); // head with any key will do
+impl<C: Comparator<K>, K: PartialEq + Clone> SkipList<C, K> {
+    fn new(cmp: C, head_key: &K) -> Self {
+        let head = Node::new(head_key, MAX_HEIGHT); // head with any key will do
         let mut list = SkipList {
-            comparator: cmp.clone(),
+            comparator: cmp,
             max_height: AtomicUsize::new(1),
             head: head,
             head_ptr: null_mut(),
@@ -91,7 +103,7 @@ impl<C: Comparator<K>, K: Clone + PartialEq + Default> SkipList<C, K> {
         height
     }
 
-    fn insert(&mut self, key: &K) {
+    pub fn insert(&mut self, key: &K) {
         let mut prevs = vec![ptr::null_mut(); MAX_HEIGHT];
 
         let i_ptr = self.find_greater_or_equal(key, &mut prevs);
@@ -244,33 +256,33 @@ impl<C: Comparator<K>, K: Clone + PartialEq + Default> SkipList<C, K> {
         self.max_height.load(Ordering::Relaxed)
     }
 
-    fn new_iterator(&mut self) -> SkipListIterator<C, K> {
+    pub fn new_iterator(&self) -> SkipListIterator<C, K> {
         SkipListIterator {
-            list: self,
+            list: &self,
             n_ptr: ptr::null_mut(),
         }
     }
 }
 
-impl<C: Comparator<K>, K: Clone + PartialEq + Default> Drop for SkipList<C, K> {
+impl<C: Comparator<K>, K: PartialEq + Clone> Drop for SkipList<C, K> {
     fn drop(&mut self) {
         let mut n_ptr = self.head.next(0);
         loop {
             if n_ptr.is_null() {
                 break;
             }
-            let next = unsafe { Box::from_raw(n_ptr) };
+            let next: Box<Node<K>> = unsafe { Box::from_raw(n_ptr) };
             n_ptr = next.next(0);
         }
     }
 }
 
-struct SkipListIterator<'a, C: Comparator<K>, K: Clone + PartialEq + Default> {
-    list: &'a mut SkipList<C, K>,
+pub struct SkipListIterator<'a, C: Comparator<K>, K: PartialEq + Clone> {
+    list: &'a SkipList<C, K>,
     n_ptr: *mut Node<K>,
 }
 
-trait Iterator<K: Clone + PartialEq> {
+pub trait Iterator<K: PartialEq> {
     fn next(&mut self);
     fn prev(&mut self);
     fn seek(&mut self, key: &K);
@@ -280,9 +292,7 @@ trait Iterator<K: Clone + PartialEq> {
     fn key(&self) -> &K;
 }
 
-impl<'a, C: Comparator<K>, K: Clone + PartialEq + Default> Iterator<K>
-    for SkipListIterator<'a, C, K>
-{
+impl<'a, C: Comparator<K>, K: PartialEq + Clone> Iterator<K> for SkipListIterator<'a, C, K> {
     // Advances to the next position.
     // REQUIRES: Valid()
     fn next(&mut self) {
@@ -347,7 +357,7 @@ mod tests {
         collections::BTreeSet,
         sync::{
             atomic::{self, AtomicBool, AtomicU64},
-            Arc, Barrier, Condvar, Mutex,
+            Arc, Barrier,
         },
         thread,
     };
@@ -366,8 +376,8 @@ mod tests {
 
     #[derive(Clone)]
     struct U64Comparator {}
-    impl<K: PartialOrd + Clone> Comparator<K> for U64Comparator {
-        fn compare(&self, a: &K, b: &K) -> std::cmp::Ordering {
+    impl Comparator<u64> for U64Comparator {
+        fn compare(&self, a: &u64, b: &u64) -> std::cmp::Ordering {
             if a < b {
                 return Ordering::Less;
             } else if a > b {
@@ -380,7 +390,7 @@ mod tests {
 
     #[test]
     fn test_empty() {
-        let list = SkipList::new(U64Comparator {});
+        let list = SkipList::new(U64Comparator {}, &0);
         assert!(!list.contains(&10u64));
     }
 
@@ -393,7 +403,7 @@ mod tests {
 
         let mut keys = BTreeSet::new();
 
-        let mut list = SkipList::new(U64Comparator {});
+        let mut list = SkipList::new(U64Comparator {}, &0);
 
         for _ in 0..N {
             let key = rnd.gen::<u64>() % R;
@@ -629,7 +639,7 @@ mod tests {
     #[test]
     fn test_concurrent_without_threads() {
         let mut current = State::new();
-        let mut list = SkipList::new(U64Comparator {});
+        let mut list = SkipList::new(U64Comparator {}, &0);
 
         for _ in 0..10_000 {
             {
@@ -652,7 +662,7 @@ mod tests {
                 println!("Run {} of {}", i, N);
             }
 
-            let mut list: SkipList<U64Comparator, Key> = SkipList::new(U64Comparator {});
+            let mut list: SkipList<U64Comparator, Key> = SkipList::new(U64Comparator {}, &0);
             let list_arc = Arc::new(AtomicPtr::new(&mut list));
             let mut current = State::new();
             let current_arc = Arc::new(AtomicPtr::new(&mut current));
@@ -713,7 +723,6 @@ mod tests {
             for handle in handles {
                 handle.join().unwrap();
             }
-
         }
     }
 }

@@ -1,7 +1,5 @@
 use std::{cmp, fmt};
 
-pub type Key = Vec<u8>;
-pub type Value = Vec<u8>;
 
 pub trait Comparator: Clone {
     // Three-way comparison.  Returns value:
@@ -74,7 +72,7 @@ pub trait Iterator {
     fn next(&mut self) -> Result<()>;
     fn prev(&mut self) -> Result<()>;
 
-    fn seek(&mut self, key: &Key) -> Result<()>;
+    fn seek(&mut self, key: &[u8]) -> Result<()>;
 
     // Position at the first key in the source.  The iterator is Valid()
     // after this call iff the source is not empty.
@@ -84,8 +82,8 @@ pub trait Iterator {
     // Valid() after this call iff the source is not empty.
     fn seek_to_last(&mut self) -> Result<()>;
 
-    fn key(&self) -> &Key;
-    fn value(&self) -> &Value;
+    fn key(&self) -> &[u8];
+    fn value(&self) -> &[u8];
 
     fn valid(&self) -> Result<bool>;
 }

@@ -179,20 +179,6 @@ const FOOTER_LEN: usize = 48;
 // and taking the leading 64 bits.
 const MAGIC: u64 = 0xdb4775248b80fb57_u64;
 
-pub fn put_uvarint(dst: &mut Vec<u8>, v: u64) {
-    let mut x = v;
-    //let mut i = 0;
-    while x >= 0x80 {
-        // large than 0b1000_0000
-        dst.push(x as u8 | 0x80); // continuation
-        x >>= 7;
-        //i += 1;
-    }
-    dst.push(x as u8);
-    //i+=1;
-    //i
-}
-
 const MAX_VARINT_LEN64: usize = 10 + 10;
 
 // copy goland binary.Uvarint()

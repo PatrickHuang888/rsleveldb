@@ -1,6 +1,6 @@
 use crate::{
     api,
-    table::{FOOTER_LEN, MAGIC},
+    table::{FOOTER_LEN, MAGIC}, util,
 };
 use std::{
     fmt::format,
@@ -304,8 +304,8 @@ impl BlockHandle {
         assert!(self.offset != !0);
         assert!(self.size != !0);
 
-        super::put_uvarint(dst, self.offset as u64);
-        super::put_uvarint(dst, self.size as u64);
+        util::encode_varint64(dst, self.offset as u64);
+        util::encode_varint64(dst, self.size as u64);
     }
 
     fn decode_from(buf: &[u8], handle: &mut BlockHandle) -> std::result::Result<usize, String> {

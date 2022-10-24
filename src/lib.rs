@@ -8,6 +8,7 @@ mod journal;
 pub mod memdb;
 mod table;
 mod test;
+mod util;
 
 #[derive(Clone)]
 pub struct Options<C: Comparator> {
