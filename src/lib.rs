@@ -1,17 +1,17 @@
 use std::rc::Rc;
 
-use api::{BytesComparator, Comparator};
+use api::{ByteswiseComparator, Comparator};
 
 mod api;
+mod config;
 mod db;
 mod journal;
 pub mod memdb;
 mod table;
-mod test;
 mod util;
 
 #[derive(Clone)]
-pub struct Options<C: Comparator> {
+pub struct Options<'a>{
     // Number of keys between restart points for delta encoding of keys.
     // This parameter can be changed dynamically.  Most clients should
     // leave this parameter alone.
@@ -45,7 +45,7 @@ pub struct Options<C: Comparator> {
     // REQUIRES: The client must ensure that the comparator supplied
     // here has the same name and orders keys *exactly* the same as the
     // comparator provided to previous open calls on the same DB.
-    comparator: C,
+    comparator: &'a dyn Comparator,
 
     // If true, the implementation will do aggressive checking of the
     // data it is processing and will stop early if it detects any
@@ -55,13 +55,13 @@ pub struct Options<C: Comparator> {
     paranoid_checks: bool,
 }
 
-impl<C: Comparator + Clone> Options<C> {
-    fn new(cmp: C) -> Self {
+impl<'a> Options<'a> {
+    fn default() -> Self {
         Options {
             block_restart_interval: 16,
             block_size: 4 * 1024,
             compression: CompressionType::SnappyCompression,
-            comparator: cmp,
+            comparator: &ByteswiseComparator{},
             paranoid_checks: false,
         }
     }
@@ -88,3 +88,22 @@ impl From<u8> for CompressionType {
         }
     }
 }
+
+// A file abstraction for sequential writing.  The implementation
+// must provide buffering since callers may append small fragments
+// at a time to the file.
+pub trait WritableFile {
+    fn append(&mut self, data: &[u8]) -> api::Result<()>;
+    fn close(&mut self) -> api::Result<()>;
+    fn flush(&mut self) -> api::Result<()>;
+    fn sync(&mut self) -> api::Result<()>;
+}
+
+// Destroy the contents of the specified database.
+// Be very careful using this method.
+//
+// Note: For backwards compatibility, if DestroyDB is unable to list the
+// database files, Status::OK() will still be returned masking this failure.
+/* fn DestroyDB(name:&String, options:&Options<C>) {
+
+} */

@@ -22,8 +22,9 @@
 //! next block and looks for the next full or first chunk.
 
 use byteorder::{ByteOrder, LittleEndian};
-use crc::{Crc, CRC_32_ISCSI};
 use std::io;
+
+use crate::util;
 
 const HEADER_SIZE: usize = 7;
 const BLOCK_SIZE: usize = 32 * 1024;
@@ -32,8 +33,6 @@ const FULL_CHUNK_TYPE: u8 = 1;
 const FIRST_CHUNK_TYPE: u8 = 2;
 const MIDDLE_CHUNK_TYPE: u8 = 3;
 const LAST_CHUNK_TYPE: u8 = 4;
-
-pub const CASTAGNOLI: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
 
 pub struct Writer<'a> {
     w: &'a mut (dyn io::Write),
@@ -124,7 +123,7 @@ impl<'a> Writer<'a> {
             }
         }
 
-        let value = CASTAGNOLI.checksum(&self.buf[self.i + HEADER_SIZE - 1..self.j]);
+        let value = util::crc(&self.buf[self.i + HEADER_SIZE - 1..self.j]);
         // chunk header is 4 bytes checksum
         LittleEndian::write_u32(&mut self.buf[self.i..self.i + 4], value);
         // 2 bytes length
@@ -288,9 +287,7 @@ impl<'a> Reader<'a> {
                     self.i = self.n;
                     self.j = self.n;
                     self.corrupt("chunk length overflows block", false)?;
-                } else if self.checksum
-                    && checksum != CASTAGNOLI.checksum(&self.buf[self.i - 1..self.j])
-                {
+                } else if self.checksum && checksum != util::crc(&self.buf[self.i - 1..self.j]) {
                     // drop block
                     self.i = self.n;
                     self.j = self.n;

@@ -5,13 +5,11 @@ use std::{io::Write, rc::Rc};
 
 use byteorder::{ByteOrder, LittleEndian, ReadBytesExt, WriteBytesExt};
 
-use crate::api::{self, Comparator, Key, Value};
+use crate::api::{self, Comparator, Error};
 use crate::api::{DbError, Result};
-use crate::CompressionType;
+use crate::{util, CompressionType};
 
 use super::{BLOCK_TRAILER_SIZE, BLOCK_TYPE_NO_COMPRESSION};
-
-use crate::journal::CASTAGNOLI;
 
 pub struct BlockWriter {
     buf: Vec<u8>,
@@ -21,7 +19,7 @@ pub struct BlockWriter {
     restart_interval: usize,
     restarts: Vec<u32>,
 
-    last_key: Key,
+    last_key: Vec<u8>,
 
     finished: bool,
 }
@@ -43,7 +41,7 @@ impl BlockWriter {
         }
     }
 
-    pub fn append(&mut self, key: &Key, value: &Value) {
+    pub fn add(&mut self, key: &[u8], value: &[u8]) {
         assert!(!self.finished);
         assert!(self.counter <= self.restart_interval);
         // todo: key ascend verificaton
@@ -109,7 +107,7 @@ impl BlockWriter {
         &mut self,
         writer: &mut W,
         compression: CompressionType,
-    ) -> result::Result<usize, std::io::Error> {
+    ) -> api::Result<usize> {
         // File format contains a sequence of blocks where each block has:
         //    block_data: uint8[n]
         //    type: uint8
@@ -149,11 +147,8 @@ fn write_raw_block<W: Write>(
     let mut trailer: [u8; BLOCK_TRAILER_SIZE] = [0; BLOCK_TRAILER_SIZE];
     trailer[0] = compression_type as u8;
 
-    let mut digest = CASTAGNOLI.digest();
-    digest.update(contents);
-    digest.update(&trailer[0..1]);
-    let crc = digest.finalize();
-    // fixme: code in leveldb has a mask operation
+    let cs = [contents, &trailer[0..1]];
+    let crc = util::crcs(&cs);
 
     LittleEndian::write_u32(&mut trailer[1..], crc);
     writer.write_all(&trailer)?;
@@ -234,7 +229,7 @@ pub struct BlockIterator<C: Comparator> {
 
     restart_index: usize, // Index of restart block in which current_ falls
     num_restarts: usize,  // Number of uint32_t entries in restart array
-    status: Option<String>,
+    status: Option<Error>,
 
     data: Vec<u8>, // underlying block contents
 
@@ -268,7 +263,7 @@ impl<C: Comparator> BlockIterator<C> {
         value_length: &mut usize,
     ) -> Result<usize> {
         if limit - entry < 3 {
-            return Err("error entry length".to_string().into());
+            return Err(api::Error::Corruption("error entry length".to_string()));
         }
 
         // no consideration of 32 bit usize
@@ -356,12 +351,12 @@ impl<C: Comparator> BlockIterator<C> {
         LittleEndian::read_u32(&self.data[self.restarts + index * 4..]) as usize
     }
 
-    fn corrupted(&mut self) -> String {
+    fn corrupted(&mut self) -> api::Error {
         self.key.clear();
         self.value.clear();
         self.current = self.restarts;
         self.restart_index = self.num_restarts;
-        let s = "bad entry in block".to_string();
+        let s = Error::Corruption(String::from("bad entry in block"));
         self.status = Some(s.clone());
         s
     }
@@ -369,24 +364,20 @@ impl<C: Comparator> BlockIterator<C> {
     fn status(&self) -> Result<()> {
         match &self.status {
             None => Ok(()),
-            Some(s) => Err(s.clone().into()),
+            Some(s) => Err(s.clone()),
         }
     }
 }
 
 impl<C: Comparator> api::Iterator for BlockIterator<C> {
     fn next(&mut self) -> Result<()> {
-        if !self.valid()? {
-            return Err("Iterator invalid".to_string().into());
-        }
+        self.valid()?;
         self.parse_next_key()?;
         Ok(())
     }
 
     fn prev(&mut self) -> Result<()> {
-        if !self.valid()? {
-            return Err("Iterator invalid".to_string().into());
-        }
+        self.valid()?;
 
         // Scan backwards to a restart point before current_
         let original = self.current;
@@ -408,7 +399,7 @@ impl<C: Comparator> api::Iterator for BlockIterator<C> {
         Ok(())
     }
 
-    fn seek(&mut self, target: &Key) -> Result<()> {
+    fn seek(&mut self, target: &[u8]) -> Result<()> {
         // Binary search in restart array to find the last restart point
         // with a key < target
         let mut left = 0;
@@ -461,7 +452,7 @@ impl<C: Comparator> api::Iterator for BlockIterator<C> {
         // We might be able to use our current position within the restart block.
         // This is true if we determined the key we desire is in the current block
         // and is after than the current key.
-        assert!(current_compare.is_eq() || self.valid().unwrap());
+        assert!(current_compare.is_eq() || self.valid()?);
         let skip_seek = left == self.restart_index && current_compare.is_lt();
         if !skip_seek {
             self.seek_to_restart_point(left);
@@ -492,11 +483,11 @@ impl<C: Comparator> api::Iterator for BlockIterator<C> {
         Ok(())
     }
 
-    fn key(&self) -> &Key {
+    fn key(&self) -> &[u8] {
         &self.key
     }
 
-    fn value(&self) -> &Value {
+    fn value(&self) -> &[u8] {
         &self.value
     }
 

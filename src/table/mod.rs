@@ -152,8 +152,7 @@ NOTE: All fixed-length integer are little-endian.
 //     num_restarts: uint32
 // restarts[i] contains the offset within the block of the ith restart point.
 
-use crate::api::DbError;
-use crate::api::{Key, Value};
+use crate::api;
 
 mod block;
 mod table;
@@ -221,19 +220,131 @@ mod tests {
     use rand::{rngs::ThreadRng, thread_rng, Rng};
 
     use crate::{
-        api::{BytesComparator, Comparator, Iterator, Key, Value},
+        api::{self, ByteswiseComparator, Comparator, Iterator},
         table::{
-            table::{ReadOptions, TableReader},
+            table::{ReadOptions, Table},
             BLOCK_TRAILER_SIZE,
         },
-        test::KeyValue,
         Options,
     };
 
     use super::{
         block::{BlockReader, BlockWriter},
-        table::{RandomAccessRead, TableWriter},
+        table::{RandomAccessFile, TableWriter},
     };
+
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+
+    struct KeyValueEntry {
+        key: Key,
+        value: Value,
+    }
+
+    pub struct KeyValue<'a, C: Comparator> {
+        entries: Vec<KeyValueEntry>, // entries in ascend order
+        n_bytes: usize,
+
+        comparator: &'a C,
+    }
+
+    impl<'a, C: Comparator> KeyValue<'a, C> {
+        pub fn new(cmp: &'a C) -> Self {
+            KeyValue {
+                entries: Vec::new(),
+                n_bytes: 0,
+                comparator: cmp,
+            }
+        }
+
+        pub fn len(&self) -> usize {
+            self.entries.len()
+        }
+
+        pub fn size(&self) -> usize {
+            self.n_bytes
+        }
+
+        pub fn key_at(&self, i: usize) -> Key {
+            self.entries[i].key.clone()
+        }
+
+        pub fn index_at(&self, i: usize) -> (&Key, &Value) {
+            (&self.entries[i].key, &self.entries[i].value)
+        }
+
+        pub fn value_at(&self, i: usize) -> Value {
+            self.entries[i].value.clone()
+        }
+
+        pub fn search(&self, key: &Key) -> Result<usize, usize> {
+            self.entries
+                .binary_search_by(|entry| self.comparator.compare(&entry.key, &key))
+        }
+
+        /* fn get(&self, key:Key) -> Option<usize> {
+            self.search(key)
+        } */
+
+        pub fn delete_index(&mut self, i: usize) -> Option<Value> {
+            if i < self.len() {
+                self.n_bytes -= self.key_at(i).len() + self.value_at(i).len();
+                return Some(self.entries.remove(i).value);
+            }
+            None
+        }
+
+        pub fn delete(&mut self, key: &Key) -> Option<Value> {
+            match self.search(&key) {
+                Err(_) => None,
+                Ok(i) => self.delete_index(i),
+            }
+        }
+
+        // insert return true, update return false
+        pub fn put_u(&mut self, key: &Key, value: &Value) -> bool {
+            match self.search(&key) {
+                Ok(i) => {
+                    self.n_bytes += value.len() - self.value_at(i).len();
+                    self.entries[i].value = value.clone();
+                }
+                Err(i) => {
+                    self.n_bytes += key.len() + value.len();
+                    self.entries.insert(
+                        i,
+                        KeyValueEntry {
+                            key: key.clone(),
+                            value: value.clone(),
+                        },
+                    );
+                    return true;
+                }
+            }
+            false
+        }
+
+        pub fn append(&mut self, key: &Key, value: &Value) {
+            let n = self.entries.len();
+            if n > 0
+                && self
+                    .comparator
+                    .compare(key, &self.entries[n - 1].key)
+                    .is_le()
+            {
+                panic!("append, keys not in increasing order");
+            }
+            self.entries.push(KeyValueEntry {
+                key: key.clone(),
+                value: value.clone(),
+            });
+            self.n_bytes += key.len() + value.len();
+        }
+
+        pub fn clear(&mut self) {
+            self.entries.clear();
+            self.n_bytes = 0;
+        }
+    }
 
     struct BufferSource {
         buf: Vec<u8>,
@@ -243,7 +354,7 @@ mod tests {
             BufferSource { buf: buf }
         }
     }
-    impl RandomAccessRead for BufferSource {
+    impl RandomAccessFile for BufferSource {
         fn read(&self, offset: usize, n: usize, dst: &mut Vec<u8>) -> std::io::Result<usize> {
             let mut r = n;
             if offset > self.buf.len() {
@@ -266,7 +377,7 @@ mod tests {
 
     #[test]
     fn test_empty() {
-        let cmp = BytesComparator::default();
+        let cmp = ByteswiseComparator::default();
         let kv = KeyValue::new(&cmp);
 
         test(TestCase::Block, &cmp, &kv);
@@ -275,7 +386,7 @@ mod tests {
 
     #[test]
     fn test_simple_single() {
-        let cmp = BytesComparator::default();
+        let cmp = ByteswiseComparator::default();
         let mut kv = KeyValue::new(&cmp);
         kv.append(&"abc".as_bytes().to_vec(), &"v".as_bytes().to_vec());
 
@@ -285,7 +396,7 @@ mod tests {
 
     #[test]
     fn test_simple_specical_key() {
-        let cmp = BytesComparator::default();
+        let cmp = ByteswiseComparator::default();
         let mut kv = KeyValue::new(&cmp);
         let key = vec![0xff, 0xff];
         kv.append(&key, &"v3".as_bytes().to_vec());
@@ -296,7 +407,7 @@ mod tests {
 
     #[test]
     fn test_simple_multi() {
-        let cmp = BytesComparator::default();
+        let cmp = ByteswiseComparator::default();
         let mut kv = KeyValue::new(&cmp);
         kv.append(&"abc".as_bytes().to_vec(), &"v".as_bytes().to_vec());
         kv.append(&"abcd".as_bytes().to_vec(), &"v".as_bytes().to_vec());
@@ -308,7 +419,7 @@ mod tests {
 
     #[test]
     fn test_randomized() {
-        let cmp = BytesComparator::default();
+        let cmp = ByteswiseComparator::default();
         let mut kv = KeyValue::new(&cmp);
 
         let mut rng = thread_rng();
@@ -322,7 +433,7 @@ mod tests {
             for _ in 0..num_entries {
                 let k = random_key(&mut rng, skewed(4));
                 let v = random_value(&mut rng, 5);
-                kv.put_u(&k, &v);
+                kv.put_u(&Vec::from(k), &Vec::from(v));
             }
 
             if num_entries < 50 {
@@ -364,7 +475,7 @@ mod tests {
                     assert_eq!(size, file.len());
 
                     let source = BufferSource::new(file);
-                    let reader = TableReader::open(opts, &source, size).unwrap();
+                    let reader = Table::open(opts, &source, size).unwrap();
                     let opt = ReadOptions::default();
                     let mut it = reader.new_iterator(&opt);
 
@@ -377,11 +488,11 @@ mod tests {
                     let mut w = BlockWriter::new(v);
                     for i in 0..kv.len() {
                         let (k, v) = kv.index_at(i);
-                        w.append(k, v);
+                        w.add(k, v);
                     }
                     let mut file = Vec::new();
                     let wr = w.write(&mut file, crate::CompressionType::NoCompression);
-                    assert!(wr.is_ok(), "write block error {}", wr.unwrap_err());
+                    assert!(wr.is_ok(), "write block error {:?}", wr.unwrap_err());
                     // no trailer
                     file.truncate(file.len() - BLOCK_TRAILER_SIZE);
 
@@ -399,10 +510,13 @@ mod tests {
     fn test_forward_scan<'a, C: Comparator, T: Iterator>(it: &mut T, kv: &KeyValue<'a, C>) {
         assert!(!it.valid().unwrap());
         let r = it.seek_to_first();
-        assert!(r.is_ok(), "{}", r.unwrap_err());
+        assert!(r.is_ok(), "{:?}", r.unwrap_err());
         let mut i = 0;
         while i < kv.len() {
-            assert_eq!(kv.index_at(i), (it.key(), it.value()));
+            assert_eq!(
+                kv.index_at(i),
+                (&Vec::from(it.key()), &Vec::from(it.value()))
+            );
             assert!(it.next().is_ok());
             i += 1;
         }
@@ -412,9 +526,12 @@ mod tests {
     fn test_backward_scan<'a, C: Comparator, T: Iterator>(it: &mut T, kv: &KeyValue<'a, C>) {
         assert!(!it.valid().unwrap());
         let r = it.seek_to_last();
-        assert!(r.is_ok(), "{}", r.unwrap_err());
+        assert!(r.is_ok(), "{:?}", r.unwrap_err());
         for i in (0..kv.len()).rev() {
-            assert_eq!((it.key(), it.value()), kv.index_at(i));
+            assert_eq!(
+                (&Vec::from(it.key()), &Vec::from(it.value())),
+                kv.index_at(i)
+            );
             assert!(it.prev().is_ok());
         }
     }
@@ -431,7 +548,7 @@ mod tests {
             println!("---");
         }
         for _ in 0..200 {
-            let toss = rng.gen_range(0..5);
+            let toss: i32 = rng.gen_range(0..5);
             match toss {
                 0 => {
                     if it.valid().unwrap() {
@@ -441,7 +558,10 @@ mod tests {
                         assert!(it.next().is_ok());
                         if kv_index < kv.len() - 1 {
                             kv_index += 1;
-                            assert_eq!((it.key(), it.value()), kv.index_at(kv_index));
+                            assert_eq!(
+                                (&Vec::from(it.key()), &Vec::from(it.value())),
+                                kv.index_at(kv_index)
+                            );
                         } else {
                             assert!(!it.valid().unwrap());
                         }
@@ -452,10 +572,13 @@ mod tests {
                         println!("seek_to_first");
                     }
                     let r = it.seek_to_first();
-                    assert!(r.is_ok(), "seek_to_first error {}", r.unwrap_err());
+                    assert!(r.is_ok(), "seek_to_first error {:?}", r.unwrap_err());
                     if kv.len() != 0 {
                         kv_index = 0;
-                        assert_eq!((it.key(), it.value()), kv.index_at(kv_index));
+                        assert_eq!(
+                            (&Vec::from(it.key()), &Vec::from(it.value())),
+                            kv.index_at(kv_index)
+                        );
                     }
                 }
                 2 => {
@@ -466,8 +589,8 @@ mod tests {
                             println!("seek {:?}", k.clone())
                         }
                         let s = it.seek(&k);
-                        assert!(s.is_ok(), "seek err {}", s.unwrap_err());
-                        assert_eq!((it.key(), it.value()), (k, v));
+                        assert!(s.is_ok(), "seek err {:?}", s.unwrap_err());
+                        assert_eq!((&Vec::from(it.key()), &Vec::from(it.value())), (k, v));
                     }
                 }
                 3 => {
@@ -480,7 +603,10 @@ mod tests {
                             assert!(!it.valid().unwrap());
                         } else {
                             kv_index -= 1;
-                            assert_eq!((it.key(), it.value()), kv.index_at(kv_index));
+                            assert_eq!(
+                                (&Vec::from(it.key()), &Vec::from(it.value())),
+                                kv.index_at(kv_index)
+                            );
                         }
                     }
                 }
@@ -489,12 +615,15 @@ mod tests {
                         println!("seek_to_last");
                     }
                     let r = it.seek_to_last();
-                    assert!(r.is_ok(), "seek_to_last err {}", r.unwrap_err());
+                    assert!(r.is_ok(), "seek_to_last err {:?}", r.unwrap_err());
                     if kv.len() == 0 {
                         assert!(!it.valid().unwrap());
                     } else {
                         kv_index = kv.len() - 1;
-                        assert_eq!((it.key(), it.value()), kv.index_at(kv_index));
+                        assert_eq!(
+                            (&Vec::from(it.key()), &Vec::from(it.value())),
+                            kv.index_at(kv_index)
+                        );
                     }
                 }
                 _ => {
@@ -506,20 +635,20 @@ mod tests {
 
     static test_bytes: [u8; 10] = [0x0, 0x1, 0xa, 0xb, 0xc, 0xd, 0xe, 0xf, 0xf, 0xf];
 
-    fn random_key(rng: &mut ThreadRng, len: usize) -> Key {
+    fn random_key(rng: &mut ThreadRng, len: usize) -> &[u8] {
         let mut r = Vec::with_capacity(len);
         for _ in 0..len {
             r.push(test_bytes[rng.gen_range(0..10)]);
         }
-        r
+        &r
     }
 
-    fn random_value(rng: &mut ThreadRng, len: usize) -> Value {
+    fn random_value(rng: &mut ThreadRng, len: usize) -> &[u8] {
         let mut r = Vec::with_capacity(len);
         for _ in 0..len {
             r.push(test_bytes[rng.gen_range(0..10)]);
         }
-        r
+        &r
     }
 
     // Skewed: pick "base" uniformly from range [0,max_log] and then

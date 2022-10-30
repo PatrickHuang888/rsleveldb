@@ -1,31 +1,23 @@
 use crate::{
-    api,
-    table::{FOOTER_LEN, MAGIC}, util,
+    api::{self, Error},
+    table::{FOOTER_LEN, MAGIC},
+    util, WritableFile,
 };
 use std::{
-    fmt::format,
-    io::{Error, Read, Write},
-    rc::Rc,
+    io::{Read, Write},
     vec,
 };
 
 use byteorder::{ByteOrder, LittleEndian, ReadBytesExt, WriteBytesExt};
 
-use crate::{
-    api::DbError,
-    api::Iterator,
-    api::{Comparator, Key, Value},
-    journal::CASTAGNOLI,
-    table::MAX_VARINT_LEN64,
-    CompressionType, Options,
-};
+use crate::{api::Comparator, api::Iterator, table::MAX_VARINT_LEN64, CompressionType, Options};
 
 use super::{
     block::{BlockIterator, BlockReader, BlockWriter},
     BLOCK_TRAILER_SIZE,
 };
 
-pub struct TableWriter<'a, W: Write, C: Comparator> {
+pub struct TableWriter<'a, W: WritableFile> {
     writer: &'a mut W,
 
     data_block: BlockWriter,
@@ -45,22 +37,22 @@ pub struct TableWriter<'a, W: Write, C: Comparator> {
     pending_handle: BlockHandle, // handle to add to index block
 
     compressed_buf: Vec<u8>,
-    last_key: Key,
+    last_key: Vec<u8>,
 
     num_entries: usize,
     offset: usize,
     closed: bool,
 
-    status: Option<String>,
+    status: Option<Error>,
 
-    opts: Options<C>,
+    opts: Options,
     //index_opts:Options<'a>,
 
     //filter_block: Option<FilterBlock<'c>>,
 }
 
-impl<'a, W: Write, C: Comparator> TableWriter<'a, W, C> {
-    pub fn new(w: &'a mut W, options: &Options<C>) -> Self {
+impl<'a, W: WritableFile> TableWriter<'a, W> {
+    pub fn new(w: &'a mut W, options: &Options) -> Self {
         let opts = options.clone();
 
         TableWriter {
@@ -88,15 +80,15 @@ impl<'a, W: Write, C: Comparator> TableWriter<'a, W, C> {
     // Add key,value to the table being constructed.
     // REQUIRES: key is after any previously added key according to comparator.
     // REQUIRES: Finish(), Abandon() have not been called
-    pub fn add(&mut self, key: &Key, value: &Value) -> Result<(), DbError> {
+    pub fn add(&mut self, key: &[u8], value: &[u8]) -> api::Result<()> {
         assert!(!self.closed);
 
         self.ok()?;
 
         if self.num_entries > 0 && self.opts.comparator.compare(key, &self.last_key).is_le() {
-            return Err("table writer: keys are not in increasing order"
-                .to_string()
-                .into());
+            return Err(Error::Other(String::from(
+                "table writer: keys are not in increasing order",
+            )));
         }
 
         if self.pending_index_entry {
@@ -106,20 +98,14 @@ impl<'a, W: Write, C: Comparator> TableWriter<'a, W, C> {
                 .find_shortest_separator(&mut self.last_key, key);
             let mut handle_encoding = Vec::with_capacity(2 * MAX_VARINT_LEN64);
             self.pending_handle.encode_to(&mut handle_encoding);
-            self.index_block.append(&self.last_key, &handle_encoding);
+            self.index_block.add(&self.last_key, &handle_encoding);
             self.pending_index_entry = false;
         }
 
-        /* match &mut self.filter_block {
-            None => {}
-            Some(fb) => {
-                fb.add(key);
-            }
-        } */
-
-        self.last_key = key.clone();
+        self.last_key.clear();
+        self.last_key.extend_from_slice(key);
         self.num_entries += 1;
-        self.data_block.append(key, value);
+        self.data_block.add(key, value);
 
         // finish the data block if block size target reached.
         let size = self.data_block.bytes_len();
@@ -130,7 +116,7 @@ impl<'a, W: Write, C: Comparator> TableWriter<'a, W, C> {
         Ok(())
     }
 
-    pub fn flush(&mut self) -> Result<(), DbError> {
+    pub fn flush(&mut self) -> api::Result<()> {
         assert!(!self.closed);
         self.ok()?;
 
@@ -144,7 +130,7 @@ impl<'a, W: Write, C: Comparator> TableWriter<'a, W, C> {
             .data_block
             .write(self.writer, self.opts.compression)
             .map_err(|e| {
-                let s = format!("data block write error {}", e.to_string());
+                let s = e.push_message("data block write error");
                 self.status = Some(s.clone());
                 s
             })?;
@@ -192,7 +178,7 @@ impl<'a, W: Write, C: Comparator> TableWriter<'a, W, C> {
         let l = meta_index_block
             .write(self.writer, self.opts.compression)
             .map_err(|e| {
-                let s = format!("meta index block write error {}", e.to_string());
+                let s = e.push_message("meta index block write error");
                 self.status = Some(s.clone());
                 s
             })?;
@@ -210,14 +196,14 @@ impl<'a, W: Write, C: Comparator> TableWriter<'a, W, C> {
                 .find_short_successor(&mut self.last_key);
             let mut handle_encoding = Vec::with_capacity(2 * MAX_VARINT_LEN64);
             self.pending_handle.encode_to(&mut handle_encoding);
-            self.index_block.append(&self.last_key, &handle_encoding);
+            self.index_block.add(&self.last_key, &handle_encoding);
             self.pending_index_entry = false;
         }
         let l = self
             .index_block
             .write(self.writer, self.opts.compression)
             .map_err(|e| {
-                let s = format!("index block write error {}", e.to_string());
+                let s = e.push_message("index block write error {}");
                 self.status = Some(s.clone());
                 s
             })?;
@@ -237,10 +223,10 @@ impl<'a, W: Write, C: Comparator> TableWriter<'a, W, C> {
         Ok(())
     }
 
-    fn ok(&self) -> Result<(), DbError> {
+    fn ok(&self) -> api::Result<()> {
         match &self.status {
             None => Ok(()),
-            Some(s) => Err(s.clone().into()),
+            Some(s) => Err(s.clone()),
         }
     }
 
@@ -253,7 +239,7 @@ impl<'a, W: Write, C: Comparator> TableWriter<'a, W, C> {
     }
 }
 
-impl<'a, W: Write, C: Comparator> Drop for TableWriter<'a, W, C> {
+impl<'a, W: WritableFile> Drop for TableWriter<'a, W> {
     fn drop(&mut self) {
         assert!(self.closed) // Catch errors where caller forgot to call Finish()
     }
@@ -275,10 +261,12 @@ impl Footer {
         assert_eq!(v.len(), FOOTER_LEN);
         v
     }
-    fn decode_from(input: &[u8]) -> std::result::Result<Self, String> {
+    fn decode_from(input: &[u8]) -> api::Result<Self> {
         let magic = LittleEndian::read_u64(&input[FOOTER_LEN - 8..]);
         if magic != MAGIC {
-            return Err("not an sstable (bad magic number)".to_string().into());
+            return Err(Error::Corruption(String::from(
+                "not an sstable (bad magic number)",
+            )));
         }
         let mut metaindex_handle = BlockHandle::default();
         let l = BlockHandle::decode_from(input, &mut metaindex_handle)?;
@@ -308,12 +296,12 @@ impl BlockHandle {
         util::encode_varint64(dst, self.size as u64);
     }
 
-    fn decode_from(buf: &[u8], handle: &mut BlockHandle) -> std::result::Result<usize, String> {
-        let (offset, num_offset) =
-            super::get_uvarint(buf).map_err(|s| format!("bad block handle, {}", s))?;
+    fn decode_from(buf: &[u8], handle: &mut BlockHandle) -> api::Result<usize> {
+        let (offset, num_offset) = super::get_uvarint(buf)
+            .map_err(|s| Error::Other(format!("bad block handle, {}", s)))?;
 
         let (size, num_size) = super::get_uvarint(&buf[num_offset..])
-            .map_err(|s| format!("bad block handle, {}", s))?;
+            .map_err(|s| Error::Other(format!("bad block handle, {}", s)))?;
 
         handle.offset = offset as usize;
         handle.size = size as usize;
@@ -331,28 +319,31 @@ impl Default for BlockHandle {
     }
 }
 
-pub trait RandomAccessRead {
+pub trait RandomAccessFile {
     // Read up to "n" bytes from the file starting at "offset".
     // Safe for concurrent use by multiple threads.
     fn read(&self, offset: usize, n: usize, dst: &mut Vec<u8>) -> std::io::Result<(usize)>;
 }
 
-pub struct TableReader<'f, C: Comparator, F> {
-    opts: Options<C>,
+// A Table is a sorted map from strings to strings.  Tables are
+// immutable and persistent.  A Table may be safely accessed from
+// multiple threads without external synchronization.
+pub struct Table<'a, F> {
+    options: Options<'a>,
     status: Option<String>,
 
-    file: &'f F,
+    file: &'a F,
 
     meta_index_handle: BlockHandle,
     index_block: BlockReader,
 }
 
-impl<'f, C: Comparator, F: RandomAccessRead> TableReader<'f, C, F> {
-    pub fn open(opts: Options<C>, file: &'f F, size: usize) -> crate::api::Result<Self> {
+impl<'a, F: RandomAccessFile> Table<'a, F> {
+    pub fn open(opts: Options, file: &'a F, size: usize) -> crate::api::Result<Self> {
         if size < FOOTER_LEN {
-            return Err("Corruption: file is too short to be an sstable"
-                .to_string()
-                .into());
+            return Err(Error::Corruption(String::from(
+                "file is too short to be an sstable",
+            )));
         }
 
         //let footer_space: [u8;FOOTER_LEN]= [0;FOOTER_LEN];
@@ -366,8 +357,8 @@ impl<'f, C: Comparator, F: RandomAccessRead> TableReader<'f, C, F> {
             opt.verify_checksums = true;
         }
         let index_contents = read_block_content(file, &opt, &mut footer.index_handle)?;
-        let r = TableReader {
-            opts: opts.clone(),
+        let r = Table {
+            options: opts.clone(),
             status: None,
             file: file,
             index_block: BlockReader::new(index_contents),
@@ -382,21 +373,21 @@ impl<'f, C: Comparator, F: RandomAccessRead> TableReader<'f, C, F> {
         Ok(())
     }
 
-    pub fn new_iterator(self, option: &ReadOptions) -> TableIterator<'f, F, C> {
-        let index_iter = self.index_block.iter(self.opts.comparator.clone());
+    pub fn new_iterator<C:Comparator>(self, option: &ReadOptions) -> TableIterator<'a, F, C> {
+        let index_iter = self.index_block.iter(self.options.comparator.clone());
         TableIterator::new(
             index_iter,
             self.file,
-            self.opts.comparator.clone(),
+            self.options.comparator.clone(),
             option.clone(),
         )
     }
 }
 
-fn block_reader<'a, 'data, F: RandomAccessRead>(
+fn block_reader<'a, 'data, F: RandomAccessFile>(
     file: &F,
     opts: &ReadOptions,
-    index_value: &Vec<u8>,
+    index_value: &[u8],
 ) -> api::Result<BlockReader> {
     let mut handle = BlockHandle::default();
     BlockHandle::decode_from(index_value, &mut handle)?;
@@ -418,7 +409,7 @@ pub struct ReadOptions {
     verify_checksums: bool,
 }
 
-fn read_block_content<'a, F: RandomAccessRead>(
+fn read_block_content<'a, F: RandomAccessFile>(
     file: &'a F,
     opts: &ReadOptions,
     handle: &mut BlockHandle,
@@ -428,16 +419,16 @@ fn read_block_content<'a, F: RandomAccessRead>(
     let mut buf = Vec::with_capacity(n + BLOCK_TRAILER_SIZE);
     file.read(handle.offset, n + BLOCK_TRAILER_SIZE, &mut buf)?;
     if buf.len() != n + BLOCK_TRAILER_SIZE {
-        return Err("Block Corruption: truncated block read".to_string().into());
+        return Err(Error::Corruption(String::from("truncated block read")));
     }
 
     // Check the crc of the type and the block contents
     if opts.verify_checksums {
         // fixme: unmask ??
         let crc = LittleEndian::read_u32(&buf[n + 1..]);
-        let actul = CASTAGNOLI.checksum(&buf[..n + 1]);
+        let actul = util::crc(&buf[..n + 1]);
         if actul != crc {
-            return Err("block checksum mismatch".to_string().into());
+            return Err(Error::Corruption(String::from("block checksum mismatch")));
         }
     }
 
@@ -467,7 +458,7 @@ fn read_block_content<'a, F: RandomAccessRead>(
 //
 // Uses a supplied function to convert an index_iter value into
 // an iterator over the contents of the corresponding block.
-pub struct TableIterator<'f, F: RandomAccessRead, C: Comparator> {
+pub struct TableIterator<'f, F: RandomAccessFile, C: Comparator> {
     option: ReadOptions,
     index_iter: BlockIterator<C>,
     data_iter: Option<BlockIterator<C>>,
@@ -478,7 +469,7 @@ pub struct TableIterator<'f, F: RandomAccessRead, C: Comparator> {
 
 impl<'f, F, C> TableIterator<'f, F, C>
 where
-    F: RandomAccessRead,
+    F: RandomAccessFile,
     C: Comparator,
 {
     fn new(index_iter: BlockIterator<C>, file: &'f F, cmp: C, option: ReadOptions) -> Self {
@@ -503,7 +494,8 @@ where
                 // no need to change anything
             } else {
                 let block = block_reader(self.file, &self.option, handle)?;
-                self.data_block_handle = handle.clone();
+                self.data_block_handle.clear();
+                self.data_block_handle.extend_from_slice(handle);
                 self.data_iter = Some(block.iter(self.comparator.clone()));
             }
         }
@@ -545,7 +537,7 @@ where
 
 impl<'f, F, C> api::Iterator for TableIterator<'f, F, C>
 where
-    F: RandomAccessRead,
+    F: RandomAccessFile,
     C: Comparator,
 {
     fn next(&mut self) -> api::Result<()> {
@@ -562,7 +554,7 @@ where
         Ok(())
     }
 
-    fn seek(&mut self, target: &Key) -> api::Result<()> {
+    fn seek(&mut self, target: &[u8]) -> api::Result<()> {
         self.index_iter.seek(target)?;
         self.init_data_block()?;
         if let Some(it) = self.data_iter.as_mut() {
@@ -592,13 +584,13 @@ where
         Ok(())
     }
 
-    fn key(&self) -> &Key {
-        assert!(self.valid().unwrap());
+    fn key(&self) -> &[u8] {
+        assert!(matches!(self.valid(), Ok(true)));
         self.data_iter.as_ref().unwrap().key()
     }
 
-    fn value(&self) -> &Value {
-        assert!(self.valid().unwrap());
+    fn value(&self) -> &[u8] {
+        assert!(matches!(self.valid(), Ok(true)));
         self.data_iter.as_ref().unwrap().value()
     }
 

@@ -1,6 +1,5 @@
 use std::{cmp, fmt};
 
-
 pub trait Comparator: Clone {
     // Three-way comparison.  Returns value:
     //   Less iff "a" < "b",
@@ -29,9 +28,9 @@ pub trait Comparator: Clone {
 }
 
 #[derive(Default, Clone)]
-pub struct BytesComparator {}
+pub struct ByteswiseComparator {}
 
-impl Comparator for BytesComparator {
+impl Comparator for ByteswiseComparator {
     fn compare(&self, a: &[u8], b: &[u8]) -> cmp::Ordering {
         a.iter().cmp(b.iter())
     }
@@ -67,7 +66,8 @@ impl Comparator for BytesComparator {
     }
 }
 
-pub type Result<E> = std::result::Result<E, DbError>;
+pub type Result<E> = std::result::Result<E, Error>;
+
 pub trait Iterator {
     fn next(&mut self) -> Result<()>;
     fn prev(&mut self) -> Result<()>;
@@ -120,3 +120,71 @@ impl std::fmt::Display for DbError {
         write!(f, "({})", self.reason)
     }
 }
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Error {
+    NotFound,
+    Corruption(String),
+    NotSupported(String),
+    //InvalidArgument(String),
+    IOError(String),
+    Other(String),
+}
+
+impl From<std::io::Error> for Error {
+    fn from(err: std::io::Error) -> Self {
+        Error::IOError(err.to_string())
+    }
+}
+
+impl Error {
+    pub fn push_message(&self, msg: &str) -> Self {
+        match self {
+            Self::NotFound => Self::NotFound,
+            Self::Corruption(s) => Self::Corruption(format! {"{}, {}", msg, s}),
+            Self::NotSupported(s) => Self::NotSupported(format! {"{}, {}", msg, s}),
+            Self::IOError(s) => Self::IOError(format! {"{}, {}", msg, s}),
+            Self::Other(s) => Self::Other(format! {"{}, {}", msg, s}),
+        }
+    }
+}
+
+pub struct WriteOptions {
+    // If true, the write will be flushed from the operating system
+    // buffer cache (by calling WritableFile::Sync()) before the write
+    // is considered complete.  If this flag is true, writes will be
+    // slower.
+    //
+    // If this flag is false, and the machine crashes, some recent
+    // writes may be lost.  Note that if it is just the process that
+    // crashes (i.e., the machine does not reboot), no writes will be
+    // lost even if sync==false.
+    //
+    // In other words, a DB write with sync==false has similar
+    // crash semantics as the "write()" system call.  A DB write
+    // with sync==true has similar crash semantics to a "write()"
+    // system call followed by "fsync()".
+    pub sync: bool,
+}
+
+#[derive(Default)]
+pub struct ReadOptions {
+    // If true, all data read from underlying storage will be
+    // verified against corresponding checksums.
+    pub verify_checksums: bool,
+
+    // Should the data read for this iteration be cached in memory?
+    // Callers may wish to set this field to false for bulk scans.
+    pub fill_cache: bool,
+
+    // If "snapshot" is non-null, read as of the supplied snapshot
+    // (which must belong to the DB that is being read and which must
+    // not have been released).  If "snapshot" is null, use an implicit
+    // snapshot of the state at the beginning of this read operation.
+    pub snapshot: Option<Snapshot>,
+}
+
+// Abstract handle to particular state of a DB.
+// A Snapshot is an immutable object and can therefore be safely
+// accessed from multiple threads without any external synchronization.
+pub struct Snapshot {}

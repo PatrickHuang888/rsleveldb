@@ -1,7 +1,5 @@
 use crate::api;
 use crate::api::Comparator;
-use crate::api::Key;
-use crate::api::Value;
 use std::cmp;
 use std::io::Write;
 use std::sync::Arc;
@@ -14,6 +12,8 @@ const N_VAL: usize = 2;
 const N_HEIGHT: usize = 3;
 const N_NEXT: usize = 4;
 
+type Key = Vec<u8>;
+type Value = Vec<u8>;
 pub struct MemDb<C: Comparator> {
     inner: Arc<RwLock<SkipList<C>>>,
 }
@@ -365,11 +365,9 @@ mod tests {
 
     use crate::memdb::Value;
     use crate::memdb::{Key, SkipList};
-    use crate::test::KeyValue;
-
     use super::Comparator;
     use super::MemDb;
-    use crate::api::BytesComparator;
+    use crate::api::ByteswiseComparator;
 
     #[derive(Clone, Copy)]
     enum DbAct {
@@ -474,7 +472,7 @@ mod tests {
                 let (k, v) = self.deleted.index_at(i);
                 let key = k.clone();
                 let value = v.clone();
-                self.put(&key, &value);
+                self.put(&key.to_vec(), &value.to_vec());
             }
         }
 
@@ -482,7 +480,7 @@ mod tests {
             if self.present.len() > 0 {
                 let i = self.rng.gen_range(0..self.present.len());
                 let key = self.present.key_at(i);
-                self.delete(&key);
+                self.delete(&key.to_vec());
             }
         }
 
@@ -502,12 +500,12 @@ mod tests {
         fn test_get(&mut self, kv: &KeyValue<'a, C>) {
             let i = self.rng.gen_range(0..kv.len());
             let (key, value) = kv.index_at(i);
-            let v = self.db.get(&key).unwrap();
+            let v = self.db.get(&key.to_vec()).unwrap();
             assert_eq!(&v, value);
 
             if i > 0 {
                 let (key1, _) = kv.index_at(i - 1);
-                assert!(self.db.get(&key1).is_none());
+                assert!(self.db.get(&key1.to_vec()).is_none());
             }
         }
 
@@ -584,7 +582,7 @@ mod tests {
 
     #[test]
     fn test_write() {
-        let default_cmp: BytesComparator = Default::default();
+        let default_cmp: ByteswiseComparator = Default::default();
         let memdb = MemDb::new(&default_cmp);
         let deleted = generate_keyvalue(&default_cmp, 1000, 1, 30, 5, 5);
 
@@ -616,7 +614,7 @@ mod tests {
 
     #[test]
     fn test_read() {
-        let default_cmp: BytesComparator = Default::default();
+        let default_cmp: ByteswiseComparator = Default::default();
 
         let mut kv = KeyValue::new(&default_cmp);
         test_find(&default_cmp, &kv);
@@ -677,14 +675,14 @@ mod tests {
 
         for i in &indexs {
             let (key, value) = kv.index_at(*i);
-            assert!(db.put(&key, &value).is_ok());
+            assert!(db.put(&key.to_vec(), &value.to_vec()).is_ok());
         }
 
         indexs.shuffle(&mut rng);
 
         for i in &indexs {
             let (key, value) = kv.index_at(*i);
-            let (k, v) = db.find(&key).unwrap();
+            let (k, v) = db.find(&key.to_vec()).unwrap();
             assert_eq!(&k, key);
             assert_eq!(&v, value);
 
@@ -701,7 +699,7 @@ mod tests {
 
     #[test]
     fn test_basic() {
-        let default_cmp: BytesComparator = Default::default();
+        let default_cmp: ByteswiseComparator = Default::default();
         let key1 = vec![11, 22, 33];
         let value1 = vec![44, 55, 66];
         let key1_1 = key1.clone();

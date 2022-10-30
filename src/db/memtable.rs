@@ -1,16 +1,21 @@
 use std::cmp;
 
 use crate::{
-    api::{self, BytesComparator, Comparator},
+    api::{self, ByteswiseComparator, Comparator},
     util,
 };
 
-use super::skiplist::{Iterator, SkipList, SkipListIterator};
+use super::{
+    skiplist::{Iterator, SkipList, SkipListIterator},
+    SequenceNumber, ValueType,
+};
 
 type Table = SkipList<KeyComparator, Vec<u8>>;
 type TableIterator<'a> = SkipListIterator<'a, KeyComparator, Vec<u8>>;
 
-struct LookupKey {
+const LookupKeySpaceSize: usize = 200;
+
+pub struct LookupKey {
     // We construct a char array of the form:
     //    klength  varint32               <-- start_
     //    userkey  char[klength]          <-- kstart_
@@ -18,19 +23,50 @@ struct LookupKey {
     //                                    <-- end_
     // The array is a suitable MemTable key.
     // The suffix starting with "userkey" can be used as an InternalKey.
-    start: usize,
     kstart: usize,
     end: usize,
     space: Vec<u8>,
 }
 
+// kValueTypeForSeek defines the ValueType that should be passed when
+// constructing a ParsedInternalKey object for seeking to a particular
+// sequence number (since we sort sequence numbers in decreasing order
+// and the value type is embedded as the low 8 bits in the sequence
+// number in internal keys, we need to use the highest-numbered
+// ValueType, not the lowest).
+const ValueTypeForSeek: ValueType = ValueType::TypeValue;
+
+// We leave eight bits empty at the bottom so a type and sequence#
+// can be packed together into 64-bits.
+const MaxSequenceNumber: SequenceNumber = (0x1u64 << 56) - 1;
+
+fn pack_sequence_and_type(seq: u64, t: ValueType) -> u64 {
+    assert!(seq <= MaxSequenceNumber);
+    //assert!(t<=ValueTypeForSeek);
+    (seq << 8) | t as u64
+}
+
 impl LookupKey {
+    pub fn new(user_key: &[u8], s: SequenceNumber) -> Self {
+        let mut needed = user_key.len() + 13; // A conservative estimate
+        if needed <= LookupKeySpaceSize {
+            needed = LookupKeySpaceSize;
+        }
+        let mut space = Vec::with_capacity(needed);
+        util::encode_varint32(&mut space, (user_key.len() + 8) as u32);
+        let kstart = space.len();
+        space.extend_from_slice(user_key);
+        util::encode_fixed64(&mut space, pack_sequence_and_type(s, ValueTypeForSeek));
+        let end = space.len();
+        LookupKey { kstart, end, space }
+    }
+
     fn user_key(&self) -> &[u8] {
         &self.space[self.kstart..self.end - 8]
     }
 
     fn memtable_key(&self) -> &[u8] {
-        &self.space[self.start..self.end]
+        &self.space[..self.end]
     }
 
     fn internal_key(&self) -> &[u8] {
@@ -38,25 +74,16 @@ impl LookupKey {
     }
 }
 
-enum Status {
-    OK = 0,
-    NotFound = 1,
-    Corruption = 2,
-    NotSupported = 3,
-    InvalidArgument = 4,
-    IOError = 5,
-}
-
-struct MemTable {
+pub struct MemTable {
     table: Table,
-    comparator:BytesComparator,
+    comparator: ByteswiseComparator,
 }
 
 impl MemTable {
     // If memtable contains a value for key, store it in value and return true.
     // If memtable contains a deletion for key, store a NotFound() error in status and return true.
     // Else, return false.
-    fn get(&self, key: &LookupKey, value: &mut Vec<u8>) -> (bool, Status) {
+    pub fn get(&self, key: &LookupKey) -> std::result::Result<Vec<u8>, (bool, api::Error)> {
         let memkey = key.memtable_key();
         let mut iter = self.table.new_iterator();
         iter.seek(&Vec::from(memkey));
@@ -72,29 +99,34 @@ impl MemTable {
             // all entries with overly large sequence numbers.
             let entry = iter.key();
             let (key_length, key_start) = util::get_varint32(&entry[..5]);
-            let key_end= key_start+(key_length as usize);
-            if self.comparator.compare(&entry[key_start..key_end-8], key.user_key()).is_eq() {
+            let key_end = key_start + (key_length as usize);
+            if self
+                .comparator
+                .compare(&entry[key_start..key_end - 8], key.user_key())
+                .is_eq()
+            {
                 // correct user key
-                let tag= util::decode_fixed64(&entry[key_end-8.. key_end]);
+                let tag = util::decode_fixed64(&entry[key_end - 8..key_end]);
                 match (tag & 0xff).into() {
                     ValueType::TypeValue => {
-                        let v= get_length_prefixed_slice(&entry[key_end..]);
+                        let v = util::get_length_prefixed_slice(&entry[key_end..]);
+                        let mut value = Vec::with_capacity(v.len());
                         value.extend_from_slice(v);
-                        return (true, Status::OK);
+                        return Ok(value);
                     }
                     ValueType::TypeDeletion => {
-                        return (true, Status::NotFound);
+                        return Err((true, api::Error::NotFound));
                     }
                 }
             }
         };
-        (false, Status::OK)
+        Err((false, api::Error::NotFound))
     }
 
     // Add an entry into memtable that maps key to value at the
     // specified sequence number and with the specified type.
     // Typically value will be empty if type==kTypeDeletion.
-    fn add(&mut self, seq: SequenceNumber, type_: ValueType, key: &[u8], value: &[u8]) {
+    pub fn add(&mut self, seq: SequenceNumber, type_: ValueType, key: &[u8], value: &[u8]) {
         // Format of an entry is concatenation of:
         //  key_size     : varint32 of internal_key.size()
         //  key bytes    : char[internal_key.size()]
@@ -118,26 +150,27 @@ impl MemTable {
         self.table.insert(&buf);
     }
 
-    fn iter(&self) -> MemTableIterator{
-        MemTableIterator{
-            iter:self.table.new_iterator()
+    fn iter(&self) -> MemTableIterator {
+        MemTableIterator {
+            iter: self.table.new_iterator(),
+            scratch: Vec::new(),
         }
     }
 }
 
 struct MemTableIterator<'a> {
     iter: TableIterator<'a>,
+    scratch: Vec<u8>,
 }
 
 impl<'a> api::Iterator for MemTableIterator<'a> {
-
     fn key(&self) -> &[u8] {
-        get_length_prefixed_slice(self.iter.key())        
+        util::get_length_prefixed_slice(self.iter.key())
     }
 
     fn value(&self) -> &[u8] {
-        let v= get_length_prefixed_slice(self.iter.key());
-
+        let key_slice = util::get_length_prefixed_slice(self.iter.key());
+        util::get_length_prefixed_slice(key_slice)
     }
 
     fn next(&mut self) -> api::Result<()> {
@@ -151,12 +184,13 @@ impl<'a> api::Iterator for MemTableIterator<'a> {
     }
 
     fn seek(&mut self, key: &[u8]) -> api::Result<()> {
-        self.iter.seek(encode_key(key));
+        encode_key(&mut self.scratch, key);
+        self.iter.seek(&self.scratch);
         Ok(())
     }
 
     fn seek_to_first(&mut self) -> api::Result<()> {
-        self.seek_to_first();
+        self.iter.seek_to_first();
         Ok(())
     }
 
@@ -168,7 +202,6 @@ impl<'a> api::Iterator for MemTableIterator<'a> {
     fn valid(&self) -> api::Result<bool> {
         Ok(self.iter.valid())
     }
-
 }
 
 /* #[derive(Clone)]
@@ -196,44 +229,26 @@ impl api::Comparator for InternalKeyComparator{
     }
 } */
 
-type SequenceNumber = u64;
-// Value types encoded as the last component of internal keys.
-// DO NOT CHANGE THESE ENUM VALUES: they are embedded in the on-disk
-// data structures.
-enum ValueType {
-    TypeDeletion = 0x0,
-    TypeValue = 0x1,
-}
-
-impl From<u64> for ValueType {
-    fn from(v: u64) -> Self {
-        match v {
-            0x0 => Self::TypeDeletion,
-            0x1 => Self::TypeValue,
-            _ => panic!("value type known!"),
-        }
-    }
-}
-
 fn extract_user_key(internal_key: &[u8]) -> &[u8] {
     assert!(internal_key.len() >= 8);
     return &internal_key[..internal_key.len() - 8];
 }
 
-fn get_length_prefixed_slice(data: &[u8]) -> &[u8] {
-    &[0]
-    // todo:
+fn encode_key(scratch: &mut Vec<u8>, key: &[u8]) {
+    scratch.clear();
+    util::encode_varint32(scratch, key.len() as u32);
+    scratch.extend_from_slice(&key);
 }
 
 struct KeyComparator {
-    cmp: BytesComparator,
+    cmp: ByteswiseComparator,
 }
 
 impl super::skiplist::Comparator<Vec<u8>> for KeyComparator {
     fn compare(&self, key_a: &Vec<u8>, key_b: &Vec<u8>) -> cmp::Ordering {
         // Internal keys are encoded as length-prefixed strings.
-        let a = get_length_prefixed_slice(key_a);
-        let b = get_length_prefixed_slice(key_b);
+        let a = util::get_length_prefixed_slice(key_a);
+        let b = util::get_length_prefixed_slice(key_b);
         self.cmp.compare(a, b)
     }
 }
