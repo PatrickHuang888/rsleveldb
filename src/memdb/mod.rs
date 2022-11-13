@@ -1,4 +1,4 @@
-use crate::api;
+/* use crate::api;
 use crate::api::Comparator;
 use std::cmp;
 use std::io::Write;
@@ -717,3 +717,4 @@ mod tests {
         assert!(db.delete(&key1).is_ok());
     }
 }
+ */

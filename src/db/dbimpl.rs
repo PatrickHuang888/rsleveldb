@@ -20,9 +20,7 @@ pub trait DB {
     fn get(&self, options: &ReadOptions, key: &[u8]) -> api::Result<Vec<u8>>;
 }
 
-struct KeyComparator {
-    
-}
+struct KeyComparator {}
 
 struct DBImpl<W: WritableFile> {
     /* internal: Mutex<GuardedDBInternal>,

@@ -1,27 +1,28 @@
 use crate::{
     api::{self, Error},
-    table::{FOOTER_LEN, MAGIC},
+    table::{FooterLen, Magic},
     util, WritableFile,
 };
 use std::{
     io::{Read, Write},
+    rc::Rc,
     vec,
 };
 
-use byteorder::{ByteOrder, LittleEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{ByteOrder, LittleEndian, WriteBytesExt};
 
-use crate::{api::Comparator, api::Iterator, table::MAX_VARINT_LEN64, CompressionType, Options};
+use crate::{api::Comparator, api::Iterator, table::MaxVarintLen64, CompressionType, Options};
 
 use super::{
-    block::{BlockIterator, BlockReader, BlockWriter},
-    BLOCK_TRAILER_SIZE,
+    block::{Block, BlockBuilder, BlockIterator},
+    BlockTrailerSize,
 };
 
-pub struct TableWriter<'a, W: WritableFile> {
+pub struct TableBuilder<'a, W: WritableFile> {
     writer: &'a mut W,
 
-    data_block: BlockWriter,
-    index_block: BlockWriter,
+    data_block: BlockBuilder,
+    index_block: BlockBuilder,
 
     // comment from leveldb
     // We do not emit the index entry for a block until we have seen the
@@ -36,7 +37,7 @@ pub struct TableWriter<'a, W: WritableFile> {
     pending_index_entry: bool,
     pending_handle: BlockHandle, // handle to add to index block
 
-    compressed_buf: Vec<u8>,
+    compressed_output: Vec<u8>,
     last_key: Vec<u8>,
 
     num_entries: usize,
@@ -45,21 +46,19 @@ pub struct TableWriter<'a, W: WritableFile> {
 
     status: Option<Error>,
 
-    opts: Options,
+    options: Options,
     //index_opts:Options<'a>,
 
     //filter_block: Option<FilterBlock<'c>>,
 }
 
-impl<'a, W: WritableFile> TableWriter<'a, W> {
-    pub fn new(w: &'a mut W, options: &Options) -> Self {
-        let opts = options.clone();
-
-        TableWriter {
+impl<'a, W: WritableFile> TableBuilder<'a, W> {
+    pub fn new(w: &'a mut W, options: Options) -> Self {
+        TableBuilder {
             writer: w,
 
-            data_block: BlockWriter::new(opts.block_restart_interval),
-            index_block: BlockWriter::new(1),
+            data_block: BlockBuilder::new(options.block_restart_interval),
+            index_block: BlockBuilder::new(1),
 
             //filter_block: None,
             pending_index_entry: false,
@@ -70,10 +69,10 @@ impl<'a, W: WritableFile> TableWriter<'a, W> {
             offset: 0,
             num_entries: 0,
 
-            compressed_buf: Vec::new(),
+            compressed_output: Vec::new(),
             last_key: Vec::new(),
 
-            opts: opts,
+            options,
         }
     }
 
@@ -85,7 +84,7 @@ impl<'a, W: WritableFile> TableWriter<'a, W> {
 
         self.ok()?;
 
-        if self.num_entries > 0 && self.opts.comparator.compare(key, &self.last_key).is_le() {
+        if self.num_entries > 0 && self.options.comparator.compare(key, &self.last_key).is_le() {
             return Err(Error::Other(String::from(
                 "table writer: keys are not in increasing order",
             )));
@@ -93,10 +92,10 @@ impl<'a, W: WritableFile> TableWriter<'a, W> {
 
         if self.pending_index_entry {
             assert!(self.data_block.is_empty());
-            self.opts
+            self.options
                 .comparator
                 .find_shortest_separator(&mut self.last_key, key);
-            let mut handle_encoding = Vec::with_capacity(2 * MAX_VARINT_LEN64);
+            let mut handle_encoding = Vec::with_capacity(2 * MaxVarintLen64);
             self.pending_handle.encode_to(&mut handle_encoding);
             self.index_block.add(&self.last_key, &handle_encoding);
             self.pending_index_entry = false;
@@ -109,7 +108,7 @@ impl<'a, W: WritableFile> TableWriter<'a, W> {
 
         // finish the data block if block size target reached.
         let size = self.data_block.bytes_len();
-        if size >= self.opts.block_size {
+        if size >= self.options.block_size {
             self.flush()?;
         }
 
@@ -126,17 +125,20 @@ impl<'a, W: WritableFile> TableWriter<'a, W> {
 
         assert!(!self.pending_index_entry);
 
-        let l = self
-            .data_block
-            .write(self.writer, self.opts.compression)
-            .map_err(|e| {
-                let s = e.push_message("data block write error");
-                self.status = Some(s.clone());
-                s
-            })?;
+        let l = write_block(
+            self.writer,
+            &mut self.data_block,
+            self.options.compression,
+            &mut self.compressed_output,
+        )
+        .map_err(|e| {
+            let s = e.push_message("data block write error");
+            self.status = Some(s.clone());
+            s
+        })?;
 
         self.pending_handle.offset = self.offset;
-        self.pending_handle.size = l - BLOCK_TRAILER_SIZE;
+        self.pending_handle.size = l - BlockTrailerSize;
         self.pending_index_entry = true;
         self.offset += l;
 
@@ -165,7 +167,8 @@ impl<'a, W: WritableFile> TableWriter<'a, W> {
             }
         } */
 
-        let mut meta_index_block: BlockWriter = BlockWriter::new(self.opts.block_restart_interval);
+        let mut meta_index_block: BlockBuilder =
+            BlockBuilder::new(self.options.block_restart_interval);
         /* match &self.filter_block {
             None => {}
             Some(fb) => {
@@ -175,40 +178,47 @@ impl<'a, W: WritableFile> TableWriter<'a, W> {
                 meta_index_block.append(&k, &buf)
             }
         } */
-        let l = meta_index_block
-            .write(self.writer, self.opts.compression)
-            .map_err(|e| {
-                let s = e.push_message("meta index block write error");
-                self.status = Some(s.clone());
-                s
-            })?;
+        let l = write_block(
+            self.writer,
+            &mut meta_index_block,
+            self.options.compression,
+            &mut self.compressed_output,
+        )
+        .map_err(|e| {
+            let s = e.push_message("meta index block write error");
+            self.status = Some(s.clone());
+            s
+        })?;
         let meta_index_handle: BlockHandle = BlockHandle {
             offset: self.offset,
-            size: l - BLOCK_TRAILER_SIZE,
+            size: l - BlockTrailerSize,
         };
         self.offset += l;
 
         // write index block
         let mut index_block_handle = BlockHandle::default();
         if self.pending_index_entry {
-            self.opts
+            self.options
                 .comparator
                 .find_short_successor(&mut self.last_key);
-            let mut handle_encoding = Vec::with_capacity(2 * MAX_VARINT_LEN64);
+            let mut handle_encoding = Vec::with_capacity(2 * MaxVarintLen64);
             self.pending_handle.encode_to(&mut handle_encoding);
             self.index_block.add(&self.last_key, &handle_encoding);
             self.pending_index_entry = false;
         }
-        let l = self
-            .index_block
-            .write(self.writer, self.opts.compression)
-            .map_err(|e| {
-                let s = e.push_message("index block write error {}");
-                self.status = Some(s.clone());
-                s
-            })?;
+        let l = write_block(
+            self.writer,
+            &mut self.index_block,
+            self.options.compression,
+            &mut self.compressed_output,
+        )
+        .map_err(|e| {
+            let s = e.push_message("index block write error {}");
+            self.status = Some(s.clone());
+            s
+        })?;
         index_block_handle.offset = self.offset;
-        index_block_handle.size = l - BLOCK_TRAILER_SIZE;
+        index_block_handle.size = l - BlockTrailerSize;
         self.offset += l;
 
         // write footer
@@ -217,8 +227,8 @@ impl<'a, W: WritableFile> TableWriter<'a, W> {
             index_handle: index_block_handle,
         };
         let footer_encoding = footer.encode();
-        self.writer.write_all(&footer_encoding)?;
-        self.offset += FOOTER_LEN;
+        self.writer.append(&footer_encoding)?;
+        self.offset += FooterLen;
 
         Ok(())
     }
@@ -239,7 +249,57 @@ impl<'a, W: WritableFile> TableWriter<'a, W> {
     }
 }
 
-impl<'a, W: WritableFile> Drop for TableWriter<'a, W> {
+pub fn write_block<W: WritableFile>(
+    writer: &mut W,
+    block: &mut BlockBuilder,
+    compression: CompressionType,
+    compressed: &mut Vec<u8>,
+) -> api::Result<usize> {
+    let raw = block.finish();
+    // File format contains a sequence of blocks where each block has:
+    //    block_data: uint8[n]
+    //    type: uint8
+    //    crc: uint32
+    let n: usize;
+    match compression {
+        CompressionType::SnappyCompression => {
+            let mut w = snap::write::FrameEncoder::new(compressed);
+            w.write_all(raw)?;
+            w.flush()?;
+            let esc = w.into_inner().unwrap();
+            n = write_raw_block(writer, &esc, compression)?;
+            esc.clear();
+        }
+        CompressionType::NoCompression => {
+            n = write_raw_block(writer, raw, compression)?;
+        }
+    }
+    block.reset();
+    Ok(n)
+}
+
+fn write_raw_block<W: WritableFile>(
+    writer: &mut W,
+    contents: &[u8],
+    compression: CompressionType,
+) -> api::Result<usize> {
+    let n = contents.len();
+
+    writer.append(contents)?;
+
+    let mut trailer: [u8; BlockTrailerSize] = [0; BlockTrailerSize];
+    trailer[0] = compression as u8;
+
+    let cs = [contents, &trailer[0..1]];
+    let crc = util::crcs(&cs);
+
+    LittleEndian::write_u32(&mut trailer[1..], crc);
+    writer.append(&trailer)?;
+
+    Ok(n + BlockTrailerSize)
+}
+
+impl<'a, W: WritableFile> Drop for TableBuilder<'a, W> {
     fn drop(&mut self) {
         assert!(self.closed) // Catch errors where caller forgot to call Finish()
     }
@@ -253,17 +313,17 @@ struct Footer {
 
 impl Footer {
     fn encode(&self) -> Vec<u8> {
-        let mut v = Vec::with_capacity(2 * MAX_VARINT_LEN64);
+        let mut v = Vec::with_capacity(2 * MaxVarintLen64);
         self.metaindex_handle.encode_to(&mut v);
         self.index_handle.encode_to(&mut v);
-        v.resize(2 * MAX_VARINT_LEN64, 0); // Padding
-        let _ = v.write_u64::<LittleEndian>(MAGIC); // make sure is littlen endian
-        assert_eq!(v.len(), FOOTER_LEN);
+        v.resize(2 * MaxVarintLen64, 0); // Padding
+        let _ = v.write_u64::<LittleEndian>(Magic); // make sure is littlen endian
+        assert_eq!(v.len(), FooterLen);
         v
     }
     fn decode_from(input: &[u8]) -> api::Result<Self> {
-        let magic = LittleEndian::read_u64(&input[FOOTER_LEN - 8..]);
-        if magic != MAGIC {
+        let magic = LittleEndian::read_u64(&input[FooterLen - 8..]);
+        if magic != Magic {
             return Err(Error::Corruption(String::from(
                 "not an sstable (bad magic number)",
             )));
@@ -322,46 +382,52 @@ impl Default for BlockHandle {
 pub trait RandomAccessFile {
     // Read up to "n" bytes from the file starting at "offset".
     // Safe for concurrent use by multiple threads.
-    fn read(&self, offset: usize, n: usize, dst: &mut Vec<u8>) -> std::io::Result<(usize)>;
+    fn read(&self, offset: usize, n: usize, dst: &mut Vec<u8>) -> api::Result<usize>;
 }
 
 // A Table is a sorted map from strings to strings.  Tables are
 // immutable and persistent.  A Table may be safely accessed from
 // multiple threads without external synchronization.
-pub struct Table<'a, F> {
-    options: Options<'a>,
+pub struct Table {
+    options: Options,
     status: Option<String>,
 
-    file: &'a F,
+    file: Rc<dyn RandomAccessFile>,
 
     meta_index_handle: BlockHandle,
-    index_block: BlockReader,
+    index_iter: BlockIterator,
 }
 
-impl<'a, F: RandomAccessFile> Table<'a, F> {
-    pub fn open(opts: Options, file: &'a F, size: usize) -> crate::api::Result<Self> {
-        if size < FOOTER_LEN {
+impl Table {
+    pub fn open(
+        options: Options,
+        file: Rc<dyn RandomAccessFile>,
+        size: usize,
+    ) -> api::Result<Self> {
+        if size < FooterLen {
             return Err(Error::Corruption(String::from(
                 "file is too short to be an sstable",
             )));
         }
 
         //let footer_space: [u8;FOOTER_LEN]= [0;FOOTER_LEN];
-        let mut footer_input = Vec::with_capacity(FOOTER_LEN);
-        file.read(size - FOOTER_LEN, FOOTER_LEN, &mut footer_input)?;
+        let mut footer_input = Vec::with_capacity(FooterLen);
+        file.read(size - FooterLen, FooterLen, &mut footer_input)?;
         let mut footer = Footer::decode_from(&footer_input)?;
 
         // Read index block
         let mut opt = ReadOptions::default();
-        if opts.paranoid_checks {
+        if options.paranoid_checks {
             opt.verify_checksums = true;
         }
-        let index_contents = read_block_content(file, &opt, &mut footer.index_handle)?;
+        let index_contents = read_block_content(&file, &opt, &mut footer.index_handle)?;
+        let index_block = Block::new(index_contents);
+        let comparator = options.comparator.clone();
         let r = Table {
-            options: opts.clone(),
+            options,
             status: None,
-            file: file,
-            index_block: BlockReader::new(index_contents),
+            file,
+            index_iter: index_block.iter(comparator),
             meta_index_handle: footer.metaindex_handle,
         };
         r.read_meta()?;
@@ -373,22 +439,22 @@ impl<'a, F: RandomAccessFile> Table<'a, F> {
         Ok(())
     }
 
-    pub fn new_iterator<C:Comparator>(self, option: &ReadOptions) -> TableIterator<'a, F, C> {
-        let index_iter = self.index_block.iter(self.options.comparator.clone());
+    pub fn iter(&self, option: ReadOptions) -> TableIterator {
+        //let index_iter = self.index_block.iter(self.options.comparator.clone());
         TableIterator::new(
-            index_iter,
-            self.file,
+            option,
+            self.index_iter.clone(),
+            self.file.clone(),
             self.options.comparator.clone(),
-            option.clone(),
         )
     }
 }
 
-fn block_reader<'a, 'data, F: RandomAccessFile>(
-    file: &F,
+fn block_reader(
+    file: &Rc<dyn RandomAccessFile>,
     opts: &ReadOptions,
     index_value: &[u8],
-) -> api::Result<BlockReader> {
+) -> api::Result<Block> {
     let mut handle = BlockHandle::default();
     BlockHandle::decode_from(index_value, &mut handle)?;
 
@@ -398,7 +464,7 @@ fn block_reader<'a, 'data, F: RandomAccessFile>(
     // todo: block cache
 
     let block_contents = read_block_content(file, opts, &mut handle)?;
-    let block = BlockReader::new(block_contents);
+    let block = Block::new(block_contents);
     Ok(block)
 }
 
@@ -409,16 +475,16 @@ pub struct ReadOptions {
     verify_checksums: bool,
 }
 
-fn read_block_content<'a, F: RandomAccessFile>(
-    file: &'a F,
+fn read_block_content(
+    file: &Rc<dyn RandomAccessFile>,
     opts: &ReadOptions,
     handle: &mut BlockHandle,
 ) -> api::Result<Vec<u8>> {
     // Read the block contents as well as the type/crc footer.
     let n = handle.size;
-    let mut buf = Vec::with_capacity(n + BLOCK_TRAILER_SIZE);
-    file.read(handle.offset, n + BLOCK_TRAILER_SIZE, &mut buf)?;
-    if buf.len() != n + BLOCK_TRAILER_SIZE {
+    let mut buf = Vec::with_capacity(n + BlockTrailerSize);
+    file.read(handle.offset, n + BlockTrailerSize, &mut buf)?;
+    if buf.len() != n + BlockTrailerSize {
         return Err(Error::Corruption(String::from("truncated block read")));
     }
 
@@ -458,27 +524,28 @@ fn read_block_content<'a, F: RandomAccessFile>(
 //
 // Uses a supplied function to convert an index_iter value into
 // an iterator over the contents of the corresponding block.
-pub struct TableIterator<'f, F: RandomAccessFile, C: Comparator> {
+pub struct TableIterator {
     option: ReadOptions,
-    index_iter: BlockIterator<C>,
-    data_iter: Option<BlockIterator<C>>,
+    index_iter: BlockIterator,
+    data_iter: Option<BlockIterator>,
     data_block_handle: Vec<u8>,
-    file: &'f F,
-    comparator: C,
+    file: Rc<dyn RandomAccessFile>,
+    comparator: Rc<dyn Comparator>,
 }
 
-impl<'f, F, C> TableIterator<'f, F, C>
-where
-    F: RandomAccessFile,
-    C: Comparator,
-{
-    fn new(index_iter: BlockIterator<C>, file: &'f F, cmp: C, option: ReadOptions) -> Self {
+impl TableIterator {
+    fn new(
+        option: ReadOptions,
+        index_iter: BlockIterator,
+        file: Rc<dyn RandomAccessFile>,
+        cmp: Rc<dyn Comparator>,
+    ) -> Self {
         TableIterator {
-            option: option,
-            index_iter: index_iter,
+            option,
+            index_iter,
             data_iter: None,
             data_block_handle: vec![],
-            file: file,
+            file,
             comparator: cmp,
         }
     }
@@ -493,7 +560,7 @@ where
                 // data_iter_ is already constructed with this iterator, so
                 // no need to change anything
             } else {
-                let block = block_reader(self.file, &self.option, handle)?;
+                let block = block_reader(&self.file, &self.option, handle)?;
                 self.data_block_handle.clear();
                 self.data_block_handle.extend_from_slice(handle);
                 self.data_iter = Some(block.iter(self.comparator.clone()));
@@ -535,11 +602,7 @@ where
     }
 }
 
-impl<'f, F, C> api::Iterator for TableIterator<'f, F, C>
-where
-    F: RandomAccessFile,
-    C: Comparator,
-{
+impl api::Iterator for TableIterator {
     fn next(&mut self) -> api::Result<()> {
         assert!(self.valid()?);
         self.data_iter.as_mut().unwrap().next()?;

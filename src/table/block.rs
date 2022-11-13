@@ -1,17 +1,16 @@
 use std::cmp::Ordering;
-use std::io::Read;
-use std::result;
-use std::{io::Write, rc::Rc};
+use std::io::Write;
+use std::mem::size_of;
+use std::rc::Rc;
 
-use byteorder::{ByteOrder, LittleEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{ByteOrder, LittleEndian, WriteBytesExt};
 
-use crate::api::{self, Comparator, Error};
-use crate::api::{DbError, Result};
-use crate::{util, CompressionType};
+use crate::api::{self, Comparator, Error, Result};
+use crate::{util, CompressionType, WritableFile};
 
-use super::{BLOCK_TRAILER_SIZE, BLOCK_TYPE_NO_COMPRESSION};
+use super::BlockTrailerSize;
 
-pub struct BlockWriter {
+pub struct BlockBuilder {
     buf: Vec<u8>,
     compressed_buf: Vec<u8>,
 
@@ -24,7 +23,7 @@ pub struct BlockWriter {
     finished: bool,
 }
 
-impl BlockWriter {
+impl BlockBuilder {
     pub fn new(restart_interval: usize) -> Self {
         assert!(restart_interval >= 1);
 
@@ -73,7 +72,10 @@ impl BlockWriter {
         self.counter += 1;
     }
 
-    pub fn finish(&mut self) {
+    // Finish building the block and return a slice that refers to the
+    // block contents.  The returned slice will remain valid for the
+    // lifetime of this builder or until Reset() is called.
+    pub fn finish(&mut self) -> &[u8] {
         for x in &self.restarts {
             let _ = self.buf.write_u32::<LittleEndian>(*x);
         }
@@ -81,6 +83,7 @@ impl BlockWriter {
             .buf
             .write_u32::<LittleEndian>(self.restarts.len() as u32);
         self.finished = true;
+        &self.buf
     }
 
     pub fn is_empty(&self) -> bool {
@@ -102,58 +105,6 @@ impl BlockWriter {
         self.finished = false;
         self.last_key.clear();
     }
-
-    pub fn write<W: Write>(
-        &mut self,
-        writer: &mut W,
-        compression: CompressionType,
-    ) -> api::Result<usize> {
-        // File format contains a sequence of blocks where each block has:
-        //    block_data: uint8[n]
-        //    type: uint8
-        //    crc: uint32
-        self.finish();
-
-        let contents: &[u8];
-        match compression {
-            CompressionType::SnappyCompression => {
-                {
-                    let mut w = snap::write::FrameEncoder::new(&mut self.compressed_buf);
-                    w.write_all(&self.buf)?;
-                    // flush at drop
-                }
-                contents = &self.compressed_buf;
-            }
-
-            CompressionType::NoCompression => {
-                contents = &self.buf;
-            }
-        }
-        let n = write_raw_block(contents, compression, writer)?;
-        self.reset();
-        Ok(n)
-    }
-}
-
-fn write_raw_block<W: Write>(
-    contents: &[u8],
-    compression_type: CompressionType,
-    writer: &mut W,
-) -> std::io::Result<usize> {
-    let n = contents.len();
-
-    writer.write_all(contents)?;
-
-    let mut trailer: [u8; BLOCK_TRAILER_SIZE] = [0; BLOCK_TRAILER_SIZE];
-    trailer[0] = compression_type as u8;
-
-    let cs = [contents, &trailer[0..1]];
-    let crc = util::crcs(&cs);
-
-    LittleEndian::write_u32(&mut trailer[1..], crc);
-    writer.write_all(&trailer)?;
-
-    Ok(n + BLOCK_TRAILER_SIZE)
 }
 
 fn share_prefix_len(a: &[u8], b: &[u8]) -> usize {
@@ -193,33 +144,46 @@ fn put_uvarint(buf: &mut Vec<u8>, v: u64) {
     buf.push(x as u8);
 }
 
-pub struct BlockReader {
+#[derive(Clone)]
+pub struct Block {
     data: Vec<u8>,
     num_restarts: usize,
-    restart_offset: usize,
+    restart_offset: usize, // Offset in data_ of restart array
 }
 
-impl BlockReader {
+impl Block {
+    // Initialize the block with the specified contents.
     pub fn new(data: Vec<u8>) -> Self {
-        let mut num_restarts = 0;
-        let mut restart_offset = 0;
-        if data.len() >= 4 {
-            num_restarts = LittleEndian::read_u32(&data[data.len() - 4..]);
-            restart_offset = data.len() - ((num_restarts + 1) * 4) as usize;
+        let mut block = Block {
+            data,
+            num_restarts: 0,
+            restart_offset: 0,
+        };
+        if block.data.len() < size_of::<u32>() {
+            block.data = vec![];
+        } else {
+            let max_restarts_allowed = (block.data.len() - size_of::<u32>()) / size_of::<u32>();
+            let num_restarts =
+                util::decode_fixed32(&block.data[block.data.len() - size_of::<u32>()..]) as usize;
+            if num_restarts > max_restarts_allowed {
+                // The size is too small for NumRestarts()
+                block.data = vec![];
+            } else {
+                block.num_restarts = num_restarts;
+                block.restart_offset =
+                    block.data.len() - ((num_restarts + 1) * size_of::<u32>()) as usize;
+            }
         }
-        BlockReader {
-            data: data,
-            num_restarts: num_restarts as usize,
-            restart_offset: restart_offset,
-        }
+        block
     }
 
-    pub fn iter<C: Comparator>(self, cmp: C) -> BlockIterator<C> {
+    pub fn iter(self, cmp: Rc<dyn api::Comparator>) -> BlockIterator {
         BlockIterator::new(self.data, self.num_restarts, self.restart_offset, cmp)
     }
 }
 
-pub struct BlockIterator<C: Comparator> {
+#[derive(Clone)]
+pub struct BlockIterator {
     key: Vec<u8>,
     value: Vec<u8>,
 
@@ -233,23 +197,28 @@ pub struct BlockIterator<C: Comparator> {
 
     data: Vec<u8>, // underlying block contents
 
-    cmparator: C,
+    comparator: Rc<dyn Comparator>,
 }
 
-impl<C: Comparator> BlockIterator<C> {
-    fn new(data: Vec<u8>, num_restarts: usize, restarts: usize, cmp: C) -> Self {
+impl BlockIterator {
+    fn new(
+        data: Vec<u8>,
+        num_restarts: usize,
+        restarts: usize,
+        cmp: Rc<dyn api::Comparator>,
+    ) -> Self {
         assert!(num_restarts > 0);
         Self {
             key: Vec::new(),
             value: Vec::new(),
-            restarts: restarts,
+            restarts,
             current: restarts,
             value_offset: 0,
             restart_index: 0,
-            num_restarts: num_restarts,
+            num_restarts,
             status: None,
-            data: data,
-            cmparator: cmp,
+            data,
+            comparator: cmp,
         }
     }
 
@@ -369,7 +338,7 @@ impl<C: Comparator> BlockIterator<C> {
     }
 }
 
-impl<C: Comparator> api::Iterator for BlockIterator<C> {
+impl api::Iterator for BlockIterator {
     fn next(&mut self) -> Result<()> {
         self.valid()?;
         self.parse_next_key()?;
@@ -410,7 +379,7 @@ impl<C: Comparator> api::Iterator for BlockIterator<C> {
             // If we're already scanning, use the current position as a starting
             // point. This is beneficial if the key we're seeking to is ahead of the
             // current position.
-            current_compare = self.cmparator.compare(&self.key, target);
+            current_compare = self.comparator.compare(&self.key, target);
             match current_compare {
                 Ordering::Less => {
                     left = self.restart_index;
@@ -442,7 +411,7 @@ impl<C: Comparator> api::Iterator for BlockIterator<C> {
             let mut mid_key: Vec<u8> = Vec::with_capacity(non_shared);
             let _ = mid_key.write_all(&self.data[key_offset..key_offset + non_shared]);
 
-            if self.cmparator.compare(&mid_key, target).is_lt() {
+            if self.comparator.compare(&mid_key, target).is_lt() {
                 left = mid;
             } else {
                 right = mid - 1;
@@ -463,7 +432,7 @@ impl<C: Comparator> api::Iterator for BlockIterator<C> {
             if !self.parse_next_key()? {
                 return Ok(());
             }
-            if self.cmparator.compare(&self.key, target).is_ge() {
+            if self.comparator.compare(&self.key, target).is_ge() {
                 return Ok(());
             }
         }

@@ -11,7 +11,7 @@ mod table;
 mod util;
 
 #[derive(Clone)]
-pub struct Options<'a>{
+pub struct Options {
     // Number of keys between restart points for delta encoding of keys.
     // This parameter can be changed dynamically.  Most clients should
     // leave this parameter alone.
@@ -45,7 +45,7 @@ pub struct Options<'a>{
     // REQUIRES: The client must ensure that the comparator supplied
     // here has the same name and orders keys *exactly* the same as the
     // comparator provided to previous open calls on the same DB.
-    comparator: &'a dyn Comparator,
+    comparator: Rc<dyn Comparator>,
 
     // If true, the implementation will do aggressive checking of the
     // data it is processing and will stop early if it detects any
@@ -55,13 +55,13 @@ pub struct Options<'a>{
     paranoid_checks: bool,
 }
 
-impl<'a> Options<'a> {
+impl Options {
     fn default() -> Self {
         Options {
             block_restart_interval: 16,
             block_size: 4 * 1024,
             compression: CompressionType::SnappyCompression,
-            comparator: &ByteswiseComparator{},
+            comparator: Rc::new(ByteswiseComparator {}),
             paranoid_checks: false,
         }
     }
@@ -72,7 +72,7 @@ impl<'a> Options<'a> {
 // being stored in a file.  The following enum describes which
 // compression method (if any) is used to compress a block.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum CompressionType {
+pub enum CompressionType {
     // NOTE: do not change the values of existing entries, as these are
     // part of the persistent format on disk.
     NoCompression = 0x0,

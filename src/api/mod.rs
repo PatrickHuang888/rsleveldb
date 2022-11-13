@@ -1,6 +1,9 @@
-use std::{cmp, fmt};
+use std::{
+    cmp,
+    fmt::{self, Display},
+};
 
-pub trait Comparator: Clone {
+pub trait Comparator {
     // Three-way comparison.  Returns value:
     //   Less iff "a" < "b",
     //   Equal iff "a" == "b",
@@ -126,7 +129,7 @@ pub enum Error {
     NotFound,
     Corruption(String),
     NotSupported(String),
-    //InvalidArgument(String),
+    InvalidArgument(String),
     IOError(String),
     Other(String),
 }
@@ -137,12 +140,26 @@ impl From<std::io::Error> for Error {
     }
 }
 
+impl Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound => write!(f, "Not Found"),
+            Self::Corruption(s) => write!(f, "Corruption, {}", s),
+            Self::NotSupported(s) => write!(f, "Not Supported, {}", s),
+            Self::InvalidArgument(s) => write!(f, "Invalid Argument, {}", s),
+            Self::IOError(s) => write!(f, "IO Error, {}", s),
+            Self::Other(s) => write!(f, "Other, {}", s),
+        }
+    }
+}
+
 impl Error {
     pub fn push_message(&self, msg: &str) -> Self {
         match self {
             Self::NotFound => Self::NotFound,
             Self::Corruption(s) => Self::Corruption(format! {"{}, {}", msg, s}),
             Self::NotSupported(s) => Self::NotSupported(format! {"{}, {}", msg, s}),
+            Self::InvalidArgument(s) => Self::InvalidArgument(format! {"{}, {}", msg, s}),
             Self::IOError(s) => Self::IOError(format! {"{}, {}", msg, s}),
             Self::Other(s) => Self::Other(format! {"{}, {}", msg, s}),
         }

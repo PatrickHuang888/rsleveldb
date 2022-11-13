@@ -27,15 +27,14 @@ impl From<u64> for ValueType {
     }
 }
 
-fn destroy_db(dbname:&String, options:Options<>)
-
-
-
+fn destroy_db(dbname: &String, options: Options) {
+    todo!()
+}
 
 mod test {
     use std::{default, env, ops::AddAssign};
 
-    use crate::api::{ReadOptions, Snapshot, self};
+    use crate::api::{self, ReadOptions, Snapshot};
 
     use super::dbimpl::DB;
 
@@ -47,7 +46,7 @@ mod test {
 
     struct DBTest {
         option_config: u8,
-        db: Box<dyn DB>,
+        //db: Box<dyn DB>,
         dbname: String,
     }
 
@@ -55,7 +54,10 @@ mod test {
         fn new() -> Self {
             let temp_dir = String::from(env::temp_dir().to_str().unwrap()).push_str("db_test");
             //let options:Options
-            //DBTest { option_config: OptionConfig_Default, db}
+            DBTest {
+                dbname: String::from("name"),
+                option_config: OptionConfig_Default,
+            }
         }
 
         // Switch to a fresh database with the next option configuration to
@@ -71,25 +73,25 @@ mod test {
         }
 
         fn destroy_and_reopen(&mut self) {
-            destroy_db
+            //destroy_db
         }
 
-        fn get(&self, k: &str, snapshot: Option<Snapshot>) -> api::Result<String> {
+        /* fn get(&self, k: &str, snapshot: Option<Snapshot>) -> api::Result<String> {
             let mut options: ReadOptions = Default::default();
             options.snapshot = snapshot;
             let r= self.db.get(&options, k.as_bytes())?;
             Ok(String::from_utf8(r).unwrap())
-        }
+        } */
     }
 
     #[test]
     fn test_empty() {
         let db_test = DBTest::new();
-        loop {
+        /* loop {
             assert_eq!(db_test.get("foo", None), Err(api::Error::NotFound))
             if db_test.change_options() {
                 break;
             }
-        }
+        } */
     }
 }

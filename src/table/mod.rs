@@ -152,33 +152,26 @@ NOTE: All fixed-length integer are little-endian.
 //     num_restarts: uint32
 // restarts[i] contains the offset within the block of the ith restart point.
 
-use crate::api;
-
 mod block;
 mod table;
 
 // 1-byte type + 32-bit crc
-const BLOCK_TRAILER_SIZE: usize = 5;
-
-// The block type gives the per-block compression format.
-// These constants are part of the file format and should not be changed.
-const BLOCK_TYPE_NO_COMPRESSION: u8 = 0;
-const BLOCK_TYPE_SNAPPY_COMPRESSION: u8 = 1;
+const BlockTrailerSize: usize = 5;
 
 const KiB: usize = 1024;
-const DEFAULT_BLOCK_SIZE: usize = 4 * KiB;
+const DefaultBlockSize: usize = 4 * KiB;
 
 // Encoded length of a Footer.  Note that the serialization of a
 // Footer will always occupy exactly this many bytes.  It consists
 // of two block handles and a magic number.
-const FOOTER_LEN: usize = 48;
+const FooterLen: usize = 48;
 
 // kTableMagicNumber was picked by running
 //    echo http://code.google.com/p/leveldb/ | sha1sum
 // and taking the leading 64 bits.
-const MAGIC: u64 = 0xdb4775248b80fb57_u64;
+const Magic: u64 = 0xdb4775248b80fb57_u64;
 
-const MAX_VARINT_LEN64: usize = 10 + 10;
+const MaxVarintLen64: usize = 10 + 10;
 
 // copy goland binary.Uvarint()
 // Uvarint decodes a uint64 from buf and returns that value and the
@@ -194,14 +187,14 @@ pub fn get_uvarint(buf: &[u8]) -> std::result::Result<(u64, usize), String> {
     let mut s: usize = 0;
 
     for i in 0..buf.len() {
-        if i == MAX_VARINT_LEN64 {
+        if i == MaxVarintLen64 {
             return Err("overflow".to_string());
             //return (0, -(i as isize + 1)); // overflow
         }
 
         let b = buf[i];
         if b < 0x80 {
-            if i == MAX_VARINT_LEN64 - 1 && b > 1 {
+            if i == MaxVarintLen64 - 1 && b > 1 {
                 return Err("overflow".to_string());
                 //return (0, -(i as isize + 1)); // overflow
             }
@@ -215,156 +208,196 @@ pub fn get_uvarint(buf: &[u8]) -> std::result::Result<(u64, usize), String> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Error, ErrorKind, Write};
+    use std::{collections::HashMap, rc::Rc};
 
     use rand::{rngs::ThreadRng, thread_rng, Rng};
 
     use crate::{
-        api::{self, ByteswiseComparator, Comparator, Iterator},
-        table::{
-            table::{ReadOptions, Table},
-            BLOCK_TRAILER_SIZE,
-        },
-        Options,
+        api::{self, Iterator},
+        table::table::{ReadOptions, Table},
+        Options, WritableFile,
     };
 
     use super::{
-        block::{BlockReader, BlockWriter},
-        table::{RandomAccessFile, TableWriter},
+        block::{Block, BlockBuilder},
+        table::{RandomAccessFile, TableBuilder},
     };
 
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-
-    struct KeyValueEntry {
-        key: Key,
-        value: Value,
+    type KVMap = HashMap<Vec<u8>, Vec<u8>>;
+    struct Constructor {
+        options: Options,
+        data: KVMap,
+        cons_impl: Box<dyn ConstructorImpl>,
     }
 
-    pub struct KeyValue<'a, C: Comparator> {
-        entries: Vec<KeyValueEntry>, // entries in ascend order
-        n_bytes: usize,
-
-        comparator: &'a C,
+    trait ConstructorImpl {
+        fn finish(
+            &mut self,
+            options: &Options,
+            keys: &Vec<Vec<u8>>,
+            kvmap: &KVMap,
+        ) -> api::Result<()>;
+        fn iter(&self) -> Box<dyn api::Iterator>;
     }
 
-    impl<'a, C: Comparator> KeyValue<'a, C> {
-        pub fn new(cmp: &'a C) -> Self {
-            KeyValue {
-                entries: Vec::new(),
-                n_bytes: 0,
-                comparator: cmp,
-            }
-        }
+    struct TableImpl {
+        table: Option<Table>,
+    }
 
-        pub fn len(&self) -> usize {
-            self.entries.len()
-        }
+    impl ConstructorImpl for TableImpl {
+        fn finish(
+            &mut self,
+            options: &Options,
+            keys: &Vec<Vec<u8>>,
+            kvmap: &KVMap,
+        ) -> api::Result<()> {
+            let mut sink = StringSink {
+                contents: Vec::new(),
+            };
+            let file_size: usize;
 
-        pub fn size(&self) -> usize {
-            self.n_bytes
-        }
-
-        pub fn key_at(&self, i: usize) -> Key {
-            self.entries[i].key.clone()
-        }
-
-        pub fn index_at(&self, i: usize) -> (&Key, &Value) {
-            (&self.entries[i].key, &self.entries[i].value)
-        }
-
-        pub fn value_at(&self, i: usize) -> Value {
-            self.entries[i].value.clone()
-        }
-
-        pub fn search(&self, key: &Key) -> Result<usize, usize> {
-            self.entries
-                .binary_search_by(|entry| self.comparator.compare(&entry.key, &key))
-        }
-
-        /* fn get(&self, key:Key) -> Option<usize> {
-            self.search(key)
-        } */
-
-        pub fn delete_index(&mut self, i: usize) -> Option<Value> {
-            if i < self.len() {
-                self.n_bytes -= self.key_at(i).len() + self.value_at(i).len();
-                return Some(self.entries.remove(i).value);
-            }
-            None
-        }
-
-        pub fn delete(&mut self, key: &Key) -> Option<Value> {
-            match self.search(&key) {
-                Err(_) => None,
-                Ok(i) => self.delete_index(i),
-            }
-        }
-
-        // insert return true, update return false
-        pub fn put_u(&mut self, key: &Key, value: &Value) -> bool {
-            match self.search(&key) {
-                Ok(i) => {
-                    self.n_bytes += value.len() - self.value_at(i).len();
-                    self.entries[i].value = value.clone();
-                }
-                Err(i) => {
-                    self.n_bytes += key.len() + value.len();
-                    self.entries.insert(
-                        i,
-                        KeyValueEntry {
-                            key: key.clone(),
-                            value: value.clone(),
-                        },
-                    );
-                    return true;
-                }
-            }
-            false
-        }
-
-        pub fn append(&mut self, key: &Key, value: &Value) {
-            let n = self.entries.len();
-            if n > 0
-                && self
-                    .comparator
-                    .compare(key, &self.entries[n - 1].key)
-                    .is_le()
             {
-                panic!("append, keys not in increasing order");
+                let mut builder = TableBuilder::new(&mut sink, options.clone());
+
+                for k in keys {
+                    builder.add(k, kvmap.get(k).unwrap())?;
+                }
+                builder.finish()?;
+                file_size = builder.file_size();
             }
-            self.entries.push(KeyValueEntry {
-                key: key.clone(),
-                value: value.clone(),
+
+            assert_eq!(sink.contents.len(), file_size);
+
+            let source = Rc::new(StringSource {
+                contents: sink.contents,
             });
-            self.n_bytes += key.len() + value.len();
+
+            let table = Table::open(options.clone(), source, file_size)?;
+            self.table = Some(table);
+
+            Ok(())
         }
 
-        pub fn clear(&mut self) {
-            self.entries.clear();
-            self.n_bytes = 0;
+        fn iter(&self) -> Box<dyn api::Iterator> {
+            let table = self.table.as_ref().unwrap();
+            Box::new(table.iter(ReadOptions::default()))
         }
     }
 
-    struct BufferSource {
-        buf: Vec<u8>,
+    struct BlockCons {
+        block: Option<Block>,
+        comparator: Rc<dyn api::Comparator>,
     }
-    impl BufferSource {
-        fn new(buf: Vec<u8>) -> Self {
-            BufferSource { buf: buf }
+
+    impl ConstructorImpl for BlockCons {
+        fn finish(
+            &mut self,
+            options: &Options,
+            keys: &Vec<Vec<u8>>,
+            kvmap: &KVMap,
+        ) -> api::Result<()> {
+            let mut contents = Vec::new();
+            let mut builder = BlockBuilder::new(options.block_restart_interval);
+            for k in keys {
+                builder.add(k, kvmap.get(k).unwrap());
+            }
+            contents.extend_from_slice(builder.finish());
+
+            self.block = Some(Block::new(contents));
+            Ok(())
+        }
+
+        fn iter(&self) -> Box<dyn api::Iterator> {
+            let block = self.block.as_ref().unwrap().clone();
+            Box::new(block.iter(self.comparator.clone()))
         }
     }
-    impl RandomAccessFile for BufferSource {
-        fn read(&self, offset: usize, n: usize, dst: &mut Vec<u8>) -> std::io::Result<usize> {
-            let mut r = n;
-            if offset > self.buf.len() {
-                return Err(Error::new(ErrorKind::Other, "invalid offset"));
+
+    struct StringSink {
+        contents: Vec<u8>,
+    }
+    impl WritableFile for StringSink {
+        fn append(&mut self, data: &[u8]) -> api::Result<()> {
+            self.contents.extend_from_slice(data);
+            Ok(())
+        }
+        fn close(&mut self) -> api::Result<()> {
+            Ok(())
+        }
+        fn flush(&mut self) -> api::Result<()> {
+            Ok(())
+        }
+        fn sync(&mut self) -> api::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct StringSource {
+        contents: Vec<u8>,
+    }
+
+    impl RandomAccessFile for StringSource {
+        fn read(&self, offset: usize, n: usize, dst: &mut Vec<u8>) -> api::Result<usize> {
+            let mut nn = n;
+            if offset >= self.contents.len() {
+                return Err(api::Error::InvalidArgument(format!(
+                    "invalid read offset {}, contents {}",
+                    offset,
+                    self.contents.len()
+                )));
             }
-            if offset + n > self.buf.len() {
-                r = self.buf.len() - offset;
+            if offset + n > self.contents.len() {
+                nn = self.contents.len() - offset;
             }
-            dst.write(&self.buf[offset..offset + r])?;
-            Ok(r)
+            dst.extend_from_slice(&self.contents[offset..offset + n]);
+            Ok(nn)
+        }
+    }
+
+    // Helper class for tests to unify the interface between
+    // BlockBuilder/TableBuilder and Block/Table.
+    impl Constructor {
+        fn new(arg: (TestCase, usize)) -> Self {
+            let mut options = Options::default();
+            options.block_restart_interval = arg.1;
+
+            match arg.0 {
+                TestCase::Table => {
+                    return Constructor {
+                        options: options,
+                        data: HashMap::new(),
+                        cons_impl: Box::new(TableImpl { table: None }),
+                    }
+                }
+                TestCase::Block => {
+                    let comparator = options.comparator.clone();
+                    return Constructor {
+                        options,
+                        data: HashMap::new(),
+                        cons_impl: Box::new(BlockCons {
+                            block: None,
+                            comparator,
+                        }),
+                    };
+                }
+            }
+        }
+
+        fn add(&mut self, key: &[u8], value: &[u8]) {
+            self.data.insert(Vec::from(key), Vec::from(value));
+        }
+
+        // Finish constructing the data structure with all the keys that have
+        // been added so far.  Returns the keys in sorted order in "*keys"
+        // and stores the key/value pairs in "*kvmap"
+        fn finish(&mut self) -> (Vec<Vec<u8>>, KVMap) {
+            let mut keys: Vec<Vec<u8>> = self.data.keys().cloned().collect();
+            keys.sort();
+
+            let s = self.cons_impl.finish(&self.options, &keys, &self.data);
+            assert!(s.is_ok(), "{:?}", s);
+
+            (keys, self.data.clone())
         }
     }
 
@@ -373,174 +406,131 @@ mod tests {
         Block,
     }
 
-    static INTERVALS: [usize; 3] = [1, 16, 1024];
+    fn init() -> [(TestCase, usize); 6] {
+        [
+            (TestCase::Table, 1),
+            (TestCase::Table, 16),
+            (TestCase::Table, 1024),
+            (TestCase::Block, 1),
+            (TestCase::Block, 16),
+            (TestCase::Block, 1024),
+        ]
+    }
 
     #[test]
     fn test_empty() {
-        let cmp = ByteswiseComparator::default();
-        let kv = KeyValue::new(&cmp);
+        let test_args = init();
+        for arg in test_args {
+            let mut cons = Constructor::new(arg);
 
-        test(TestCase::Block, &cmp, &kv);
-        test(TestCase::Table, &cmp, &kv);
+            test(&mut cons);
+        }
     }
 
     #[test]
     fn test_simple_single() {
-        let cmp = ByteswiseComparator::default();
-        let mut kv = KeyValue::new(&cmp);
-        kv.append(&"abc".as_bytes().to_vec(), &"v".as_bytes().to_vec());
+        let test_args = init();
+        for arg in test_args {
+            let mut cons = Constructor::new(arg);
+            cons.add(&"abc".as_bytes().to_vec(), &"v".as_bytes().to_vec());
 
-        test(TestCase::Block, &cmp, &kv);
-        test(TestCase::Table, &cmp, &kv)
+            test(&mut cons);
+        }
     }
 
     #[test]
     fn test_simple_specical_key() {
-        let cmp = ByteswiseComparator::default();
-        let mut kv = KeyValue::new(&cmp);
-        let key = vec![0xff, 0xff];
-        kv.append(&key, &"v3".as_bytes().to_vec());
+        let test_args = init();
+        for arg in test_args {
+            let mut cons = Constructor::new(arg);
+            let key = vec![0xff, 0xff];
+            cons.add(&key, &"v3".as_bytes().to_vec());
 
-        test(TestCase::Block, &cmp, &kv);
-        test(TestCase::Table, &cmp, &kv)
+            test(&mut cons);
+        }
     }
 
     #[test]
     fn test_simple_multi() {
-        let cmp = ByteswiseComparator::default();
-        let mut kv = KeyValue::new(&cmp);
-        kv.append(&"abc".as_bytes().to_vec(), &"v".as_bytes().to_vec());
-        kv.append(&"abcd".as_bytes().to_vec(), &"v".as_bytes().to_vec());
-        kv.append(&"ac".as_bytes().to_vec(), &"v2".as_bytes().to_vec());
+        let test_args = init();
+        for arg in test_args {
+            let mut cons = Constructor::new(arg);
+            cons.add(&"abc".as_bytes().to_vec(), &"v".as_bytes().to_vec());
+            cons.add(&"abcd".as_bytes().to_vec(), &"v".as_bytes().to_vec());
+            cons.add(&"ac".as_bytes().to_vec(), &"v2".as_bytes().to_vec());
 
-        test(TestCase::Block, &cmp, &kv);
-        test(TestCase::Table, &cmp, &kv)
+            test(&mut cons);
+        }
     }
 
     #[test]
     fn test_randomized() {
-        let cmp = ByteswiseComparator::default();
-        let mut kv = KeyValue::new(&cmp);
-
-        let mut rng = thread_rng();
-        let mut num_entries = 0;
-        while num_entries < 2000 {
-            kv.clear();
-
-            if (num_entries % 10) == 0 {
-                println!("num_entries = {}", num_entries);
-            }
-            for _ in 0..num_entries {
-                let k = random_key(&mut rng, skewed(4));
-                let v = random_value(&mut rng, 5);
-                kv.put_u(&Vec::from(k), &Vec::from(v));
-            }
-
-            if num_entries < 50 {
-                num_entries += 1
-            } else {
-                num_entries += 200
-            }
-
-            test(TestCase::Block, &cmp, &kv);
-            test(TestCase::Table, &cmp, &kv)
-        }
-    }
-
-    fn test<'a, C: Comparator>(case: TestCase, compartor: &C, kv: &KeyValue<'a, C>) {
-        for v in INTERVALS {
-            match case {
-                TestCase::Table => {
-                    let mut opts = Options::new(compartor.clone());
-                    opts.block_restart_interval = v;
-
-                    let mut file = Vec::new();
-                    let mut size = 0;
-                    {
-                        let mut writer = TableWriter::new(&mut file, &opts);
-
-                        for i in 0..kv.len() {
-                            let (k, v) = kv.index_at(i);
-
-                            let ar = writer.add(k, v);
-                            assert!(ar.is_ok());
-                        }
-
-                        let fr = writer.finish();
-                        assert!(fr.is_ok());
-
-                        size = writer.file_size();
-                    }
-
-                    assert_eq!(size, file.len());
-
-                    let source = BufferSource::new(file);
-                    let reader = Table::open(opts, &source, size).unwrap();
-                    let opt = ReadOptions::default();
-                    let mut it = reader.new_iterator(&opt);
-
-                    test_forward_scan(&mut it, kv);
-                    test_backward_scan(&mut it, kv);
-                    test_random_access(&mut it, &kv);
+        let test_args = init();
+        for arg in test_args {
+            let mut cons = Constructor::new(arg);
+            let mut rng = thread_rng();
+            let mut num_entries = 0;
+            while num_entries < 2000 {
+                if (num_entries % 10) == 0 {
+                    println!("num_entries = {}", num_entries);
+                }
+                for _ in 0..num_entries {
+                    let k = random_key(&mut rng, skewed(4));
+                    let v = random_value(&mut rng, 5);
+                    cons.add(&Vec::from(k), &Vec::from(v));
                 }
 
-                TestCase::Block => {
-                    let mut w = BlockWriter::new(v);
-                    for i in 0..kv.len() {
-                        let (k, v) = kv.index_at(i);
-                        w.add(k, v);
-                    }
-                    let mut file = Vec::new();
-                    let wr = w.write(&mut file, crate::CompressionType::NoCompression);
-                    assert!(wr.is_ok(), "write block error {:?}", wr.unwrap_err());
-                    // no trailer
-                    file.truncate(file.len() - BLOCK_TRAILER_SIZE);
-
-                    let block = BlockReader::new(file);
-                    let mut it = block.iter(compartor.clone());
-
-                    test_forward_scan(&mut it, kv);
-                    test_backward_scan(&mut it, kv);
-                    test_random_access(&mut it, &kv);
+                if num_entries < 50 {
+                    num_entries += 1
+                } else {
+                    num_entries += 200
                 }
+
+                test(&mut cons);
             }
         }
     }
 
-    fn test_forward_scan<'a, C: Comparator, T: Iterator>(it: &mut T, kv: &KeyValue<'a, C>) {
+    fn test(constructor: &mut Constructor) {
+        let (keys, kvmap) = constructor.finish();
+        let mut it = constructor.cons_impl.iter();
+        test_forward_scan(it, &keys, &kvmap);
+        it = constructor.cons_impl.iter();
+        test_backward_scan(it, &keys, &kvmap);
+        it = constructor.cons_impl.iter();
+        test_random_access(it, &keys, &kvmap);
+    }
+
+    fn test_forward_scan(mut it: Box<dyn Iterator>, keys: &Vec<Vec<u8>>, kvmap: &KVMap) {
         assert!(!it.valid().unwrap());
         let r = it.seek_to_first();
         assert!(r.is_ok(), "{:?}", r.unwrap_err());
-        let mut i = 0;
-        while i < kv.len() {
-            assert_eq!(
-                kv.index_at(i),
-                (&Vec::from(it.key()), &Vec::from(it.value()))
-            );
+
+        for key in keys.iter() {
+            assert_eq!(it.key(), key);
+            assert_eq!(it.value(), kvmap.get(key).unwrap());
             assert!(it.next().is_ok());
-            i += 1;
         }
         assert!(!it.valid().unwrap());
     }
 
-    fn test_backward_scan<'a, C: Comparator, T: Iterator>(it: &mut T, kv: &KeyValue<'a, C>) {
+    fn test_backward_scan(mut it: Box<dyn Iterator>, keys: &Vec<Vec<u8>>, kvmap: &KVMap) {
         assert!(!it.valid().unwrap());
         let r = it.seek_to_last();
         assert!(r.is_ok(), "{:?}", r.unwrap_err());
-        for i in (0..kv.len()).rev() {
-            assert_eq!(
-                (&Vec::from(it.key()), &Vec::from(it.value())),
-                kv.index_at(i)
-            );
+
+        for i in (0..keys.len()).rev() {
+            assert_eq!(it.key(), keys[i]);
+            assert_eq!(it.value(), kvmap.get(&keys[i]).unwrap());
             assert!(it.prev().is_ok());
         }
     }
 
-    fn test_random_access<'a, C: Comparator, T: Iterator>(it: &mut T, kv: &KeyValue<'a, C>) {
+    fn test_random_access(mut it: Box<dyn Iterator>, keys: &Vec<Vec<u8>>, kvmap: &KVMap) {
         let mut rng = thread_rng();
 
         let verbose = true;
-        let mut kv_index = 0;
+        let mut key_index = 0;
 
         assert!(!it.valid().unwrap());
 
@@ -556,12 +546,10 @@ mod tests {
                             println!("next");
                         }
                         assert!(it.next().is_ok());
-                        if kv_index < kv.len() - 1 {
-                            kv_index += 1;
-                            assert_eq!(
-                                (&Vec::from(it.key()), &Vec::from(it.value())),
-                                kv.index_at(kv_index)
-                            );
+                        if key_index < keys.len() - 1 {
+                            key_index += 1;
+                            assert_eq!(it.key(), keys[key_index]);
+                            assert_eq!(it.value(), kvmap.get(&keys[key_index]).unwrap());
                         } else {
                             assert!(!it.valid().unwrap());
                         }
@@ -573,24 +561,27 @@ mod tests {
                     }
                     let r = it.seek_to_first();
                     assert!(r.is_ok(), "seek_to_first error {:?}", r.unwrap_err());
-                    if kv.len() != 0 {
-                        kv_index = 0;
-                        assert_eq!(
-                            (&Vec::from(it.key()), &Vec::from(it.value())),
-                            kv.index_at(kv_index)
-                        );
+                    if keys.len() != 0 {
+                        key_index = 0;
+                        assert_eq!(it.key(), keys[key_index]);
+                        assert_eq!(it.value(), kvmap.get(&keys[key_index]).unwrap());
+                    } else {
+                        assert!(!it.valid().unwrap());
                     }
                 }
                 2 => {
-                    if kv.len() != 0 {
-                        kv_index = rng.gen_range(0..kv.len());
-                        let (k, v) = kv.index_at(kv_index);
+                    if keys.len() != 0 {
+                        key_index = rng.gen_range(0..keys.len());
+                        let k = &keys[key_index];
                         if verbose {
                             println!("seek {:?}", k.clone())
                         }
                         let s = it.seek(&k);
                         assert!(s.is_ok(), "seek err {:?}", s.unwrap_err());
-                        assert_eq!((&Vec::from(it.key()), &Vec::from(it.value())), (k, v));
+                        assert_eq!(it.key(), k);
+                        assert_eq!(it.value(), kvmap.get(k).unwrap());
+                    } else {
+                        assert!(!it.valid().unwrap());
                     }
                 }
                 3 => {
@@ -599,14 +590,12 @@ mod tests {
                             println!("prev");
                         }
                         assert!(it.prev().is_ok());
-                        if kv_index == 0 {
+                        if key_index == 0 {
                             assert!(!it.valid().unwrap());
                         } else {
-                            kv_index -= 1;
-                            assert_eq!(
-                                (&Vec::from(it.key()), &Vec::from(it.value())),
-                                kv.index_at(kv_index)
-                            );
+                            key_index -= 1;
+                            assert_eq!(it.key(), keys[key_index]);
+                            assert_eq!(it.value(), kvmap.get(&keys[key_index]).unwrap());
                         }
                     }
                 }
@@ -616,14 +605,12 @@ mod tests {
                     }
                     let r = it.seek_to_last();
                     assert!(r.is_ok(), "seek_to_last err {:?}", r.unwrap_err());
-                    if kv.len() == 0 {
+                    if keys.len() == 0 {
                         assert!(!it.valid().unwrap());
                     } else {
-                        kv_index = kv.len() - 1;
-                        assert_eq!(
-                            (&Vec::from(it.key()), &Vec::from(it.value())),
-                            kv.index_at(kv_index)
-                        );
+                        key_index = keys.len() - 1;
+                        assert_eq!(it.key(), keys[key_index]);
+                        assert_eq!(it.value(), kvmap.get(&keys[key_index]).unwrap());
                     }
                 }
                 _ => {
@@ -635,20 +622,20 @@ mod tests {
 
     static test_bytes: [u8; 10] = [0x0, 0x1, 0xa, 0xb, 0xc, 0xd, 0xe, 0xf, 0xf, 0xf];
 
-    fn random_key(rng: &mut ThreadRng, len: usize) -> &[u8] {
+    fn random_key(rng: &mut ThreadRng, len: usize) -> Vec<u8> {
         let mut r = Vec::with_capacity(len);
         for _ in 0..len {
             r.push(test_bytes[rng.gen_range(0..10)]);
         }
-        &r
+        r
     }
 
-    fn random_value(rng: &mut ThreadRng, len: usize) -> &[u8] {
+    fn random_value(rng: &mut ThreadRng, len: usize) -> Vec<u8> {
         let mut r = Vec::with_capacity(len);
         for _ in 0..len {
             r.push(test_bytes[rng.gen_range(0..10)]);
         }
-        &r
+        r
     }
 
     // Skewed: pick "base" uniformly from range [0,max_log] and then
