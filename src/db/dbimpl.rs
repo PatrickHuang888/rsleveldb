@@ -17,10 +17,8 @@ pub trait DB {
     // Note: consider setting options.sync = true.
     fn put(&mut self, options: &WriteOptions, key: &[u8], value: &[u8]) -> api::Result<()>;
 
-    fn get(&self, options: &ReadOptions, key: &[u8]) -> api::Result<Vec<u8>>;
+    fn get(&mut self, options: &ReadOptions, key: &[u8]) -> api::Result<Vec<u8>>;
 }
-
-struct KeyComparator {}
 
 struct DBImpl<W: WritableFile> {
     /* internal: Mutex<GuardedDBInternal>,
@@ -145,7 +143,7 @@ impl<W: WritableFile> DB for DBImpl<W> {
         self.write(opt, Some(batch))
     }
 
-    fn get(&self, options: &ReadOptions, key: &[u8]) -> api::Result<Vec<u8>> {
+    fn get(&mut self, options: &ReadOptions, key: &[u8]) -> api::Result<Vec<u8>> {
         let _guard = self.lock.lock().unwrap();
 
         let snaphsot = self.versions.last_sequence();
@@ -188,7 +186,7 @@ impl<W: WritableFile> DB for DBImpl<W> {
                 if found {
                     return Err(e);
                 } else {
-                    if let Some(imem) = &self.imem {
+                    if let Some(imem) = &mut self.imem {
                         match imem.get(&lkey) {
                             Ok(v) => return Ok(v),
                             Err((found, e)) => {

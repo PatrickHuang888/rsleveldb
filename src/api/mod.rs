@@ -4,6 +4,8 @@ use std::{
 };
 
 pub trait Comparator {
+    fn name(&self) -> &'static str;
+
     // Three-way comparison.  Returns value:
     //   Less iff "a" < "b",
     //   Equal iff "a" == "b",
@@ -24,9 +26,6 @@ pub trait Comparator {
     // Successor appends a sequence of bytes x to dst such that x >= b, where
     // 'less than' is consistent with Compare. An implementation should return
     // nil if x equal to b.
-    //
-    // Contents of b should not by any means modified. Doing so may cause
-    // corruption on the internal state.
     fn find_short_successor(&self, b: &mut [u8]);
 }
 
@@ -34,6 +33,10 @@ pub trait Comparator {
 pub struct ByteswiseComparator {}
 
 impl Comparator for ByteswiseComparator {
+    fn name(&self) -> &'static str {
+        "leveldb.BytewiseComparator"
+    }
+
     fn compare(&self, a: &[u8], b: &[u8]) -> cmp::Ordering {
         a.iter().cmp(b.iter())
     }
@@ -58,6 +61,7 @@ impl Comparator for ByteswiseComparator {
     }
 
     fn find_short_successor(&self, mut key: &mut [u8]) {
+        // Find first character that can be incremented
         for i in 0..key.len() {
             if key[i] != 0xff {
                 key[i] += 1;
@@ -85,8 +89,8 @@ pub trait Iterator {
     // Valid() after this call iff the source is not empty.
     fn seek_to_last(&mut self) -> Result<()>;
 
-    fn key(&self) -> &[u8];
-    fn value(&self) -> &[u8];
+    fn key(&self) -> Result<&[u8]>;
+    fn value(&self) -> Result<&[u8]>;
 
     fn valid(&self) -> Result<bool>;
 }

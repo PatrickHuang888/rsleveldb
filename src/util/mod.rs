@@ -1,5 +1,7 @@
 use crc::{Crc, CRC_32_ISCSI};
 
+use crate::api;
+
 static B: u8 = 0x80;
 
 pub fn varint_length(v: u64) -> usize {
@@ -22,7 +24,7 @@ pub fn encode_varint64(dst: &mut Vec<u8>, v: u64) {
     dst.push(x as u8);
 }
 
-pub fn encode_varint32(dst: &mut Vec<u8>, v: u32) {
+pub fn put_varint32(dst: &mut Vec<u8>, v: u32) {
     let mut x = v;
     while x >= B as u32 {
         // large than 0b1000_0000
@@ -63,6 +65,12 @@ pub fn get_varint64(src: &[u8]) -> (u64, usize) {
     (0, 0)
 }
 
+pub fn put_fixed64(dst: &mut Vec<u8>, v: u64) {
+    let mut buf = [0; 8];
+    encode_fixed64(&mut buf, v);
+    dst.extend_from_slice(&buf);
+}
+
 pub fn encode_fixed64(dst: &mut [u8], v: u64) {
     dst[0] = v as u8;
     dst[1] = (v >> 8) as u8;
@@ -99,9 +107,13 @@ pub fn decode_fixed32(src: &[u8]) -> u32 {
     src[0] as u32 | (src[1] as u32) << 8 | (src[2] as u32) << 16 | (src[3] as u32) << 24
 }
 
-pub fn get_length_prefixed_slice(data: &[u8]) -> &[u8] {
+/*
+return data slice and offset position
+ */
+pub fn get_length_prefixed_slice(data: &[u8]) -> (&[u8], usize) {
     let (len, off) = get_varint32(data);
-    &data[off..off + len as usize]
+    let end = off + len as usize;
+    (&data[off..end], off + len as usize)
 }
 
 pub const CASTAGNOLI: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);

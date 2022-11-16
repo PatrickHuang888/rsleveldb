@@ -5,10 +5,10 @@ use std::rc::Rc;
 
 use byteorder::{ByteOrder, LittleEndian, WriteBytesExt};
 
-use crate::api::{self, Comparator, Error, Result};
-use crate::{util, CompressionType, WritableFile};
-
-use super::BlockTrailerSize;
+use crate::{
+    api::{self, Comparator, Error, Result},
+    util,
+};
 
 pub struct BlockBuilder {
     buf: Vec<u8>,
@@ -143,8 +143,6 @@ fn put_uvarint(buf: &mut Vec<u8>, v: u64) {
     }
     buf.push(x as u8);
 }
-
-#[derive(Clone)]
 pub struct Block {
     data: Vec<u8>,
     num_restarts: usize,
@@ -177,7 +175,7 @@ impl Block {
         block
     }
 
-    pub fn iter(self, cmp: Rc<dyn api::Comparator>) -> BlockIterator {
+    pub fn new_iter(self, cmp: Rc<dyn api::Comparator>) -> BlockIterator {
         BlockIterator::new(self.data, self.num_restarts, self.restart_offset, cmp)
     }
 }
@@ -452,12 +450,12 @@ impl api::Iterator for BlockIterator {
         Ok(())
     }
 
-    fn key(&self) -> &[u8] {
-        &self.key
+    fn key(&self) -> api::Result<&[u8]> {
+        Ok(&self.key)
     }
 
-    fn value(&self) -> &[u8] {
-        &self.value
+    fn value(&self) -> api::Result<&[u8]> {
+        Ok(&self.value)
     }
 
     fn valid(&self) -> Result<bool> {

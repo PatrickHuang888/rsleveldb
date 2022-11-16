@@ -156,22 +156,22 @@ mod block;
 mod table;
 
 // 1-byte type + 32-bit crc
-const BlockTrailerSize: usize = 5;
+const BLOCK_TRAILER_SIZE: usize = 5;
 
-const KiB: usize = 1024;
-const DefaultBlockSize: usize = 4 * KiB;
+const KI_B: usize = 1024;
+const DEFAULT_BLOCK_SIZE: usize = 4 * KI_B;
 
 // Encoded length of a Footer.  Note that the serialization of a
 // Footer will always occupy exactly this many bytes.  It consists
 // of two block handles and a magic number.
-const FooterLen: usize = 48;
+const FOOTER_LEN: usize = 48;
 
 // kTableMagicNumber was picked by running
 //    echo http://code.google.com/p/leveldb/ | sha1sum
 // and taking the leading 64 bits.
-const Magic: u64 = 0xdb4775248b80fb57_u64;
+const MAGIC: u64 = 0xdb4775248b80fb57_u64;
 
-const MaxVarintLen64: usize = 10 + 10;
+const MAX_VARINT_LEN64: usize = 10 + 10;
 
 // copy goland binary.Uvarint()
 // Uvarint decodes a uint64 from buf and returns that value and the
@@ -187,14 +187,14 @@ pub fn get_uvarint(buf: &[u8]) -> std::result::Result<(u64, usize), String> {
     let mut s: usize = 0;
 
     for i in 0..buf.len() {
-        if i == MaxVarintLen64 {
+        if i == MAX_VARINT_LEN64 {
             return Err("overflow".to_string());
             //return (0, -(i as isize + 1)); // overflow
         }
 
         let b = buf[i];
         if b < 0x80 {
-            if i == MaxVarintLen64 - 1 && b > 1 {
+            if i == MAX_VARINT_LEN64 - 1 && b > 1 {
                 return Err("overflow".to_string());
                 //return (0, -(i as isize + 1)); // overflow
             }
@@ -214,12 +214,17 @@ mod tests {
 
     use crate::{
         api::{self, Iterator},
+        db::{
+            self,
+            memtable::{self, InternalKeyComparator, MemTable, MemTableIterator},
+            ValueType,
+        },
         table::table::{ReadOptions, Table},
-        Options, WritableFile,
+        util, Options, WritableFile,
     };
 
     use super::{
-        block::{Block, BlockBuilder},
+        block::{Block, BlockBuilder, BlockIterator},
         table::{RandomAccessFile, TableBuilder},
     };
 
@@ -237,14 +242,15 @@ mod tests {
             keys: &Vec<Vec<u8>>,
             kvmap: &KVMap,
         ) -> api::Result<()>;
-        fn iter(&self) -> Box<dyn api::Iterator>;
+
+        fn iter(&mut self) -> Box<dyn api::Iterator + '_>;
     }
 
-    struct TableImpl {
+    struct TableCons {
         table: Option<Table>,
     }
 
-    impl ConstructorImpl for TableImpl {
+    impl ConstructorImpl for TableCons {
         fn finish(
             &mut self,
             options: &Options,
@@ -278,15 +284,14 @@ mod tests {
             Ok(())
         }
 
-        fn iter(&self) -> Box<dyn api::Iterator> {
+        fn iter(&mut self) -> Box<dyn api::Iterator + '_> {
             let table = self.table.as_ref().unwrap();
             Box::new(table.iter(ReadOptions::default()))
         }
     }
 
     struct BlockCons {
-        block: Option<Block>,
-        comparator: Rc<dyn api::Comparator>,
+        block_iter: Option<BlockIterator>,
     }
 
     impl ConstructorImpl for BlockCons {
@@ -303,13 +308,88 @@ mod tests {
             }
             contents.extend_from_slice(builder.finish());
 
-            self.block = Some(Block::new(contents));
+            let block = Block::new(contents);
+            self.block_iter = Some(block.new_iter(options.comparator.clone()));
             Ok(())
         }
 
-        fn iter(&self) -> Box<dyn api::Iterator> {
-            let block = self.block.as_ref().unwrap().clone();
-            Box::new(block.iter(self.comparator.clone()))
+        fn iter(&mut self) -> Box<dyn api::Iterator + '_> {
+            let iter = self.block_iter.as_ref().unwrap().clone();
+            Box::new(iter)
+        }
+    }
+
+    struct MemTableCons {
+        table: Option<memtable::MemTable>,
+    }
+
+    impl ConstructorImpl for MemTableCons {
+        fn finish(
+            &mut self,
+            options: &Options,
+            keys: &Vec<Vec<u8>>,
+            kvmap: &KVMap,
+        ) -> api::Result<()> {
+            let internal_comparator = InternalKeyComparator::new(options.comparator.clone());
+            let mut memtable = MemTable::new(internal_comparator);
+            let mut seq = 1;
+            for k in keys {
+                let v = kvmap.get(k).unwrap();
+                memtable.add(seq, ValueType::TypeValue, k, v);
+                seq += 1;
+            }
+            self.table = Some(memtable);
+            Ok(())
+        }
+
+        fn iter(&mut self) -> Box<dyn api::Iterator + '_> {
+            // A helper class that converts internal format keys into user keys
+            struct KeyConvertingIterator<'a> {
+                iter: MemTableIterator<'a>,
+            }
+            impl<'a> api::Iterator for KeyConvertingIterator<'a> {
+                fn key(&self) -> api::Result<&[u8]> {
+                    assert!(self.valid().unwrap());
+                    match db::parse_internal_key(self.iter.key().unwrap()) {
+                        Ok(pared_key) => {
+                            return Ok(pared_key.0);
+                        }
+                        Err(e) => {
+                            return Err(api::Error::Other(e.to_string()));
+                        }
+                    }
+                }
+                fn next(&mut self) -> api::Result<()> {
+                    self.iter.next()
+                }
+                fn prev(&mut self) -> api::Result<()> {
+                    self.iter.prev()
+                }
+                fn seek(&mut self, key: &[u8]) -> api::Result<()> {
+                    let mut internal_key = key.to_vec();
+                    util::put_fixed64(
+                        &mut internal_key,
+                        db::pack_sequence_and_type(db::MAX_SEQUENCE_NUMBER, ValueType::TypeValue),
+                    );
+                    self.iter.seek(&internal_key)
+                }
+                fn seek_to_first(&mut self) -> api::Result<()> {
+                    self.iter.seek_to_first()
+                }
+                fn seek_to_last(&mut self) -> api::Result<()> {
+                    self.iter.seek_to_last()
+                }
+                fn valid(&self) -> api::Result<bool> {
+                    self.iter.valid()
+                }
+                fn value(&self) -> api::Result<&[u8]> {
+                    self.iter.value()
+                }
+            }
+
+            Box::new(KeyConvertingIterator {
+                iter: self.table.as_mut().unwrap().new_iter(),
+            })
         }
     }
 
@@ -364,20 +444,23 @@ mod tests {
             match arg.0 {
                 TestCase::Table => {
                     return Constructor {
-                        options: options,
+                        options,
                         data: HashMap::new(),
-                        cons_impl: Box::new(TableImpl { table: None }),
+                        cons_impl: Box::new(TableCons { table: None }),
                     }
                 }
                 TestCase::Block => {
-                    let comparator = options.comparator.clone();
                     return Constructor {
                         options,
                         data: HashMap::new(),
-                        cons_impl: Box::new(BlockCons {
-                            block: None,
-                            comparator,
-                        }),
+                        cons_impl: Box::new(BlockCons { block_iter: None }),
+                    };
+                }
+                TestCase::MemTable => {
+                    return Constructor {
+                        options,
+                        data: HashMap::new(),
+                        cons_impl: Box::new(MemTableCons { table: None }),
                     };
                 }
             }
@@ -404,16 +487,19 @@ mod tests {
     enum TestCase {
         Table,
         Block,
+        MemTable,
     }
 
     fn init() -> [(TestCase, usize); 6] {
         [
-            (TestCase::Table, 1),
             (TestCase::Table, 16),
             (TestCase::Table, 1024),
             (TestCase::Block, 1),
             (TestCase::Block, 16),
             (TestCase::Block, 1024),
+            // Restart interval does not matter for memtables
+            (TestCase::MemTable, 1),
+            // Do not bother with restart interval variations for DB
         ]
     }
 
@@ -432,7 +518,7 @@ mod tests {
         let test_args = init();
         for arg in test_args {
             let mut cons = Constructor::new(arg);
-            cons.add(&"abc".as_bytes().to_vec(), &"v".as_bytes().to_vec());
+            cons.add("abc".as_bytes(), "v".as_bytes());
 
             test(&mut cons);
         }
@@ -444,7 +530,7 @@ mod tests {
         for arg in test_args {
             let mut cons = Constructor::new(arg);
             let key = vec![0xff, 0xff];
-            cons.add(&key, &"v3".as_bytes().to_vec());
+            cons.add(&key, "v3".as_bytes());
 
             test(&mut cons);
         }
@@ -455,9 +541,9 @@ mod tests {
         let test_args = init();
         for arg in test_args {
             let mut cons = Constructor::new(arg);
-            cons.add(&"abc".as_bytes().to_vec(), &"v".as_bytes().to_vec());
-            cons.add(&"abcd".as_bytes().to_vec(), &"v".as_bytes().to_vec());
-            cons.add(&"ac".as_bytes().to_vec(), &"v2".as_bytes().to_vec());
+            cons.add("abc".as_bytes(), "v".as_bytes());
+            cons.add("abcd".as_bytes(), "v".as_bytes());
+            cons.add("ac".as_bytes(), "v2".as_bytes());
 
             test(&mut cons);
         }
@@ -477,7 +563,7 @@ mod tests {
                 for _ in 0..num_entries {
                     let k = random_key(&mut rng, skewed(4));
                     let v = random_value(&mut rng, 5);
-                    cons.add(&Vec::from(k), &Vec::from(v));
+                    cons.add(&k, &v);
                 }
 
                 if num_entries < 50 {
@@ -493,40 +579,46 @@ mod tests {
 
     fn test(constructor: &mut Constructor) {
         let (keys, kvmap) = constructor.finish();
-        let mut it = constructor.cons_impl.iter();
-        test_forward_scan(it, &keys, &kvmap);
-        it = constructor.cons_impl.iter();
-        test_backward_scan(it, &keys, &kvmap);
-        it = constructor.cons_impl.iter();
-        test_random_access(it, &keys, &kvmap);
+        {
+            let mut it = constructor.cons_impl.iter();
+            test_forward_scan(&mut it, &keys, &kvmap);
+        }
+        {
+            let mut it = constructor.cons_impl.iter();
+            test_backward_scan(&mut it, &keys, &kvmap);
+        }
+        {
+            let it = constructor.cons_impl.iter();
+            test_random_access(it, &keys, &kvmap);
+        }
     }
 
-    fn test_forward_scan(mut it: Box<dyn Iterator>, keys: &Vec<Vec<u8>>, kvmap: &KVMap) {
+    fn test_forward_scan(it: &mut Box<dyn Iterator + '_>, keys: &Vec<Vec<u8>>, kvmap: &KVMap) {
         assert!(!it.valid().unwrap());
         let r = it.seek_to_first();
         assert!(r.is_ok(), "{:?}", r.unwrap_err());
 
         for key in keys.iter() {
-            assert_eq!(it.key(), key);
-            assert_eq!(it.value(), kvmap.get(key).unwrap());
+            assert_eq!(it.key().unwrap(), key);
+            assert_eq!(it.value().unwrap(), kvmap.get(key).unwrap());
             assert!(it.next().is_ok());
         }
         assert!(!it.valid().unwrap());
     }
 
-    fn test_backward_scan(mut it: Box<dyn Iterator>, keys: &Vec<Vec<u8>>, kvmap: &KVMap) {
+    fn test_backward_scan(mut it: &mut Box<dyn Iterator + '_>, keys: &Vec<Vec<u8>>, kvmap: &KVMap) {
         assert!(!it.valid().unwrap());
         let r = it.seek_to_last();
         assert!(r.is_ok(), "{:?}", r.unwrap_err());
 
         for i in (0..keys.len()).rev() {
-            assert_eq!(it.key(), keys[i]);
-            assert_eq!(it.value(), kvmap.get(&keys[i]).unwrap());
+            assert_eq!(it.key().unwrap(), keys[i]);
+            assert_eq!(it.value().unwrap(), kvmap.get(&keys[i]).unwrap());
             assert!(it.prev().is_ok());
         }
     }
 
-    fn test_random_access(mut it: Box<dyn Iterator>, keys: &Vec<Vec<u8>>, kvmap: &KVMap) {
+    fn test_random_access(mut it: Box<dyn Iterator + '_>, keys: &Vec<Vec<u8>>, kvmap: &KVMap) {
         let mut rng = thread_rng();
 
         let verbose = true;
@@ -548,8 +640,8 @@ mod tests {
                         assert!(it.next().is_ok());
                         if key_index < keys.len() - 1 {
                             key_index += 1;
-                            assert_eq!(it.key(), keys[key_index]);
-                            assert_eq!(it.value(), kvmap.get(&keys[key_index]).unwrap());
+                            assert_eq!(it.key().unwrap(), keys[key_index]);
+                            assert_eq!(it.value().unwrap(), kvmap.get(&keys[key_index]).unwrap());
                         } else {
                             assert!(!it.valid().unwrap());
                         }
@@ -563,8 +655,8 @@ mod tests {
                     assert!(r.is_ok(), "seek_to_first error {:?}", r.unwrap_err());
                     if keys.len() != 0 {
                         key_index = 0;
-                        assert_eq!(it.key(), keys[key_index]);
-                        assert_eq!(it.value(), kvmap.get(&keys[key_index]).unwrap());
+                        assert_eq!(it.key().unwrap(), keys[key_index]);
+                        assert_eq!(it.value().unwrap(), kvmap.get(&keys[key_index]).unwrap());
                     } else {
                         assert!(!it.valid().unwrap());
                     }
@@ -578,8 +670,8 @@ mod tests {
                         }
                         let s = it.seek(&k);
                         assert!(s.is_ok(), "seek err {:?}", s.unwrap_err());
-                        assert_eq!(it.key(), k);
-                        assert_eq!(it.value(), kvmap.get(k).unwrap());
+                        assert_eq!(it.key().unwrap(), k);
+                        assert_eq!(it.value().unwrap(), kvmap.get(k).unwrap());
                     } else {
                         assert!(!it.valid().unwrap());
                     }
@@ -594,8 +686,8 @@ mod tests {
                             assert!(!it.valid().unwrap());
                         } else {
                             key_index -= 1;
-                            assert_eq!(it.key(), keys[key_index]);
-                            assert_eq!(it.value(), kvmap.get(&keys[key_index]).unwrap());
+                            assert_eq!(it.key().unwrap(), keys[key_index]);
+                            assert_eq!(it.value().unwrap(), kvmap.get(&keys[key_index]).unwrap());
                         }
                     }
                 }
@@ -609,8 +701,8 @@ mod tests {
                         assert!(!it.valid().unwrap());
                     } else {
                         key_index = keys.len() - 1;
-                        assert_eq!(it.key(), keys[key_index]);
-                        assert_eq!(it.value(), kvmap.get(&keys[key_index]).unwrap());
+                        assert_eq!(it.key().unwrap(), keys[key_index]);
+                        assert_eq!(it.value().unwrap(), kvmap.get(&keys[key_index]).unwrap());
                     }
                 }
                 _ => {
@@ -620,12 +712,12 @@ mod tests {
         }
     }
 
-    static test_bytes: [u8; 10] = [0x0, 0x1, 0xa, 0xb, 0xc, 0xd, 0xe, 0xf, 0xf, 0xf];
+    static TEST_BYTES: [u8; 10] = [0x0, 0x1, 0xa, 0xb, 0xc, 0xd, 0xe, 0xf, 0xf, 0xf];
 
     fn random_key(rng: &mut ThreadRng, len: usize) -> Vec<u8> {
         let mut r = Vec::with_capacity(len);
         for _ in 0..len {
-            r.push(test_bytes[rng.gen_range(0..10)]);
+            r.push(TEST_BYTES[rng.gen_range(0..10)]);
         }
         r
     }
@@ -633,7 +725,7 @@ mod tests {
     fn random_value(rng: &mut ThreadRng, len: usize) -> Vec<u8> {
         let mut r = Vec::with_capacity(len);
         for _ in 0..len {
-            r.push(test_bytes[rng.gen_range(0..10)]);
+            r.push(TEST_BYTES[rng.gen_range(0..10)]);
         }
         r
     }

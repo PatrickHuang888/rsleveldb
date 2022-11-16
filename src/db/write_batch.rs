@@ -82,9 +82,9 @@ impl WriteBatch {
             input = &input[1..];
             match tag {
                 ValueType::TypeValue => {
-                    key = util::get_length_prefixed_slice(&input);
+                    key = util::get_length_prefixed_slice(&input).0;
                     input = &input[key.len()..];
-                    value = util::get_length_prefixed_slice(&input);
+                    value = util::get_length_prefixed_slice(&input).0;
                     input = &input[value.len()..];
                     if key.len() == 0 || value.len() == 0 {
                         return Err(Error::Corruption(String::from("bad WriteBatch Put")));
@@ -92,7 +92,7 @@ impl WriteBatch {
                     handler.put(key, value);
                 }
                 ValueType::TypeDeletion => {
-                    key = util::get_length_prefixed_slice(&input);
+                    key = util::get_length_prefixed_slice(&input).0;
                     input = &input[key.len()..];
                     if key.len() == 0 {
                         return Err(Error::Corruption(String::from("bad WriteBatch Delete")));

@@ -1,7 +1,10 @@
 use std::{
     cmp,
     ptr::{self, null_mut},
-    sync::atomic::{AtomicPtr, AtomicUsize, Ordering},
+    sync::{
+        atomic::{AtomicPtr, AtomicUsize, Ordering},
+        Arc,
+    },
 };
 
 use rand::{thread_rng, Rng};
@@ -34,14 +37,14 @@ struct Node<K: Clone> {
 } */
 
 impl<K: Clone> Node<K> {
-    fn new(key: &K, height: usize) -> Self {
-        let mut v = Vec::with_capacity(height);
+    fn new(k: &K, height: usize) -> Self {
+        let mut nexts = Vec::with_capacity(height);
         for _ in 0..height {
-            v.push(AtomicPtr::default());
+            nexts.push(AtomicPtr::default());
         }
         Node {
-            key: key.clone(),
-            nexts: v,
+            key: k.clone(),
+            nexts,
         }
     }
 
@@ -73,19 +76,19 @@ pub struct SkipList<C: Comparator<K>, K: PartialEq + Clone> {
     comparator: C,
     max_height: AtomicUsize,
     head: Node<K>,
-    head_ptr: *mut Node<K>,
+    //head_ptr: *mut Node<K>,
 }
 
 impl<C: Comparator<K>, K: PartialEq + Clone> SkipList<C, K> {
-    fn new(cmp: C, head_key: &K) -> Self {
+    pub fn new(cmp: C, head_key: &K) -> Self {
         let head = Node::new(head_key, MAX_HEIGHT); // head with any key will do
         let mut list = SkipList {
             comparator: cmp,
             max_height: AtomicUsize::new(1),
-            head: head,
-            head_ptr: null_mut(),
+            head,
+            //head_ptr: null_mut(),
         };
-        list.head_ptr = &mut list.head;
+        //list.head_ptr = &mut list.head;
         list
     }
 
@@ -110,13 +113,14 @@ impl<C: Comparator<K>, K: PartialEq + Clone> SkipList<C, K> {
         // Our data structure does not allow duplicate insertion
         if !i_ptr.is_null() {
             let node = unsafe { i_ptr.as_ref().unwrap() };
+            // duplicate
             assert!(key != &node.key);
         }
 
         let height = self.random_height();
         if height > self.get_max_height() {
             for i in self.get_max_height()..height {
-                prevs[i] = self.head_ptr;
+                prevs[i] = &mut self.head;
             }
             // It is ok to mutate max_height_ without any synchronization
             // with concurrent readers.  A concurrent reader that observes
@@ -143,7 +147,7 @@ impl<C: Comparator<K>, K: PartialEq + Clone> SkipList<C, K> {
         }
     }
 
-    fn contains(&self, key: &K) -> bool {
+    fn contains(&mut self, key: &K) -> bool {
         let x_ptr = self.find_greater_or_equal(key, &mut vec![]);
         if !x_ptr.is_null() {
             let x = unsafe { x_ptr.as_ref().unwrap() };
@@ -156,14 +160,14 @@ impl<C: Comparator<K>, K: PartialEq + Clone> SkipList<C, K> {
 
     // Return the latest node with a key < key.
     // Return head_ if there is no such node.
-    fn find_less_than(&self, key: &K) -> *mut Node<K> {
-        let mut x_ptr = self.head_ptr;
+    fn find_less_than(&mut self, key: &K) -> *mut Node<K> {
+        let mut x_ptr: *mut Node<K> = &mut self.head;
         let mut level = self.get_max_height() - 1;
 
         loop {
             assert!(!x_ptr.is_null());
             let x = unsafe { x_ptr.as_ref().unwrap() };
-            if x_ptr != self.head_ptr {
+            if x_ptr != &mut self.head {
                 assert!(self.comparator.compare(&x.key, key).is_lt());
             }
 
@@ -196,9 +200,9 @@ impl<C: Comparator<K>, K: PartialEq + Clone> SkipList<C, K> {
     //
     // If prevs is non-empty, fills prevs[level] with pointer to previous
     // node at "level" for every level in [0..max_height_-1].
-    fn find_greater_or_equal(&self, key: &K, prevs: &mut Vec<*mut Node<K>>) -> *mut Node<K> {
+    fn find_greater_or_equal(&mut self, key: &K, prevs: &mut Vec<*mut Node<K>>) -> *mut Node<K> {
         let mut level = self.get_max_height() - 1;
-        let mut x_ptr = self.head_ptr;
+        let mut x_ptr: *mut Node<K> = &mut self.head;
 
         loop {
             assert!(!x_ptr.is_null());
@@ -223,8 +227,8 @@ impl<C: Comparator<K>, K: PartialEq + Clone> SkipList<C, K> {
 
     // Return the last node in the list.
     // Return head_ if list is empty.
-    fn find_last(&self) -> *mut Node<K> {
-        let mut x_ptr = self.head_ptr;
+    fn find_last(&mut self) -> *mut Node<K> {
+        let mut x_ptr: *mut Node<K> = &mut self.head;
         let mut level = self.get_max_height() - 1;
 
         loop {
@@ -256,9 +260,9 @@ impl<C: Comparator<K>, K: PartialEq + Clone> SkipList<C, K> {
         self.max_height.load(Ordering::Relaxed)
     }
 
-    pub fn new_iterator(&self) -> SkipListIterator<C, K> {
+    pub fn new_iterator<'a>(&'a mut self) -> SkipListIterator<'a, C, K> {
         SkipListIterator {
-            list: &self,
+            list: self,
             n_ptr: ptr::null_mut(),
         }
     }
@@ -277,11 +281,6 @@ impl<C: Comparator<K>, K: PartialEq + Clone> Drop for SkipList<C, K> {
     }
 }
 
-pub struct SkipListIterator<'a, C: Comparator<K>, K: PartialEq + Clone> {
-    list: &'a SkipList<C, K>,
-    n_ptr: *mut Node<K>,
-}
-
 pub trait Iterator<K: PartialEq> {
     fn next(&mut self);
     fn prev(&mut self);
@@ -290,6 +289,11 @@ pub trait Iterator<K: PartialEq> {
     fn seek_to_first(&mut self);
     fn seek_to_last(&mut self);
     fn key(&self) -> &K;
+}
+
+pub struct SkipListIterator<'a, C: Comparator<K>, K: PartialEq + Clone> {
+    list: &'a mut SkipList<C, K>,
+    n_ptr: *mut Node<K>,
 }
 
 impl<'a, C: Comparator<K>, K: PartialEq + Clone> Iterator<K> for SkipListIterator<'a, C, K> {
@@ -309,7 +313,7 @@ impl<'a, C: Comparator<K>, K: PartialEq + Clone> Iterator<K> for SkipListIterato
         assert!(self.valid());
         let node = unsafe { self.n_ptr.as_ref().unwrap() };
         let mut n_ptr = self.list.find_less_than(&node.key);
-        if n_ptr == self.list.head_ptr {
+        if n_ptr == &mut self.list.head {
             n_ptr = null_mut();
         }
         self.n_ptr = n_ptr;
@@ -330,7 +334,7 @@ impl<'a, C: Comparator<K>, K: PartialEq + Clone> Iterator<K> for SkipListIterato
     // Final state of iterator is Valid() iff list is not empty.
     fn seek_to_last(&mut self) {
         let mut n_ptr = self.list.find_last();
-        if n_ptr == self.list.head_ptr {
+        if n_ptr == &mut self.list.head {
             n_ptr = null_mut();
         }
         self.n_ptr = n_ptr;
@@ -357,7 +361,7 @@ mod tests {
         collections::BTreeSet,
         sync::{
             atomic::{self, AtomicBool, AtomicU64},
-            Arc, Barrier,
+            Arc, Barrier, Mutex,
         },
         thread,
     };
@@ -390,8 +394,10 @@ mod tests {
 
     #[test]
     fn test_empty() {
-        let list = SkipList::new(U64Comparator {}, &0);
+        let mut list = SkipList::new(U64Comparator {}, &0);
         assert!(!list.contains(&10u64));
+        let mut it = list.new_iterator();
+        it.seek_to_last();
     }
 
     #[test]
@@ -681,16 +687,17 @@ mod tests {
                 let handle = thread::spawn(move || {
                     let current_ptr = t_current.load(atomic::Ordering::Acquire);
                     let list_ptr = t_list.load(atomic::Ordering::Acquire);
+                    let list = unsafe { &mut *list_ptr };
 
                     // println!("read ready wait");
                     t_ready.wait();
 
-                    let it = unsafe { &mut (*list_ptr).new_iterator() };
+                    let mut it = list.new_iterator();
                     let current = unsafe { &mut *current_ptr };
 
                     //println!("going to read");
                     while !t_quit_flag.load(atomic::Ordering::Acquire) {
-                        read_step(current, it)
+                        read_step(current, &mut it)
                     }
                     //println!("read end")
                 });
@@ -707,10 +714,11 @@ mod tests {
                     t_ready.wait();
 
                     let list_ptr = t_list.load(atomic::Ordering::Acquire);
+                    let list = unsafe { &mut *list_ptr };
                     let current_ptr = t_current.load(atomic::Ordering::Acquire);
 
                     for _ in 0..K_SIZE {
-                        unsafe { write_step(&mut *current_ptr, &mut *list_ptr) };
+                        unsafe { write_step(&mut *current_ptr, list) };
                     }
                     // println!("write end");
 

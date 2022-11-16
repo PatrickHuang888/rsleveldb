@@ -1,8 +1,8 @@
-use crate::Options;
+use crate::{api, util, Options};
 
 mod dbimpl;
 mod log;
-mod memtable;
+pub mod memtable;
 mod skiplist;
 mod version_set;
 mod write_batch;
@@ -27,8 +27,30 @@ impl From<u64> for ValueType {
     }
 }
 
-fn destroy_db(dbname: &String, options: Options) {
-    todo!()
+// We leave eight bits empty at the bottom so a type and sequence#
+// can be packed together into 64-bits.
+pub const MAX_SEQUENCE_NUMBER: SequenceNumber = (0x1u64 << 56) - 1;
+
+pub(super) fn pack_sequence_and_type(seq: u64, t: ValueType) -> u64 {
+    assert!(seq <= MAX_SEQUENCE_NUMBER);
+    //assert!(t<=ValueTypeForSeek);
+    (seq << 8) | t as u64
+}
+
+pub(super) fn parse_internal_key<'a>(
+    internal_key: &'a [u8],
+) -> api::Result<(&'a [u8], SequenceNumber, ValueType)> {
+    // user_key, sequence, valuetype
+    let mut n = internal_key.len();
+    if n < 8 {
+        return Err(api::Error::Other(("internal key < 8").to_string()));
+    }
+    let num = util::decode_fixed64(&internal_key[n - 8..]);
+    let c = num & 0xff;
+    let sequence = num >> 8;
+    let t = ValueType::from(c);
+    let user_key = &internal_key[..n - 8];
+    Ok((user_key, sequence, t))
 }
 
 mod test {
