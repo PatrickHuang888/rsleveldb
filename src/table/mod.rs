@@ -220,12 +220,12 @@ mod tests {
             ValueType,
         },
         table::table::{ReadOptions, Table},
-        util, Options, WritableFile,
+        util, Options, WritableFile, RandomAccessFile,
     };
 
     use super::{
         block::{Block, BlockBuilder, BlockIterator},
-        table::{RandomAccessFile, TableBuilder},
+        table::TableBuilder,
     };
 
     type KVMap = HashMap<Vec<u8>, Vec<u8>>;

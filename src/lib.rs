@@ -107,3 +107,42 @@ pub trait WritableFile {
 /* fn DestroyDB(name:&String, options:&Options<C>) {
 
 } */
+
+pub trait RandomAccessFile {
+    // Read up to "n" bytes from the file starting at "offset".
+    // "scratch[0..n-1]" may be written by this routine.  Sets "*result"
+    // to the data that was read (including if fewer than "n" bytes were
+    // successfully read).  May set "*result" to point at data in
+    // "scratch[0..n-1]", so "scratch[0..n-1]" must be live when
+    // "*result" is used.  If an error was encountered, returns a non-OK
+    // status.
+    //
+    // Safe for concurrent use by multiple threads.
+    fn read(&self, offset: usize, n: usize, dst: &mut Vec<u8>) -> api::Result<usize>;
+}
+
+pub trait SequentialFile {
+    // Read up to "n" bytes from the file.  "scratch[0..n-1]" may be
+    // written by this routine.  Sets "*result" to the data that was
+    // read (including if fewer than "n" bytes were successfully read).
+    // May set "*result" to point at data in "scratch[0..n-1]", so
+    // "scratch[0..n-1]" must be live when "*result" is used.
+    // If an error was encountered, returns a non-OK status.
+    //
+    // REQUIRES: External synchronization
+    fn read(
+        &mut self,
+        n: usize,
+        result: &mut Vec<u8>,
+        scratch: &mut Vec<u8>,
+    ) -> std::io::Result<()>;
+
+    // Skip "n" bytes from the file. This is guaranteed to be no
+    // slower that reading the same data, but may be faster.
+    //
+    // If end of file is reached, skipping will stop at the end of the
+    // file, and Skip will return OK.
+    //
+    // REQUIRES: External synchronization
+    fn skip(&mut self, n: usize) -> std::io::Result<()>;
+}

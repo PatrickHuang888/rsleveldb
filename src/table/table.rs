@@ -1,7 +1,7 @@
 use crate::{
     api::{self, Error},
     table::{BLOCK_TRAILER_SIZE, FOOTER_LEN, MAGIC},
-    util, WritableFile,
+    util, RandomAccessFile, WritableFile,
 };
 use std::{
     io::{Read, Write},
@@ -374,12 +374,6 @@ impl Default for BlockHandle {
             size: !0,
         }
     }
-}
-
-pub trait RandomAccessFile {
-    // Read up to "n" bytes from the file starting at "offset".
-    // Safe for concurrent use by multiple threads.
-    fn read(&self, offset: usize, n: usize, dst: &mut Vec<u8>) -> api::Result<usize>;
 }
 
 // A Table is a sorted map from strings to strings.  Tables are

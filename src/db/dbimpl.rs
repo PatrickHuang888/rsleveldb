@@ -28,7 +28,7 @@ struct DBImpl<W: WritableFile> {
     versions: VersionSet,
     mem: MemTable,
     imem: Option<MemTable>,
-    log: log::LogWriter<W>,
+    log: log::Writer<W>,
     //log_file: W,
 }
 
