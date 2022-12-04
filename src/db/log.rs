@@ -218,7 +218,7 @@ impl<F: SequentialFile, R: Reporter> Reader<F, R> {
             block_start_location += BLOCK_SIZE;
         }
 
-        self.end_of_buffer_offset = block_start_location;
+        //self.end_of_buffer_offset = block_start_location;
 
         // Skip to start of first block that can contain the initial record
         if block_start_location > 0 {
@@ -311,7 +311,7 @@ impl<F: SequentialFile, R: Reporter> Reader<F, R> {
             if self.checksum {
                 // todo: unmask
                 let expected_crc = util::decode_fixed32(&buf[0..4]);
-                let actual_crc = util::crc(&buf[6..6 + length + 1]);
+                let actual_crc = util::crc(&buf[7..7 + length]);
                 if actual_crc != expected_crc {
                     // Drop the rest of the buffer since "length" itself may have
                     // been corrupted and if we trust it, we could find some
@@ -328,7 +328,7 @@ impl<F: SequentialFile, R: Reporter> Reader<F, R> {
             self.buffer.drain(..HEADER_SIZE + length);
 
             // Skip physical record that started before initial_offset_
-            if self.end_of_buffer_offset - self.buffer.len() - HEADER_SIZE - length
+            if self.end_of_buffer_offset !=0 && self.end_of_buffer_offset - self.buffer.len() - HEADER_SIZE - length
                 < self.initial_offset
             {
                 result.clear();
@@ -400,7 +400,7 @@ impl<W: WritableFile> Writer<W> {
         // is empty, we still want to iterate once to emit a single
         // zero-length record
         let mut begin = true;
-        while left > 0 {
+        loop {
             assert!(self.block_offset <= BLOCK_SIZE);
             let leftover = BLOCK_SIZE - self.block_offset;
             if leftover < HEADER_SIZE {
@@ -437,6 +437,10 @@ impl<W: WritableFile> Writer<W> {
             ptr += fragment_length;
             left -= fragment_length;
             begin = false;
+
+            if left == 0 {
+                break;
+            }
         }
         Ok(())
     }
@@ -601,7 +605,7 @@ mod test {
             }
         }
 
-        fn read(&mut self) -> Vec<u8> {
+        fn read(&mut self) -> String {
             if !self.reading {
                 self.reading = true;
                 self.reader
@@ -612,9 +616,9 @@ mod test {
             let mut scratch = Vec::new();
             let mut record = Vec::new();
             if self.reader.read_record(&mut record, &mut scratch) {
-                record
+                String::from_utf8(record).unwrap()
             } else {
-                "EOF".to_string().as_bytes().to_vec()
+                "EOF".to_string()
             }
         }
 
@@ -628,17 +632,40 @@ mod test {
     fn test_empty() {
         let mut test = LogTest::new();
         let r = test.read();
-        assert_eq!("EOF".as_bytes().to_vec(), r)
+        assert_eq!("EOF".to_string(), r)
     }
 
     #[test]
     fn test_read_write() {
         let mut test = LogTest::new();
         test.write("foo");
-        /* test.write("bar");
+        test.write("bar");
         test.write("");
-        test.write("xxxx"); */
+        test.write("xxxx");
 
-        assert_eq!("foo".as_bytes().to_vec(), test.read())
+        assert_eq!("foo".to_string(), test.read());
+        assert_eq!("bar".to_string(), test.read());
+        assert_eq!("".to_string(), test.read());
+        assert_eq!("xxxx".to_string(), test.read());
+        assert_eq!("EOF".to_string(), test.read());
+        assert_eq!("EOF".to_string(), test.read()); // Make sure reads at eof work
+    }
+
+    #[test]
+    fn test_many_blocks() {
+        let mut test = LogTest::new();
+        for i in 0 .. 100_000 {
+            test.write(number_string(i).as_str());
+        }
+        for i in 0..100_000 {
+            let l =number_string(i);
+            let r= test.read();
+            assert_eq!(l, r, "{} not equal {}", l, r);
+        }
+        assert_eq!("EOF".to_string(), test.read());
+    }
+
+    fn number_string(i:i32) -> String{
+        format!("{:?}", i)
     }
 }
