@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use crate::{api, util, SequentialFile, WritableFile};
 
 pub trait Reporter {
@@ -136,6 +138,7 @@ impl<F: SequentialFile, R: Reporter> Reader<F, R> {
                         }
                     }
                     prospective_record_offset = physical_record_offset;
+                    scratch.clear();
                     scratch.extend_from_slice(&fragment);
                     in_fragmented_record = true;
                 }
@@ -159,6 +162,7 @@ impl<F: SequentialFile, R: Reporter> Reader<F, R> {
                         );
                     } else {
                         scratch.extend_from_slice(&fragment);
+                        record.clear();
                         record.extend_from_slice(&scratch);
                         self.last_record_offset = prospective_record_offset;
                         return true;
@@ -324,6 +328,7 @@ impl<F: SequentialFile, R: Reporter> Reader<F, R> {
                 }
             }
 
+            result.clear();
             result.extend_from_slice(&self.buffer[HEADER_SIZE..HEADER_SIZE + length]);
             self.buffer.drain(..HEADER_SIZE + length);
 
