@@ -359,7 +359,7 @@ fn init_type_crc(type_crc: &mut [u32; MAX_RECORD_TYPE]) {
 const MAX_RECORD_TYPE: usize = RecordType::Last as usize + 1;
 
 pub struct Writer<W: WritableFile> {
-    dest: W,
+    dest: Rc<RefCell<W>>,
     block_offset: usize, // Current offset in block
 
                          // crc32c values for all supported record types.  These are
@@ -369,7 +369,7 @@ pub struct Writer<W: WritableFile> {
 }
 
 impl<W: WritableFile> Writer<W> {
-    pub fn new(dest: W) -> Self {
+    pub fn new(dest: Rc<RefCell<W>>) -> Self {
         /* let mut type_crc= [0;MAX_RECORD_TYPE];
         init_type_crc(&mut type_crc); */
         Writer {
@@ -394,9 +394,10 @@ impl<W: WritableFile> Writer<W> {
         util::encode_fixed32(&mut buf[..4], crc);
 
         // Write the header and the payload
-        self.dest.append(&buf)?;
-        self.dest.append(record)?;
-        self.dest.flush()?;
+        let mut dest= self.dest.borrow_mut();
+        dest.append(&buf)?;
+        dest.append(record)?;
+        dest.flush()?;
         self.block_offset += HEADER_SIZE + length;
         Ok(())
     }
@@ -416,7 +417,7 @@ impl<W: WritableFile> Writer<W> {
                 // Switch to a new block
                 if leftover > 0 {
                     // Fill the trailer (literal below relies on kHeaderSize being 7)
-                    self.dest.append(&ZERO_TRAILER[..leftover])?;
+                    self.dest.borrow_mut().append(&ZERO_TRAILER[..leftover])?;
                 }
                 self.block_offset = 0;
             }
@@ -589,15 +590,16 @@ mod test {
 
     struct LogTest {
         reading: bool,
+        dest:Rc<RefCell<StringDest>>,
         writer: Writer<StringDest>,
         reader: Reader<StringSource, ReportCollector>,
-        reporter: Rc<RefCell<ReportCollector>>,
+        reporter: Rc<RefCell<ReportCollector>>,        
     }
 
     impl LogTest {
         fn new() -> Self {
             let source = Vec::new();
-            let dest = Vec::new();
+            let dest = Rc::new(RefCell::new(StringDest { contents: Vec::new() }));
             let reporter = Rc::new(RefCell::new(ReportCollector {
                 dropped_bytes: 0,
                 message: String::new(),
@@ -613,9 +615,10 @@ mod test {
                 true,
             );
             
-            let writer = Writer::new(StringDest { contents: dest });
+            let writer = Writer::new(dest.clone());
             LogTest {
                 reader,
+                dest,
                 writer,
                 reading: false,
                 reporter,
@@ -628,7 +631,7 @@ mod test {
                 self.reader
                     .file
                     .contents
-                    .extend_from_slice(&self.writer.dest.contents);
+                    .extend_from_slice(&self.dest.borrow().contents);
             }
             let mut scratch = Vec::new();
             let mut record = Vec::new();
@@ -645,7 +648,7 @@ mod test {
         }
 
         fn written_bytes(&self) -> usize {
-            self.writer.dest.contents.len()
+            self.dest.borrow().contents.len()
         }
 
         fn dropped_bytes(&self) -> usize {
@@ -669,23 +672,23 @@ mod test {
         }
 
         fn increment_byte(&mut self, offset:usize, delta:u8) {
-            self.writer.dest.contents[offset] += delta
+            self.dest.borrow_mut().contents[offset] += delta
         }
 
         fn set_byte(&mut self, offset:usize, new_byte:u8) {
-            self.writer.dest.contents[offset]= new_byte;
+            self.dest.borrow_mut().contents[offset]= new_byte;
         }
 
         fn fix_checksum(&mut self, header_offset:usize, len:usize) {
             // Compute crc of type/len/data
             let start= header_offset+HEADER_SIZE;
-            let crc= util::crc(&self.writer.dest.contents[start..start+len]);
-            util::encode_fixed32(&mut self.writer.dest.contents[header_offset..], crc);
+            let crc= util::crc(&self.dest.borrow().contents[start..start+len]);
+            util::encode_fixed32(&mut self.dest.borrow_mut().contents[header_offset..], crc);
         }
 
         fn shrink_size(&mut self, bytes:usize) {
-            let len= self.writer.dest.contents.len();
-            self.writer.dest.contents.truncate(len-bytes);
+            let len= self.dest.borrow().contents.len();
+            self.dest.borrow_mut().contents.truncate(len-bytes);
         }
 
 
