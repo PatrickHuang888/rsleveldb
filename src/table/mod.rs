@@ -555,14 +555,15 @@ mod tests {
         for arg in test_args {
             let mut cons = Constructor::new(arg);
             let mut rng = thread_rng();
+            let mut rnd= util::Random::new(rng.gen::<u32>()+5);
             let mut num_entries = 0;
             while num_entries < 2000 {
                 if (num_entries % 10) == 0 {
                     println!("num_entries = {}", num_entries);
                 }
                 for _ in 0..num_entries {
-                    let k = random_key(&mut rng, skewed(4));
-                    let v = random_value(&mut rng, 5);
+                    let k = random_key(&mut rng, rnd.skewed(4) as usize);
+                    let v = random_value(&mut rng, rnd.skewed(5) as usize);
                     cons.add(&k, &v);
                 }
 
@@ -730,12 +731,5 @@ mod tests {
         r
     }
 
-    // Skewed: pick "base" uniformly from range [0,max_log] and then
-    // return "base" random bits.  The effect is to pick a number in the
-    // range [0,2^max_log-1] with exponential bias towards smaller numbers.
-    pub fn skewed(max_log: i64) -> usize {
-        let mut rng = thread_rng();
-        let r = rng.gen_range(0..max_log + 1);
-        rng.gen_range(0..(1 << r))
-    }
+    
 }

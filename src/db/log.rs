@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::{io::Write, rc::Rc, cell::RefCell};
 
 use crate::{api, util, SequentialFile, WritableFile};
 
@@ -15,7 +15,7 @@ pub trait Reporter {
 // reader or the next mutation to *scratch.
 pub struct Reader<F: SequentialFile, R: Reporter> {
     file: F,
-    reporter: Option<R>,
+    reporter: Option<Rc<RefCell<R>>>,
 
     // Offset of the last record returned by ReadRecord.
     last_record_offset: usize,
@@ -35,7 +35,7 @@ pub struct Reader<F: SequentialFile, R: Reporter> {
 }
 
 impl<F: SequentialFile, R: Reporter> Reader<F, R> {
-    pub fn new(file: F, reporter: Option<R>, initial_offset: usize, checksum: bool) -> Self {
+    pub fn new(file: F, reporter: Option<Rc<RefCell<R>>>, initial_offset: usize, checksum: bool) -> Self {
         let mut resyncing = false;
         if initial_offset > 0 {
             resyncing = true;
@@ -190,7 +190,11 @@ impl<F: SequentialFile, R: Reporter> Reader<F, R> {
                     }
                 }
 
-                _ => {
+                RecordType::Zero => {
+                    self.report_corruption(fragment.len(), "record type zero");
+                    scratch.clear();
+                }
+                RecordType::Unknown => {
                     let mut l = 0;
                     if in_fragmented_record {
                         l = scratch.len();
@@ -241,8 +245,8 @@ impl<F: SequentialFile, R: Reporter> Reader<F, R> {
                 reporter.corruption(bytes, reason);
             }
         } */
-            if let Some(reporter) = &mut self.reporter {
-                reporter.corruption(bytes, reason);
+            if let Some(reporter) = &self.reporter {
+                reporter.borrow_mut().corruption(bytes, reason);
             }
     }
 
@@ -468,6 +472,8 @@ enum RecordType {
     // * The record is a 0-length record (No drop is reported)
     // * The record is below constructor's initial_offset (No drop is reported)
     BadRecord = 6,
+
+    Unknown,
 }
 
 impl From<u8> for RecordType {
@@ -481,7 +487,7 @@ impl From<u8> for RecordType {
 
             5 => Self::Eof,
             6 => Self::BadRecord,
-            _ => panic!("unknown recordtype"),
+            _ => Self::Unknown,
         }
     }
 }
@@ -494,11 +500,13 @@ const BLOCK_SIZE: usize = 32768;
 const HEADER_SIZE: usize = 4 + 2 + 1;
 
 mod test {
-    use std::io;
+    use std::{io, rc::Rc, cell::RefCell};
 
-    use crate::{api, SequentialFile, WritableFile};
+    use rand::{rngs::ThreadRng, thread_rng, Rng};
 
-    use super::{Reader, Reporter, Writer};
+    use crate::{api, SequentialFile, WritableFile, util};
+
+    use super::{Reader, Reporter, Writer, BLOCK_SIZE, HEADER_SIZE, RecordType};
 
     struct StringDest {
         contents: Vec<u8>,
@@ -568,13 +576,13 @@ mod test {
 
     struct ReportCollector {
         dropped_bytes: usize,
-        message: Vec<u8>,
+        message: String,
     }
 
     impl Reporter for ReportCollector {
         fn corruption(&mut self, bytes: usize, status: &str) {
             self.dropped_bytes += bytes;
-            self.message.extend_from_slice(status.as_bytes());
+            self.message.push_str(status);
             println!("{:?}", status);
         }
     }
@@ -583,30 +591,34 @@ mod test {
         reading: bool,
         writer: Writer<StringDest>,
         reader: Reader<StringSource, ReportCollector>,
+        reporter: Rc<RefCell<ReportCollector>>,
     }
 
     impl LogTest {
         fn new() -> Self {
             let source = Vec::new();
             let dest = Vec::new();
+            let reporter = Rc::new(RefCell::new(ReportCollector {
+                dropped_bytes: 0,
+                message: String::new(),
+            }));
             let reader = Reader::new(
                 StringSource {
                     contents: source,
                     force_err: false,
                     returned_partial: false,
                 },
-                Some(ReportCollector {
-                    dropped_bytes: 0,
-                    message: Vec::new(),
-                }),
+                Some(reporter.clone()),
                 0,
                 true,
             );
+            
             let writer = Writer::new(StringDest { contents: dest });
             LogTest {
                 reader,
                 writer,
                 reading: false,
+                reporter,
             }
         }
 
@@ -631,6 +643,52 @@ mod test {
             assert!(!self.reading, "Write() after starting to read");
             let _ = self.writer.add_record(msg.as_bytes());
         }
+
+        fn written_bytes(&self) -> usize {
+            self.writer.dest.contents.len()
+        }
+
+        fn dropped_bytes(&self) -> usize {
+            self.reporter.borrow().dropped_bytes
+        }
+
+        fn report_message(&self) -> String {
+            self.reporter.borrow().message.clone()
+        }
+
+        fn force_error(&mut self) {
+            self.reader.file.force_err= true;
+        }
+
+        fn match_error(&self, msg:&str) -> String {
+            if self.reporter.borrow().message.contains(msg) {
+                "OK".to_string()
+            }else {
+                self.reporter.borrow().message.clone()
+            }
+        }
+
+        fn increment_byte(&mut self, offset:usize, delta:u8) {
+            self.writer.dest.contents[offset] += delta
+        }
+
+        fn set_byte(&mut self, offset:usize, new_byte:u8) {
+            self.writer.dest.contents[offset]= new_byte;
+        }
+
+        fn fix_checksum(&mut self, header_offset:usize, len:usize) {
+            // Compute crc of type/len/data
+            let start= header_offset+HEADER_SIZE;
+            let crc= util::crc(&self.writer.dest.contents[start..start+len]);
+            util::encode_fixed32(&mut self.writer.dest.contents[header_offset..], crc);
+        }
+
+        fn shrink_size(&mut self, bytes:usize) {
+            let len= self.writer.dest.contents.len();
+            self.writer.dest.contents.truncate(len-bytes);
+        }
+
+
     }
 
     #[test]
@@ -648,12 +706,12 @@ mod test {
         test.write("");
         test.write("xxxx");
 
-        assert_eq!("foo".to_string(), test.read());
-        assert_eq!("bar".to_string(), test.read());
-        assert_eq!("".to_string(), test.read());
-        assert_eq!("xxxx".to_string(), test.read());
-        assert_eq!("EOF".to_string(), test.read());
-        assert_eq!("EOF".to_string(), test.read()); // Make sure reads at eof work
+        assert_eq!("foo", test.read());
+        assert_eq!("bar", test.read());
+        assert_eq!("", test.read());
+        assert_eq!("xxxx", test.read());
+        assert_eq!("EOF", test.read());
+        assert_eq!("EOF", test.read()); // Make sure reads at eof work
     }
 
     #[test]
@@ -667,10 +725,233 @@ mod test {
             let r= test.read();
             assert_eq!(l, r, "{} not equal {}", l, r);
         }
-        assert_eq!("EOF".to_string(), test.read());
+        assert_eq!("EOF", test.read());
     }
 
     fn number_string(i:i32) -> String{
         format!("{:?}", i)
     }
+
+    #[test]
+    fn test_gragmentation() {
+        let mut test = LogTest::new();
+        test.write("small");
+        test.write(big_string("medium", 50_000).as_str());
+        test.write(big_string("large", 100_000).as_str());
+
+        assert_eq!("small", test.read());
+        assert_eq!(big_string("medium", 50_000), test.read());
+        assert_eq!(big_string("large", 100_000), test.read());
+    }
+
+    fn big_string(partial_string: &str, n:usize) -> String {
+        let mut s= String::new();
+        while s.len() < n {
+            s.push_str(partial_string);
+        }
+        s.truncate(n);
+        s
+    }
+
+    
+    #[test]
+    fn test_marginal_trailer() {
+        // Make a trailer that is exactly the same length as an empty record.
+        let n = BLOCK_SIZE - 2 * HEADER_SIZE;
+        let mut test = LogTest::new();
+        test.write(big_string("foo", n).as_str());
+        assert_eq!(BLOCK_SIZE - HEADER_SIZE, test.written_bytes());
+        test.write("");
+        test.write("bar");
+        assert_eq!(big_string("foo", n), test.read());
+        assert_eq!("", test.read());
+        assert_eq!("bar", test.read());
+        assert_eq!("EOF", test.read());
+    }
+
+    #[test]
+    fn test_marginal_trailer2() {
+        // Make a trailer that is exactly the same length as an empty record.
+        let n = BLOCK_SIZE - 2 * HEADER_SIZE;
+        let mut test = LogTest::new();
+        test.write(big_string("foo", n).as_str());
+        assert_eq!(BLOCK_SIZE - HEADER_SIZE, test.written_bytes());
+        test.write("bar");
+        assert_eq!(big_string("foo", n), test.read());
+        assert_eq!("bar", test.read());
+        assert_eq!("EOF", test.read());
+        assert_eq!(0, test.dropped_bytes());
+        assert_eq!("", test.report_message());
+    }
+    
+    #[test]
+    fn test_short_trailer() {
+        let n = BLOCK_SIZE - 2 * HEADER_SIZE + 4;
+        let mut test = LogTest::new();
+        test.write(big_string("foo", n).as_str());
+        assert_eq!(BLOCK_SIZE - HEADER_SIZE + 4, test.written_bytes());
+        test.write("");
+        test.write("bar");
+        assert_eq!(big_string("foo", n), test.read());
+        assert_eq!("", test.read());
+        assert_eq!("bar", test.read());
+        assert_eq!("EOF", test.read());
+    }
+
+    #[test]
+    fn test_aligned_eof() {
+        let n = BLOCK_SIZE - 2 * HEADER_SIZE + 4;
+        let mut test = LogTest::new();
+        test.write(big_string("foo", n).as_str());
+        assert_eq!(BLOCK_SIZE - HEADER_SIZE + 4, test.written_bytes());
+        assert_eq!(big_string("foo", n), test.read());
+        assert_eq!("EOF", test.read());
+    }
+
+    // todo: test reopen for append
+
+    #[test]
+    fn test_random_read() {
+        let N= 500;
+        let mut write_rnd= util::Random::new(301);
+        let mut test = LogTest::new();
+        for i in 0..N {
+            test.write(random_skewed_string(i, &mut write_rnd).as_str())
+        }
+        let mut read_rnd= util::Random::new(301);
+        for i in 0..N {
+            assert_eq!(random_skewed_string(i, &mut read_rnd), test.read());
+        }
+        assert_eq!("EOF", test.read());
+    }
+
+    // Return a skewed potentially long string
+    fn random_skewed_string(i:i32, rnd:&mut util::Random) -> String {
+        big_string(number_string(i).as_str(), rnd.skewed(17) as usize)
+    }
+
+    #[test]
+    fn test_read_error() {
+        let mut test = LogTest::new();
+        test.write("foo");
+        test.force_error();
+        assert_eq!("EOF", test.read());
+        assert_eq!(BLOCK_SIZE, test.dropped_bytes());
+        assert_eq!("OK", test.match_error("read error"));
+    }
+    
+    #[test]
+    fn test_bad_record_type() {
+        let mut test = LogTest::new();
+        test.write("foo");
+        // Type is stored in header[6]
+        test.increment_byte(6, 100);
+        assert_eq!("EOF", test.read());
+        assert_eq!(3, test.dropped_bytes());
+        assert_eq!("OK", test.match_error("unknown record type"));
+    }
+
+    #[test]
+    fn test_truncated_trailing_record_is_ignored() {
+        let mut test = LogTest::new();
+        test.write("foo");
+        test.shrink_size(4); // Drop all payload as well as a header byte
+        assert_eq!("EOF", test.read());
+        // Truncated last record is ignored, not treated as an error.
+        assert_eq!(0, test.dropped_bytes());
+        assert_eq!("", test.report_message());
+    }
+
+    #[test]
+    fn test_bad_length() {
+        let payload_size= BLOCK_SIZE - HEADER_SIZE;
+        let mut test = LogTest::new();
+        test.write(big_string("bar", payload_size).as_str());
+        test.write("foo");
+        // Least significant size byte is stored in header[4].
+        test.increment_byte(4, 1);
+        assert_eq!("foo", test.read());
+        assert_eq!(BLOCK_SIZE, test.dropped_bytes());
+        assert_eq!("OK", test.match_error("bad record length"));
+    }
+
+    #[test]
+    fn test_bad_length_at_end_is_ignored() {
+        let mut test = LogTest::new();
+        test.write("foo");
+        test.shrink_size(1);
+        assert_eq!("EOF", test.read());
+        assert_eq!(0, test.dropped_bytes());
+        assert_eq!("", test.report_message());
+    }
+
+    #[test]
+    fn test_checksum_mismatch() {
+        let mut test = LogTest::new();
+        test.write("foo");
+        test.increment_byte(0, 10);
+        assert_eq!("EOF", test.read());
+        assert_eq!(10, test.dropped_bytes());
+        assert_eq!("OK", test.match_error("checksum mismatch"));
+    }
+
+    #[test]
+    fn test_unexpeced_middle_type() {
+        let mut test = LogTest::new();
+        test.write("foo");
+        test.set_byte(6, RecordType::Middle as u8);
+        test.fix_checksum(0, 3);
+        assert_eq!("EOF", test.read());
+        assert_eq!(3, test.dropped_bytes());
+        assert_eq!("OK", test.match_error("missing start"));
+    }
+
+    #[test]
+    fn test_unexpected_first_type() {
+        let mut test = LogTest::new();
+        test.write("foo");
+        test.write(&big_string("bar", 100_000));
+        test.set_byte(6, RecordType::First as u8);
+        test.fix_checksum(0, 3);
+        assert_eq!(big_string("bar", 100_000), test.read());
+        assert_eq!("EOF", test.read());
+        assert_eq!(3, test.dropped_bytes());
+        assert_eq!("OK", test.match_error("partial record without end"));
+    }
+
+    #[test]
+    fn test_missing_last_is_ignored() {
+        let mut test = LogTest::new();
+        test.write(&big_string("bar", BLOCK_SIZE));
+        // Remove the LAST block, including header.
+        test.shrink_size(14);
+        assert_eq!("EOF", test.read());
+        assert_eq!("", test.report_message());
+        assert_eq!(0, test.dropped_bytes());
+    }
+
+    #[test]
+    fn test_partial_last_is_ignored() {
+        let mut test = LogTest::new();
+        test.write(&big_string("bar", BLOCK_SIZE));
+        // Cause a bad record length in the LAST block.
+        test.shrink_size(1);
+        assert_eq!("EOF", test.read());
+        assert_eq!("", test.report_message());
+        assert_eq!(0, test.dropped_bytes());
+    }
+
+    #[test]
+    fn test_skip_into_multi_record() {
+        // Consider a fragmented record:
+  //    first(R1), middle(R1), last(R1), first(R2)
+  // If initial_offset points to a record after first(R1) but before first(R2)
+  // incomplete fragment errors are not actual errors, and must be suppressed
+  // until a new first or full record is encountered.
+        let mut test = LogTest::new();
+        test.write(&big_string("foo", 3*BLOCK_SIZE));
+        test.write("correct");
+        // todo:
+    }
+
 }
