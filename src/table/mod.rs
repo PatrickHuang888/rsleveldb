@@ -220,7 +220,7 @@ mod tests {
             ValueType,
         },
         table::table::{ReadOptions, Table},
-        util, Options, WritableFile, RandomAccessFile,
+        util, Options, RandomAccessFile, WritableFile,
     };
 
     use super::{
@@ -555,7 +555,7 @@ mod tests {
         for arg in test_args {
             let mut cons = Constructor::new(arg);
             let mut rng = thread_rng();
-            let mut rnd= util::Random::new(rng.gen::<u32>()+5);
+            let mut rnd = util::Random::new(rng.gen::<u32>() + 5);
             let mut num_entries = 0;
             while num_entries < 2000 {
                 if (num_entries % 10) == 0 {
@@ -730,6 +730,4 @@ mod tests {
         }
         r
     }
-
-    
 }

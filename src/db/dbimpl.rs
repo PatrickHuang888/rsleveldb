@@ -1,12 +1,15 @@
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::{Condvar, Mutex, MutexGuard};
 
 use std::collections::{self};
 
 use crate::api::{self, Error, ReadOptions, WriteOptions};
-use crate::WritableFile;
+use crate::{Options, WritableFile, NUM_NON_TABLE_CACHE_FILES};
 
 use super::log::{self, Writer as LWriter};
-use super::memtable::{LookupKey, MemTable};
+use super::memtable::{InternalKeyComparator, LookupKey, MemTable};
+use super::table_cache::TableCache;
 use super::version_set::VersionSet;
 use super::write_batch::WriteBatch;
 use super::SequenceNumber;
@@ -20,7 +23,46 @@ pub trait DB {
     fn get(&mut self, options: &ReadOptions, key: &[u8]) -> api::Result<Vec<u8>>;
 }
 
+fn clip_to_range<V: Ord>(mut v: V, minvalue: V, maxvalue: V) {
+    if v > maxvalue {
+        v = maxvalue;
+    }
+    if v < minvalue {
+        v = minvalue;
+    }
+}
+
+fn sanitize_options(dbname: &str, icmp: Rc<InternalKeyComparator>, src: &Options) -> Options {
+    let mut result = src.clone();
+    result.comparator = icmp;
+    clip_to_range(
+        result.max_open_files,
+        64 + NUM_NON_TABLE_CACHE_FILES,
+        50_000,
+    );
+    clip_to_range(result.write_buffer_size, 64 << 10, 1 << 30);
+    clip_to_range(result.max_file_size, 1 << 20, 1 << 30);
+    clip_to_range(result.block_size, 1 << 10, 4 << 20);
+    match result.info_log {
+        None => {
+            todo!()
+        }
+        _ => {}
+    }
+    match result.block_cache {
+        None => {
+            todo!()
+        }
+        _ => {}
+    }
+    result
+}
+
 struct DBImpl<W: WritableFile> {
+    internal_comparator: Rc<InternalKeyComparator>,
+    options: Options,
+    dbname: String,
+
     /* internal: Mutex<GuardedDBInternal>,
     cv: Condvar, */
     lock: Mutex<bool>,
@@ -29,20 +71,37 @@ struct DBImpl<W: WritableFile> {
     mem: MemTable,
     imem: Option<MemTable>,
     log: log::Writer<W>,
-    //log_file: W,
+    log_file: Rc<RefCell<W>>,
+    // table_cache_ provides its own synchronization
+    table_cache: TableCache,
+}
+
+fn table_cache_size(sanitized_options: &Options) -> usize {
+    // Reserve ten files or so for other uses and give the rest to TableCache.
+    sanitized_options.max_open_files - NUM_NON_TABLE_CACHE_FILES
 }
 
 impl<W: WritableFile> DBImpl<W> {
-    fn new() -> Self {
-        DBImpl {
+    fn new(raw_options: &Options, db_name: &str) -> api::Result<Self> {
+        let internal_comparator =
+            Rc::new(InternalKeyComparator::new(raw_options.comparator.clone()));
+        let options = sanitize_options(db_name, internal_comparator.clone(), raw_options);
+        let dbname = db_name.to_string();
+        let table_cache = TableCache::new(&dbname, &options, table_cache_size(&options));
+        let db= DBImpl {
             mem: todo!(),
             log: todo!(),
-            //log_file: todo!(),
+            log_file: todo!(),
             writers: todo!(),
             versions: todo!(),
             lock: todo!(),
             imem: todo!(),
-        }
+            internal_comparator,
+            options,
+            dbname,
+            table_cache,
+        };
+        Ok(db)
     }
 
     fn write(&mut self, options: &WriteOptions, updates: Option<WriteBatch>) -> api::Result<()> {

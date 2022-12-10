@@ -4,6 +4,7 @@ mod dbimpl;
 mod log;
 pub mod memtable;
 mod skiplist;
+mod table_cache;
 mod version_set;
 mod write_batch;
 

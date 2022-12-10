@@ -1,4 +1,4 @@
-use std::{io::Write, rc::Rc, cell::RefCell};
+use std::{cell::RefCell, io::Write, rc::Rc};
 
 use crate::{api, util, SequentialFile, WritableFile};
 
@@ -35,7 +35,12 @@ pub struct Reader<F: SequentialFile, R: Reporter> {
 }
 
 impl<F: SequentialFile, R: Reporter> Reader<F, R> {
-    pub fn new(file: F, reporter: Option<Rc<RefCell<R>>>, initial_offset: usize, checksum: bool) -> Self {
+    pub fn new(
+        file: F,
+        reporter: Option<Rc<RefCell<R>>>,
+        initial_offset: usize,
+        checksum: bool,
+    ) -> Self {
         let mut resyncing = false;
         if initial_offset > 0 {
             resyncing = true;
@@ -111,10 +116,7 @@ impl<F: SequentialFile, R: Reporter> Reader<F, R> {
                         // of a block followed by a kFullType or kFirstType record
                         // at the beginning of the next block.
                         if !scratch.is_empty() {
-                            self.report_corruption(
-                                scratch.len(),
-                                "partial record without end(1)",
-                            );
+                            self.report_corruption(scratch.len(), "partial record without end(1)");
                         }
                     }
                     prospective_record_offset = physical_record_offset;
@@ -131,10 +133,7 @@ impl<F: SequentialFile, R: Reporter> Reader<F, R> {
                         // of a block followed by a kFullType or kFirstType record
                         // at the beginning of the next block.
                         if !scratch.is_empty() {
-                            self.report_corruption(
-                                scratch.len(),
-                                "partial record without end(2)",
-                            );
+                            self.report_corruption(scratch.len(), "partial record without end(2)");
                         }
                     }
                     prospective_record_offset = physical_record_offset;
@@ -181,10 +180,7 @@ impl<F: SequentialFile, R: Reporter> Reader<F, R> {
 
                 RecordType::BadRecord => {
                     if in_fragmented_record {
-                        self.report_corruption(
-                            scratch.len(),
-                            "error in middle of record",
-                        );
+                        self.report_corruption(scratch.len(), "error in middle of record");
                         in_fragmented_record = false;
                         scratch.clear();
                     }
@@ -245,9 +241,9 @@ impl<F: SequentialFile, R: Reporter> Reader<F, R> {
                 reporter.corruption(bytes, reason);
             }
         } */
-            if let Some(reporter) = &self.reporter {
-                reporter.borrow_mut().corruption(bytes, reason);
-            }
+        if let Some(reporter) = &self.reporter {
+            reporter.borrow_mut().corruption(bytes, reason);
+        }
     }
 
     fn report_corruption(&mut self, bytes: usize, reason: &str) {
@@ -337,8 +333,9 @@ impl<F: SequentialFile, R: Reporter> Reader<F, R> {
             self.buffer.drain(..HEADER_SIZE + length);
 
             // Skip physical record that started before initial_offset_
-            if self.end_of_buffer_offset !=0 && self.end_of_buffer_offset - self.buffer.len() - HEADER_SIZE - length
-                < self.initial_offset
+            if self.end_of_buffer_offset != 0
+                && self.end_of_buffer_offset - self.buffer.len() - HEADER_SIZE - length
+                    < self.initial_offset
             {
                 result.clear();
                 return RecordType::BadRecord;
@@ -394,7 +391,7 @@ impl<W: WritableFile> Writer<W> {
         util::encode_fixed32(&mut buf[..4], crc);
 
         // Write the header and the payload
-        let mut dest= self.dest.borrow_mut();
+        let mut dest = self.dest.borrow_mut();
         dest.append(&buf)?;
         dest.append(record)?;
         dest.flush()?;
@@ -501,13 +498,13 @@ const BLOCK_SIZE: usize = 32768;
 const HEADER_SIZE: usize = 4 + 2 + 1;
 
 mod test {
-    use std::{io, rc::Rc, cell::RefCell};
+    use std::{cell::RefCell, io, rc::Rc};
 
     use rand::{rngs::ThreadRng, thread_rng, Rng};
 
-    use crate::{api, SequentialFile, WritableFile, util};
+    use crate::{api, util, SequentialFile, WritableFile};
 
-    use super::{Reader, Reporter, Writer, BLOCK_SIZE, HEADER_SIZE, RecordType};
+    use super::{Reader, RecordType, Reporter, Writer, BLOCK_SIZE, HEADER_SIZE};
 
     struct StringDest {
         contents: Vec<u8>,
@@ -590,16 +587,18 @@ mod test {
 
     struct LogTest {
         reading: bool,
-        dest:Rc<RefCell<StringDest>>,
+        dest: Rc<RefCell<StringDest>>,
         writer: Writer<StringDest>,
         reader: Reader<StringSource, ReportCollector>,
-        reporter: Rc<RefCell<ReportCollector>>,        
+        reporter: Rc<RefCell<ReportCollector>>,
     }
 
     impl LogTest {
         fn new() -> Self {
             let source = Vec::new();
-            let dest = Rc::new(RefCell::new(StringDest { contents: Vec::new() }));
+            let dest = Rc::new(RefCell::new(StringDest {
+                contents: Vec::new(),
+            }));
             let reporter = Rc::new(RefCell::new(ReportCollector {
                 dropped_bytes: 0,
                 message: String::new(),
@@ -614,7 +613,7 @@ mod test {
                 0,
                 true,
             );
-            
+
             let writer = Writer::new(dest.clone());
             LogTest {
                 reader,
@@ -660,38 +659,36 @@ mod test {
         }
 
         fn force_error(&mut self) {
-            self.reader.file.force_err= true;
+            self.reader.file.force_err = true;
         }
 
-        fn match_error(&self, msg:&str) -> String {
+        fn match_error(&self, msg: &str) -> String {
             if self.reporter.borrow().message.contains(msg) {
                 "OK".to_string()
-            }else {
+            } else {
                 self.reporter.borrow().message.clone()
             }
         }
 
-        fn increment_byte(&mut self, offset:usize, delta:u8) {
+        fn increment_byte(&mut self, offset: usize, delta: u8) {
             self.dest.borrow_mut().contents[offset] += delta
         }
 
-        fn set_byte(&mut self, offset:usize, new_byte:u8) {
-            self.dest.borrow_mut().contents[offset]= new_byte;
+        fn set_byte(&mut self, offset: usize, new_byte: u8) {
+            self.dest.borrow_mut().contents[offset] = new_byte;
         }
 
-        fn fix_checksum(&mut self, header_offset:usize, len:usize) {
+        fn fix_checksum(&mut self, header_offset: usize, len: usize) {
             // Compute crc of type/len/data
-            let start= header_offset+HEADER_SIZE;
-            let crc= util::crc(&self.dest.borrow().contents[start..start+len]);
+            let start = header_offset + HEADER_SIZE;
+            let crc = util::crc(&self.dest.borrow().contents[start..start + len]);
             util::encode_fixed32(&mut self.dest.borrow_mut().contents[header_offset..], crc);
         }
 
-        fn shrink_size(&mut self, bytes:usize) {
-            let len= self.dest.borrow().contents.len();
-            self.dest.borrow_mut().contents.truncate(len-bytes);
+        fn shrink_size(&mut self, bytes: usize) {
+            let len = self.dest.borrow().contents.len();
+            self.dest.borrow_mut().contents.truncate(len - bytes);
         }
-
-
     }
 
     #[test]
@@ -720,18 +717,18 @@ mod test {
     #[test]
     fn test_many_blocks() {
         let mut test = LogTest::new();
-        for i in 0 .. 100_000 {
+        for i in 0..100_000 {
             test.write(number_string(i).as_str());
         }
         for i in 0..100_000 {
-            let l =number_string(i);
-            let r= test.read();
+            let l = number_string(i);
+            let r = test.read();
             assert_eq!(l, r, "{} not equal {}", l, r);
         }
         assert_eq!("EOF", test.read());
     }
 
-    fn number_string(i:i32) -> String{
+    fn number_string(i: i32) -> String {
         format!("{:?}", i)
     }
 
@@ -747,8 +744,8 @@ mod test {
         assert_eq!(big_string("large", 100_000), test.read());
     }
 
-    fn big_string(partial_string: &str, n:usize) -> String {
-        let mut s= String::new();
+    fn big_string(partial_string: &str, n: usize) -> String {
+        let mut s = String::new();
         while s.len() < n {
             s.push_str(partial_string);
         }
@@ -756,7 +753,6 @@ mod test {
         s
     }
 
-    
     #[test]
     fn test_marginal_trailer() {
         // Make a trailer that is exactly the same length as an empty record.
@@ -786,7 +782,7 @@ mod test {
         assert_eq!(0, test.dropped_bytes());
         assert_eq!("", test.report_message());
     }
-    
+
     #[test]
     fn test_short_trailer() {
         let n = BLOCK_SIZE - 2 * HEADER_SIZE + 4;
@@ -815,13 +811,13 @@ mod test {
 
     #[test]
     fn test_random_read() {
-        let N= 500;
-        let mut write_rnd= util::Random::new(301);
+        let N = 500;
+        let mut write_rnd = util::Random::new(301);
         let mut test = LogTest::new();
         for i in 0..N {
             test.write(random_skewed_string(i, &mut write_rnd).as_str())
         }
-        let mut read_rnd= util::Random::new(301);
+        let mut read_rnd = util::Random::new(301);
         for i in 0..N {
             assert_eq!(random_skewed_string(i, &mut read_rnd), test.read());
         }
@@ -829,7 +825,7 @@ mod test {
     }
 
     // Return a skewed potentially long string
-    fn random_skewed_string(i:i32, rnd:&mut util::Random) -> String {
+    fn random_skewed_string(i: i32, rnd: &mut util::Random) -> String {
         big_string(number_string(i).as_str(), rnd.skewed(17) as usize)
     }
 
@@ -842,7 +838,7 @@ mod test {
         assert_eq!(BLOCK_SIZE, test.dropped_bytes());
         assert_eq!("OK", test.match_error("read error"));
     }
-    
+
     #[test]
     fn test_bad_record_type() {
         let mut test = LogTest::new();
@@ -867,7 +863,7 @@ mod test {
 
     #[test]
     fn test_bad_length() {
-        let payload_size= BLOCK_SIZE - HEADER_SIZE;
+        let payload_size = BLOCK_SIZE - HEADER_SIZE;
         let mut test = LogTest::new();
         test.write(big_string("bar", payload_size).as_str());
         test.write("foo");
@@ -947,14 +943,13 @@ mod test {
     #[test]
     fn test_skip_into_multi_record() {
         // Consider a fragmented record:
-  //    first(R1), middle(R1), last(R1), first(R2)
-  // If initial_offset points to a record after first(R1) but before first(R2)
-  // incomplete fragment errors are not actual errors, and must be suppressed
-  // until a new first or full record is encountered.
+        //    first(R1), middle(R1), last(R1), first(R2)
+        // If initial_offset points to a record after first(R1) but before first(R2)
+        // incomplete fragment errors are not actual errors, and must be suppressed
+        // until a new first or full record is encountered.
         let mut test = LogTest::new();
-        test.write(&big_string("foo", 3*BLOCK_SIZE));
+        test.write(&big_string("foo", 3 * BLOCK_SIZE));
         test.write("correct");
         // todo:
     }
-
 }
