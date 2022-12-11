@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use api::{ByteswiseComparator, Comparator};
+use api::{ByteswiseComparator, Comparator, Error, ReadOptions, WriteOptions};
 
 mod api;
 mod config;
@@ -199,3 +199,213 @@ pub trait Logger {}
 // Create a new cache with a fixed size capacity.  This implementation
 // of Cache uses a least-recently-used eviction policy.
 pub trait Cache {}
+
+// A DB is a persistent ordered map from keys to values.
+// A DB is safe for concurrent access from multiple threads without
+// any external synchronization.
+pub trait DB: Sized {
+    // Open the database with the specified "name".
+    // Stores a pointer to a heap-allocated database in *dbptr and returns
+    // OK on success.
+    // Stores nullptr in *dbptr and returns a non-OK status on error.
+    // Caller should delete *dbptr when it is no longer needed.
+    fn open(options: &Options, dbname: &str) -> api::Result<Self>;
+
+    // If the database contains an entry for "key" store the
+    // corresponding value in *value and return OK.
+    //
+    // If there is no entry for "key" leave *value unchanged and return
+    // a status for which Status::IsNotFound() returns true.
+    //
+    // May return some other Status on an error.
+    fn get(&self, options: &ReadOptions, key: &[u8]) -> api::Result<&[u8]>;
+
+    // Set the database entry for "key" to "value".  Returns OK on success,
+    // and a non-OK status on error.
+    // Note: consider setting options.sync = true.
+    fn put(&mut self, options: &WriteOptions, key: &[u8], value: &[u8]) -> api::Result<()>;
+
+    // Remove the database entry (if any) for "key".  Returns OK on
+    // success, and a non-OK status on error.  It is not an error if "key"
+    // did not exist in the database.
+    // Note: consider setting options.sync = true.
+    fn delete(&mut self, options: &WriteOptions, key: &[u8]) -> api::Result<()>;
+
+    // Apply the specified updates to the database.
+    // Returns OK on success, non-OK on failure.
+    // Note: consider setting options.sync = true.
+    fn write(&mut self, options: &WriteOptions, updates: WriteBatch) -> api::Result<()>;
+}
+
+// WriteBatch header has an 8-byte sequence number followed by a 4-byte count.
+const WRITEBATCH_HEADER: usize = 12;
+
+#[derive(PartialEq)]
+pub struct WriteBatch {
+    space: Vec<u8>,
+}
+
+impl WriteBatch {
+    pub fn new() -> Self {
+        WriteBatch {
+            space: vec![0; WRITEBATCH_HEADER],
+        }
+    }
+
+    // Store the mapping "key->value" in the database.
+    pub fn put(&mut self, key: &[u8], value: &[u8]) {
+        //self.space.push(ValueType::TypeValue)
+        todo!()
+    }
+
+    // Copies the operations in "source" to this batch.
+    //
+    // This runs in O(source size) time. However, the constant factor is better
+    // than calling Iterate() over the source batch with a Handler that replicates
+    // the operations into this batch.
+    pub fn append(&mut self, source: &WriteBatch) {
+        self.set_count(self.count() + source.count());
+        assert!(source.space.len() >= WRITEBATCH_HEADER);
+        self.space
+            .extend_from_slice(&source.space[WRITEBATCH_HEADER..])
+    }
+
+    // If the database contains a mapping for "key", erase it.  Else do nothing.
+    pub fn delete(&mut self, key: &[u8]) {
+        todo!()
+    }
+
+    // Clear all updates buffered in this batch.
+    pub fn clear(&mut self) {
+        todo!()
+    }
+
+    // Support for iterating over the contents of a batch.
+    pub fn iterate(&self, handler: &mut dyn Handler) -> api::Result<()> {
+        if self.space.len() < WRITEBATCH_HEADER {
+            return Err(api::Error::Corruption(String::from(
+                "malformed WriteBatch (too small)",
+            )));
+        }
+
+        let mut input = &self.space[WRITEBATCH_HEADER..];
+        let mut key: &[u8];
+        let mut value: &[u8];
+        let mut found = 0;
+        while !input.is_empty() {
+            found += 1;
+            let tag: ValueType = (input[0] as u64).into();
+            input = &input[1..];
+            match tag {
+                ValueType::TypeValue => {
+                    key = util::get_length_prefixed_slice(&input).0;
+                    input = &input[key.len()..];
+                    value = util::get_length_prefixed_slice(&input).0;
+                    input = &input[value.len()..];
+                    if key.len() == 0 || value.len() == 0 {
+                        return Err(Error::Corruption(String::from("bad WriteBatch Put")));
+                    }
+                    handler.put(key, value);
+                }
+                ValueType::TypeDeletion => {
+                    key = util::get_length_prefixed_slice(&input).0;
+                    input = &input[key.len()..];
+                    if key.len() == 0 {
+                        return Err(Error::Corruption(String::from("bad WriteBatch Delete")));
+                    }
+                    handler.delete(key);
+                }
+            }
+        }
+        if found != self.count() {
+            return Err(Error::Corruption(String::from(
+                "WriteBatch has wrong count",
+            )));
+        }
+        Ok(())
+    }
+
+    fn contents(&self) -> &[u8] {
+        todo!()
+    }
+
+    fn sequence(&self) -> SequenceNumber {
+        util::decode_fixed64(&self.space[..8])
+    }
+
+    fn set_sequence(&mut self, seq: SequenceNumber) {
+        util::encode_fixed64(&mut self.space[0..7], seq);
+    }
+
+    fn count(&self) -> u32 {
+        util::decode_fixed32(&self.space[8..12])
+    }
+
+    fn set_count(&mut self, n: u32) {
+        util::encode_fixed32(&mut self.space[8..12], n)
+    }
+
+    fn byte_size(&self) -> usize {
+        self.space.len()
+    }
+
+    fn insert_into(&self, memtable: &mut db::memtable::MemTable) -> api::Result<()> {
+        let mut inserter = db::write_batch::MemTableInserter {
+            sequence: self.sequence(),
+            mem: memtable,
+        };
+        self.iterate(&mut inserter)?;
+        Ok(())
+    }
+}
+
+trait Handler {
+    fn put(&mut self, key: &[u8], value: &[u8]);
+    fn delete(&mut self, key: &[u8]);
+}
+
+type SequenceNumber = u64;
+
+// Value types encoded as the last component of internal keys.
+// DO NOT CHANGE THESE ENUM VALUES: they are embedded in the on-disk
+// data structures.
+pub enum ValueType {
+    TypeDeletion = 0x0,
+    TypeValue = 0x1,
+}
+
+impl From<u64> for ValueType {
+    fn from(v: u64) -> Self {
+        match v {
+            0x0 => Self::TypeDeletion,
+            0x1 => Self::TypeValue,
+            _ => panic!("value type known!"),
+        }
+    }
+}
+
+// We leave eight bits empty at the bottom so a type and sequence#
+// can be packed together into 64-bits.
+pub const MAX_SEQUENCE_NUMBER: SequenceNumber = (0x1u64 << 56) - 1;
+
+pub(crate) fn pack_sequence_and_type(seq: u64, t: ValueType) -> u64 {
+    assert!(seq <= MAX_SEQUENCE_NUMBER);
+    //assert!(t<=ValueTypeForSeek);
+    (seq << 8) | t as u64
+}
+
+pub(crate) fn parse_internal_key<'a>(
+    internal_key: &'a [u8],
+) -> api::Result<(&'a [u8], SequenceNumber, ValueType)> {
+    // user_key, sequence, valuetype
+    let mut n = internal_key.len();
+    if n < 8 {
+        return Err(api::Error::Other(("internal key < 8").to_string()));
+    }
+    let num = util::decode_fixed64(&internal_key[n - 8..]);
+    let c = num & 0xff;
+    let sequence = num >> 8;
+    let t = ValueType::from(c);
+    let user_key = &internal_key[..n - 8];
+    Ok((user_key, sequence, t))
+}

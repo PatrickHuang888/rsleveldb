@@ -6,60 +6,12 @@ pub mod memtable;
 mod skiplist;
 mod table_cache;
 mod version_set;
-mod write_batch;
-
-type SequenceNumber = u64;
-
-// Value types encoded as the last component of internal keys.
-// DO NOT CHANGE THESE ENUM VALUES: they are embedded in the on-disk
-// data structures.
-pub enum ValueType {
-    TypeDeletion = 0x0,
-    TypeValue = 0x1,
-}
-
-impl From<u64> for ValueType {
-    fn from(v: u64) -> Self {
-        match v {
-            0x0 => Self::TypeDeletion,
-            0x1 => Self::TypeValue,
-            _ => panic!("value type known!"),
-        }
-    }
-}
-
-// We leave eight bits empty at the bottom so a type and sequence#
-// can be packed together into 64-bits.
-pub const MAX_SEQUENCE_NUMBER: SequenceNumber = (0x1u64 << 56) - 1;
-
-pub(super) fn pack_sequence_and_type(seq: u64, t: ValueType) -> u64 {
-    assert!(seq <= MAX_SEQUENCE_NUMBER);
-    //assert!(t<=ValueTypeForSeek);
-    (seq << 8) | t as u64
-}
-
-pub(super) fn parse_internal_key<'a>(
-    internal_key: &'a [u8],
-) -> api::Result<(&'a [u8], SequenceNumber, ValueType)> {
-    // user_key, sequence, valuetype
-    let mut n = internal_key.len();
-    if n < 8 {
-        return Err(api::Error::Other(("internal key < 8").to_string()));
-    }
-    let num = util::decode_fixed64(&internal_key[n - 8..]);
-    let c = num & 0xff;
-    let sequence = num >> 8;
-    let t = ValueType::from(c);
-    let user_key = &internal_key[..n - 8];
-    Ok((user_key, sequence, t))
-}
+pub mod write_batch;
 
 mod test {
     use std::{default, env, ops::AddAssign};
 
     use crate::api::{self, ReadOptions, Snapshot};
-
-    use super::dbimpl::DB;
 
     const OptionConfig_Default: u8 = 0;
     const OptionConfig_Reuse: u8 = 1;

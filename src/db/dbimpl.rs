@@ -5,23 +5,12 @@ use std::sync::{Condvar, Mutex, MutexGuard};
 use std::collections::{self};
 
 use crate::api::{self, Error, ReadOptions, WriteOptions};
-use crate::{Options, WritableFile, NUM_NON_TABLE_CACHE_FILES};
+use crate::{Options, WritableFile, WriteBatch, DB, NUM_NON_TABLE_CACHE_FILES};
 
 use super::log::{self, Writer as LWriter};
 use super::memtable::{InternalKeyComparator, LookupKey, MemTable};
 use super::table_cache::TableCache;
 use super::version_set::VersionSet;
-use super::write_batch::WriteBatch;
-use super::SequenceNumber;
-
-pub trait DB {
-    // Set the database entry for "key" to "value".  Returns OK on success,
-    // and a non-OK status on error.
-    // Note: consider setting options.sync = true.
-    fn put(&mut self, options: &WriteOptions, key: &[u8], value: &[u8]) -> api::Result<()>;
-
-    fn get(&mut self, options: &ReadOptions, key: &[u8]) -> api::Result<Vec<u8>>;
-}
 
 fn clip_to_range<V: Ord>(mut v: V, minvalue: V, maxvalue: V) {
     if v > maxvalue {
@@ -82,13 +71,13 @@ fn table_cache_size(sanitized_options: &Options) -> usize {
 }
 
 impl<W: WritableFile> DBImpl<W> {
-    fn new(raw_options: &Options, db_name: &str) -> api::Result<Self> {
+    fn new(raw_options: &Options, db_name: &str) -> Self {
         let internal_comparator =
             Rc::new(InternalKeyComparator::new(raw_options.comparator.clone()));
         let options = sanitize_options(db_name, internal_comparator.clone(), raw_options);
         let dbname = db_name.to_string();
         let table_cache = TableCache::new(&dbname, &options, table_cache_size(&options));
-        let db= DBImpl {
+        DBImpl {
             mem: todo!(),
             log: todo!(),
             log_file: todo!(),
@@ -100,14 +89,129 @@ impl<W: WritableFile> DBImpl<W> {
             options,
             dbname,
             table_cache,
-        };
-        Ok(db)
+        }
     }
 
-    fn write(&mut self, options: &WriteOptions, updates: Option<WriteBatch>) -> api::Result<()> {
+    // REQUIRES: mutex_ is held
+    // REQUIRES: this thread is currently at the front of the writer queue
+    fn make_room_for_write(&mut self, guard: &MutexGuard<u8>, force: bool) -> api::Result<()> {
+        /* guard;
+          assert!(!self.writers.is_empty());
+          let allow_delay= !force;
+
+          loop {
+              if allow_delay && self.versions.num_level_files(0) >= config::L0_SlowdownWritesTrigger {
+                  // We are getting close to hitting a hard limit on the number of
+        // L0 files.  Rather than delaying a single write by several
+        // seconds when we hit the hard limit, start delaying each
+        // individual write by 1ms to reduce latency variance.  Also,
+        // this delay hands over some CPU to the compaction thread in
+        // case it is sharing the same core as the writer.
+
+              }
+          }
+          */
+        // todo:
+        Ok(())
+    }
+
+}
+
+impl<W: WritableFile> DB for DBImpl<W> {
+    fn open(options: &Options, dbname: &str) -> api::Result<Self> {
+        todo!()
+    }
+
+    fn get(&self, options: &ReadOptions, key: &[u8]) -> api::Result<&[u8]> {
+        let _guard = self.lock.lock().unwrap();
+
+        let snaphsot = self.versions.last_sequence();
+        /* match &options.snapshot {
+            None => {
+                snaphsot= self.versions.last_sequence();
+            },
+            Some(ss) => {
+                // todo:
+                snaphsot= &options.snapshot.get_r
+            },
+        } */
+
+        // Unlock while reading from files and memtables
+        drop(_guard);
+
+        // First look in the memtable, then in the immutable memtable (if any).
+        //let mut found: bool;
+        //let mut status: api::Error;
+        let lkey = LookupKey::new(key, snaphsot);
+        //let mut value:Option<Vec<u8>>= None;
+        let mut value: Vec<u8>;
+        /* value= self.mem.get(&lkey).map_err(|e|{
+            match e {
+                Error::NotFound => {
+                    if let Some(imem) = &self.imem {
+                        value = imem.get(&lkey).map_err(|e|{
+                            Err(e);
+                        })?;
+                    }
+                },
+                _ => {
+                    Err(e);
+                }
+            }
+        })?; */
+        match self.mem.get(&lkey) {
+            Ok(v) => return Ok(&v),
+            Err((found, e)) => {
+                if found {
+                    return Err(e);
+                } else {
+                    if let Some(imem) = &mut self.imem {
+                        match imem.get(&lkey) {
+                            Ok(v) => return Ok(&v),
+                            Err((found, e)) => {
+                                if found {
+                                    return Err(e);
+                                } else {
+                                    // current search
+                                }
+                            }
+                        }
+                    } else {
+                        // current search
+                    }
+                }
+            }
+        }
+
+        //let _guard = self.lock.lock().unwrap();
+
+        // extra steps
+
+        /* match value {
+            None => {
+                Err(Error::NotFound)
+            }
+            Some(v)=> {
+                Ok(v)
+            }
+        } */
+        Err(Error::NotFound)
+    }
+
+    fn delete(&mut self, options: &WriteOptions, key: &[u8]) -> api::Result<()> {
+        todo!()
+    }
+
+    fn put(&mut self, options: &WriteOptions, key: &[u8], value: &[u8]) -> api::Result<()> {
+        let mut batch = WriteBatch::new();
+        batch.put(key, value);
+        self.write(options, batch)
+    }
+
+    fn write(&mut self, options: &WriteOptions, updates: WriteBatch) -> api::Result<()> {
         let mut _guard = self.lock.lock().unwrap();
 
-        self.writers.push_back(Writer::new(updates, options.sync));
+        self.writers.push_back(Writer::new(Some(updates), options.sync));
         let w = self.writers.back().unwrap();
 
         while !w.done && w != self.writers.front().unwrap() {
@@ -169,113 +273,6 @@ impl<W: WritableFile> DBImpl<W> {
         };
 
         Ok(())
-    }
-
-    // REQUIRES: mutex_ is held
-    // REQUIRES: this thread is currently at the front of the writer queue
-    fn make_room_for_write(&mut self, guard: &MutexGuard<u8>, force: bool) -> api::Result<()> {
-        /* guard;
-          assert!(!self.writers.is_empty());
-          let allow_delay= !force;
-
-          loop {
-              if allow_delay && self.versions.num_level_files(0) >= config::L0_SlowdownWritesTrigger {
-                  // We are getting close to hitting a hard limit on the number of
-        // L0 files.  Rather than delaying a single write by several
-        // seconds when we hit the hard limit, start delaying each
-        // individual write by 1ms to reduce latency variance.  Also,
-        // this delay hands over some CPU to the compaction thread in
-        // case it is sharing the same core as the writer.
-
-              }
-          }
-          */
-        // todo:
-        Ok(())
-    }
-}
-
-impl<W: WritableFile> DB for DBImpl<W> {
-    fn put(&mut self, opt: &WriteOptions, key: &[u8], value: &[u8]) -> api::Result<()> {
-        let mut batch = WriteBatch::new();
-        batch.put(key, value);
-        self.write(opt, Some(batch))
-    }
-
-    fn get(&mut self, options: &ReadOptions, key: &[u8]) -> api::Result<Vec<u8>> {
-        let _guard = self.lock.lock().unwrap();
-
-        let snaphsot = self.versions.last_sequence();
-        /* match &options.snapshot {
-            None => {
-                snaphsot= self.versions.last_sequence();
-            },
-            Some(ss) => {
-                // todo:
-                snaphsot= &options.snapshot.get_r
-            },
-        } */
-
-        // Unlock while reading from files and memtables
-        drop(_guard);
-
-        // First look in the memtable, then in the immutable memtable (if any).
-        //let mut found: bool;
-        //let mut status: api::Error;
-        let lkey = LookupKey::new(key, snaphsot);
-        //let mut value:Option<Vec<u8>>= None;
-        let mut value: Vec<u8>;
-        /* value= self.mem.get(&lkey).map_err(|e|{
-            match e {
-                Error::NotFound => {
-                    if let Some(imem) = &self.imem {
-                        value = imem.get(&lkey).map_err(|e|{
-                            Err(e);
-                        })?;
-                    }
-                },
-                _ => {
-                    Err(e);
-                }
-            }
-        })?; */
-        match self.mem.get(&lkey) {
-            Ok(v) => return Ok(v),
-            Err((found, e)) => {
-                if found {
-                    return Err(e);
-                } else {
-                    if let Some(imem) = &mut self.imem {
-                        match imem.get(&lkey) {
-                            Ok(v) => return Ok(v),
-                            Err((found, e)) => {
-                                if found {
-                                    return Err(e);
-                                } else {
-                                    // current search
-                                }
-                            }
-                        }
-                    } else {
-                        // current search
-                    }
-                }
-            }
-        }
-
-        //let _guard = self.lock.lock().unwrap();
-
-        // extra steps
-
-        /* match value {
-            None => {
-                Err(Error::NotFound)
-            }
-            Some(v)=> {
-                Ok(v)
-            }
-        } */
-        Err(Error::NotFound)
     }
 }
 

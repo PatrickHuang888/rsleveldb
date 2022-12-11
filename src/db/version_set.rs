@@ -29,3 +29,8 @@ impl VersionSet {
         self.current.files[level].len()
     }
 }
+
+pub(super) struct VersionEdit {
+    compact_pointers: Vec<(usize, InternalKey)>,
+    delete_fileset: Vec<(usize, usize)>,
+}
