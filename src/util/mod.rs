@@ -15,7 +15,8 @@ pub fn varint_length(v: u64) -> usize {
     len
 }
 
-pub fn encode_varint64(dst: &mut Vec<u8>, v: u64) {
+// Using vec because length variant
+pub fn put_varint64(dst: &mut Vec<u8>, v: u64) {
     let mut x = v;
     while x >= B as u64 {
         // large than 0b1000_0000
@@ -115,6 +116,11 @@ pub fn get_length_prefixed_slice(data: &[u8]) -> (&[u8], usize) {
     let (len, off) = get_varint32(data);
     let end = off + len as usize;
     (&data[off..end], off + len as usize)
+}
+
+pub fn put_length_prefixed_slice(dst: &mut Vec<u8>, value: &[u8]) {
+    put_varint32(dst, value.len() as u32);
+    dst.extend_from_slice(value);
 }
 
 pub const CASTAGNOLI: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);

@@ -349,8 +349,8 @@ impl BlockHandle {
         assert!(self.offset != !0);
         assert!(self.size != !0);
 
-        util::encode_varint64(dst, self.offset as u64);
-        util::encode_varint64(dst, self.size as u64);
+        util::put_varint64(dst, self.offset as u64);
+        util::put_varint64(dst, self.size as u64);
     }
 
     fn decode_from(buf: &[u8], handle: &mut BlockHandle) -> api::Result<usize> {
