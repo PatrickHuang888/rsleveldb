@@ -49,9 +49,9 @@ enum Tag {
 
 pub(super) struct VersionEdit {
 
-    compact_pointers: Vec<(usize, Vec<u8>)>,  
-    deleted_files: Vec<(u64, u64)>,
-    new_files: Vec<(u64, FileMetaData)>,
+    compact_pointers: Vec<(u32, Vec<u8>)>,  // (level, key) 
+    deleted_files: Vec<(u32, u64)>, // (level, file_number)
+    new_files: Vec<(u32, FileMetaData)>, 
 
     comparator_name:Option<String>,
     log_number:Option<u64>,
@@ -96,8 +96,25 @@ impl VersionEdit {
         util::put_varint64(dst, last_sequence);
     }
 
-    self.compact_pointers.iter().for_each({
-        
+    self.compact_pointers.iter().for_each(|(level, key)|{
+        util::put_varint32(dst, Tag::CompactPointer as u32);
+        util::put_varint32(dst, level);
+        util::put_length_prefixed_slice(dst, key);
+    });
+
+    self.deleted_files.iter().for_each(|(level, file_number)|{
+        util::put_varint32(dst, Tag::DeletedFile as u32);
+        util::put_varint32(dst, level);
+        util::put_varint64(dst, file_number);
+    });
+
+    self.new_files.iter().for_each(|(level, f)|{
+        util::put_varint32(dst, Tag::NewFile as u32);
+        util::put_varint32(dst, level);
+        util::put_varint64(dst, f.number);
+        util::put_varint64(dst, f.file_size);
+        util::put_length_prefixed_slice(dst, &f.smallest_key);
+        util::put_length_prefixed_slice(dst, &f.largest_key);
     });
 
   }
