@@ -6,6 +6,7 @@ pub mod memtable;
 mod skiplist;
 mod table_cache;
 mod version_set;
+mod version_edit;
 pub mod write_batch;
 
 mod test {

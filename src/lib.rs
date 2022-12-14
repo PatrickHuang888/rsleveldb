@@ -288,32 +288,36 @@ impl WriteBatch {
             )));
         }
 
-        let mut input = &self.space[WRITEBATCH_HEADER..];
+        let input = &self.space[WRITEBATCH_HEADER..];
         let mut key: &[u8];
         let mut value: &[u8];
         let mut found = 0;
-        while !input.is_empty() {
+        let mut offset= 0;
+        while offset <  input.len() {
             found += 1;
-            let tag: ValueType = (input[0] as u64).into();
-            input = &input[1..];
+            let tag: ValueType = ValueType::from(input[offset]);
+            offset += 1;
             match tag {
                 ValueType::TypeValue => {
-                    key = util::get_length_prefixed_slice(&input).0;
-                    input = &input[key.len()..];
-                    value = util::get_length_prefixed_slice(&input).0;
-                    input = &input[value.len()..];
-                    if key.len() == 0 || value.len() == 0 {
-                        return Err(Error::Corruption(String::from("bad WriteBatch Put")));
-                    }
+                    let(key, key_size) = util::get_length_prefixed_slice(&input[offset..]).map_err(|_|{
+                        api::Error::Corruption("bad WriteBatch put, key".to_string())
+                    })?;
+                    offset+=key_size;
+                    let (value, value_size) = util::get_length_prefixed_slice(&input[offset..]).map_err(|_|{
+                        api::Error::Corruption("bad WriteBatch put, value".to_string())
+                    })?;
+                    offset += value_size;
                     handler.put(key, value);
                 }
                 ValueType::TypeDeletion => {
-                    key = util::get_length_prefixed_slice(&input).0;
-                    input = &input[key.len()..];
-                    if key.len() == 0 {
-                        return Err(Error::Corruption(String::from("bad WriteBatch Delete")));
-                    }
+                    let (key, key_size) = util::get_length_prefixed_slice(&input[offset..]).map_err(|_|{
+                        api::Error::Corruption(String::from("bad WriteBatch delete, key"))
+                    })?;
+                    offset += key_size;
                     handler.delete(key);
+                }
+                _ => {
+                    return Err(Error::Corruption("unknown ValueType".to_string()));
                 }
             }
         }
@@ -372,14 +376,15 @@ type SequenceNumber = u64;
 pub enum ValueType {
     TypeDeletion = 0x0,
     TypeValue = 0x1,
+    Unknown,
 }
 
-impl From<u64> for ValueType {
-    fn from(v: u64) -> Self {
+impl From<u8> for ValueType {
+    fn from(v: u8) -> Self {
         match v {
             0x0 => Self::TypeDeletion,
             0x1 => Self::TypeValue,
-            _ => panic!("value type known!"),
+            _ => Self::Unknown,
         }
     }
 }
@@ -403,9 +408,22 @@ pub(crate) fn parse_internal_key<'a>(
         return Err(api::Error::Other(("internal key < 8").to_string()));
     }
     let num = util::decode_fixed64(&internal_key[n - 8..]);
-    let c = num & 0xff;
+    let c = num as u8;
     let sequence = num >> 8;
     let t = ValueType::from(c);
     let user_key = &internal_key[..n - 8];
     Ok((user_key, sequence, t))
+}
+
+pub struct Version {
+    // List of files per level
+    files: Vec<Vec<Box<FileMetaData>>>,
+}
+
+#[derive(Default)]
+pub(crate) struct FileMetaData {
+    number: u64,
+    file_size: u64, // File size in bytes
+    smallest_key: Vec<u8>,
+    largest_key: Vec<u8>,
 }

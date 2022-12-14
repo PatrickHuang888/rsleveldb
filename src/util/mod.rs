@@ -134,7 +134,7 @@ return data slice and offset position
 pub fn get_length_prefixed_slice(data: &[u8]) -> std::result::Result<(&[u8], usize), UtilError> {
     let (len, off) = get_varint32(data)?;
     let end = off + len as usize;
-    Ok((&data[off..end], off + len as usize))
+    Ok((&data[off..end], end))
 }
 
 pub fn put_length_prefixed_slice(dst: &mut Vec<u8>, value: &[u8]) {
