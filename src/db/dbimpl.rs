@@ -114,7 +114,6 @@ impl<W: WritableFile> DBImpl<W> {
         // todo:
         Ok(())
     }
-
 }
 
 impl<W: WritableFile> DB for DBImpl<W> {
@@ -211,7 +210,8 @@ impl<W: WritableFile> DB for DBImpl<W> {
     fn write(&mut self, options: &WriteOptions, updates: WriteBatch) -> api::Result<()> {
         let mut _guard = self.lock.lock().unwrap();
 
-        self.writers.push_back(Writer::new(Some(updates), options.sync));
+        self.writers
+            .push_back(Writer::new(Some(updates), options.sync));
         let w = self.writers.back().unwrap();
 
         while !w.done && w != self.writers.front().unwrap() {

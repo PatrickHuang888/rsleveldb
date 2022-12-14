@@ -36,35 +36,54 @@ pub fn put_varint32(dst: &mut Vec<u8>, v: u32) {
     dst.push(x as u8);
 }
 
+struct UtilError {
+    reason: String,
+}
+
+impl UtilError {
+    fn new(reason: String) -> Self {
+        Self { reason }
+    }
+}
+
+const VAR32_LIMIT: usize = 28;
 // usize 0 error
-pub fn get_varint32(src: &[u8]) -> (u32, usize) {
+pub fn get_varint32(src: &[u8]) -> std::result::Result<(u32, usize), UtilError> {
     let mut value: u32 = 0;
     let mut shift: usize = 0;
 
     for i in 0..src.len() {
         let b = src[i];
         if b < B {
-            return (value | (b as u32) << shift, i + 1);
+            return Ok((value | (b as u32) << shift, i + 1));
         }
         value |= ((b & 0x7f) as u32) << shift; //0b0111_1111
         shift += 7;
+        if shift > VAR32_LIMIT {
+            break;
+        }
     }
-    (0, 0)
+    Err(UtilError::new("get_varint32 error".to_string()))
 }
 
-pub fn get_varint64(src: &[u8]) -> (u64, usize) {
+const VAR64_LIMIT: usize = 63;
+
+pub fn get_varint64(src: &[u8]) -> std::result::Result<(u64, usize), UtilError> {
     let mut value: u64 = 0;
     let mut shift: usize = 0;
 
     for i in 0..src.len() {
         let b = src[i];
         if b < B {
-            return (value | (b as u64) << shift, i + 1);
+            return Ok((value | (b as u64) << shift, i + 1));
         }
         value |= ((b & 0x7f) as u64) << shift; //0b0111_1111
         shift += 7;
+        if shift > VAR64_LIMIT {
+            break;
+        }
     }
-    (0, 0)
+    Err(UtilError::new("get_varint64 error".to_string()))
 }
 
 pub fn put_fixed64(dst: &mut Vec<u8>, v: u64) {
@@ -112,10 +131,10 @@ pub fn decode_fixed32(src: &[u8]) -> u32 {
 /*
 return data slice and offset position
  */
-pub fn get_length_prefixed_slice(data: &[u8]) -> (&[u8], usize) {
-    let (len, off) = get_varint32(data);
+pub fn get_length_prefixed_slice(data: &[u8]) -> std::result::Result<(&[u8], usize), UtilError> {
+    let (len, off) = get_varint32(data)?;
     let end = off + len as usize;
-    (&data[off..end], off + len as usize)
+    Ok((&data[off..end], off + len as usize))
 }
 
 pub fn put_length_prefixed_slice(dst: &mut Vec<u8>, value: &[u8]) {
