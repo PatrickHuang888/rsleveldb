@@ -218,7 +218,7 @@ pub trait DB: Sized {
     // a status for which Status::IsNotFound() returns true.
     //
     // May return some other Status on an error.
-    fn get(&self, options: &ReadOptions, key: &[u8]) -> api::Result<&[u8]>;
+    fn get(&mut self, options: &ReadOptions, key: &[u8]) -> api::Result<&[u8]>;
 
     // Set the database entry for "key" to "value".  Returns OK on success,
     // and a non-OK status on error.
@@ -353,17 +353,17 @@ impl WriteBatch {
         self.space.len()
     }
 
-    fn insert_into(&self, memtable: &mut db::memtable::MemTable) -> api::Result<()> {
+    /* fn insert_into(&self, memtable: &mut db::memtable::MemTable) -> api::Result<()> {
         let mut inserter = db::write_batch::MemTableInserter {
             sequence: self.sequence(),
             mem: memtable,
         };
         self.iterate(&mut inserter)?;
         Ok(())
-    }
+    } */
 }
 
-trait Handler {
+pub trait Handler {
     fn put(&mut self, key: &[u8], value: &[u8]);
     fn delete(&mut self, key: &[u8]);
 }
@@ -424,6 +424,33 @@ pub struct Version {
 pub(crate) struct FileMetaData {
     number: u64,
     file_size: u64, // File size in bytes
-    smallest_key: Vec<u8>,
-    largest_key: Vec<u8>,
+    smallest: InternalKey,
+    largest: InternalKey,
+}
+
+// Modules in this directory should keep internal keys wrapped inside
+// the following class instead of plain strings so that we do not
+// incorrectly use string comparisons instead of an InternalKeyComparator.
+#[derive(Clone, Default)]
+struct InternalKey {
+    rep: Vec<u8>,
+}
+
+impl InternalKey {
+    fn new(user_key:&[u8], s:SequenceNumber, t:ValueType) -> Self {
+        let mut rep= Vec::new();
+        rep.extend_from_slice(user_key);
+        util::put_fixed64(&mut rep, pack_sequence_and_type(s, t));
+        InternalKey { rep }
+    }
+
+    fn user_key(&self) -> &[u8] {
+        extract_user_key(&self.rep)
+    }
+
+}
+
+fn extract_user_key(internal_key: &[u8]) -> &[u8] {
+    assert!(internal_key.len() >= 8);
+    return &internal_key[..internal_key.len() - 8];
 }

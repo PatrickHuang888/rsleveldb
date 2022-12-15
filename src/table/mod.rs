@@ -215,12 +215,10 @@ mod tests {
     use crate::{
         api::{self, Iterator},
         db::{
-            self,
             memtable::{self, InternalKeyComparator, MemTable, MemTableIterator},
-            ValueType,
         },
         table::table::{ReadOptions, Table},
-        util, Options, RandomAccessFile, WritableFile,
+        util, Options, RandomAccessFile, WritableFile, ValueType, parse_internal_key, pack_sequence_and_type, MAX_SEQUENCE_NUMBER,
     };
 
     use super::{
@@ -350,7 +348,7 @@ mod tests {
             impl<'a> api::Iterator for KeyConvertingIterator<'a> {
                 fn key(&self) -> api::Result<&[u8]> {
                     assert!(self.valid().unwrap());
-                    match db::parse_internal_key(self.iter.key().unwrap()) {
+                    match parse_internal_key(self.iter.key().unwrap()) {
                         Ok(pared_key) => {
                             return Ok(pared_key.0);
                         }
@@ -369,7 +367,7 @@ mod tests {
                     let mut internal_key = key.to_vec();
                     util::put_fixed64(
                         &mut internal_key,
-                        db::pack_sequence_and_type(db::MAX_SEQUENCE_NUMBER, ValueType::TypeValue),
+                        pack_sequence_and_type(MAX_SEQUENCE_NUMBER, ValueType::TypeValue),
                     );
                     self.iter.seek(&internal_key)
                 }

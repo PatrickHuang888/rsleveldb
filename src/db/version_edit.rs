@@ -1,4 +1,4 @@
-use crate::{api, util, config, Version, SequenceNumber};
+use crate::{api, util, config, Version, SequenceNumber, FileMetaData, InternalKey};
 
 pub struct VersionSet {
     last_sequence: u64,
@@ -53,8 +53,9 @@ impl From<u32> for Tag {
     }
 }
 
+#[derive(Default)]
 pub(super) struct VersionEdit {
-    compact_pointers: Vec<(u32, Vec<u8>)>, // (level, key)
+    compact_pointers: Vec<(u32, InternalKey)>, // (level, key)
     deleted_files: Vec<(u32, u64)>,        // (level, file_number)
     new_files: Vec<(u32, FileMetaData)>,
 
@@ -86,19 +87,19 @@ impl VersionEdit {
         self.last_sequence= Some(seq);
     }
 
-    fn set_compact_pointer(&mut self, level:u32, key:&[u8]) {
-        self.compact_pointers.push((level, Vec::from(key)));
+    fn set_compact_pointer(&mut self, level:u32, key:&InternalKey) {
+        self.compact_pointers.push((level, key.clone()));
     }
 
     // Add the specified file at the specified number.
     // REQUIRES: This version has not been saved (see VersionSet::SaveTo)
     // REQUIRES: "smallest" and "largest" are smallest and largest keys in file
-    fn add_file(&mut self, level: u32, file: u64, file_size: u64, smallest: &[u8], largest: &[u8]) {
+    fn add_file(&mut self, level: u32, file: u64, file_size: u64, smallest_key: &InternalKey, largest_key: &InternalKey) {
         let f = FileMetaData {
             number: file,
             file_size,
-            smallest_key: Vec::from(smallest),
-            largest_key: Vec::from(largest),
+            smallest: smallest_key.clone(),
+            largest: largest_key.clone(),
         };
         self.new_files.push((level, f));
     }
@@ -109,7 +110,7 @@ impl VersionEdit {
     }
 
     fn encode_to(&self, dst: &mut Vec<u8>) {
-        if let Some(comparator_name) = self.comparator_name {
+        if let Some(comparator_name) = &self.comparator_name {
             util::put_varint32(dst, Tag::Comparator as u32);
             util::put_length_prefixed_slice(dst, comparator_name.as_bytes());
         }
@@ -133,7 +134,7 @@ impl VersionEdit {
         self.compact_pointers.iter().for_each(|(level, key)| {
             util::put_varint32(dst, Tag::CompactPointer as u32);
             util::put_varint32(dst, *level);
-            util::put_length_prefixed_slice(dst, key);
+            util::put_length_prefixed_slice(dst, &key.rep);
         });
 
         self.deleted_files.iter().for_each(|(level, file_number)| {
@@ -147,14 +148,14 @@ impl VersionEdit {
             util::put_varint32(dst, *level);
             util::put_varint64(dst, f.number);
             util::put_varint64(dst, f.file_size);
-            util::put_length_prefixed_slice(dst, &f.smallest_key);
-            util::put_length_prefixed_slice(dst, &f.largest_key);
+            util::put_length_prefixed_slice(dst, &f.smallest.rep);
+            util::put_length_prefixed_slice(dst, &f.largest.rep);
         });
     }
 
     fn decode_from(src: &[u8]) -> api::Result<Self> {
         let input = src;
-        let offset = 0;
+        let mut offset = 0;
 
         let mut tag_size = 0;
         let mut tag_number;
@@ -207,9 +208,8 @@ impl VersionEdit {
                 Tag::CompactPointer => {
                     let (level, l_size) = get_level(&input[offset..])?;
                     offset += l_size;
-                    let (k, k_size) = get_internal_key(&input[offset..])?;
+                    let (key, k_size) = get_internal_key(&input[offset..])?;
                     offset += k_size;
-                    let key = Vec::from(k);
                     compact_pointers.push((level, key));
                 }
                 Tag::DeletedFile => {
@@ -235,10 +235,10 @@ impl VersionEdit {
                     f.file_size = fs;
                     let (smallest, s_size) = get_internal_key(&input[offset..])?;
                     offset += s_size;
-                    f.smallest_key.extend_from_slice(smallest);
+                    f.smallest= smallest;
                     let (largest, s_size) = get_internal_key(&input[offset..])?;
                     offset += s_size;
-                    f.largest_key.extend_from_slice(largest);
+                    f.largest= largest;
 
                     new_files.push((level, f));
                 }
@@ -273,7 +273,47 @@ fn get_level(input: &[u8]) -> api::Result<(u32, usize)> {
     Ok((l, l_size))
 }
 
-fn get_internal_key(input: &[u8]) -> api::Result<(&[u8], usize)> {
-    util::get_length_prefixed_slice(input)
-        .map_err(|_| api::Error::Corruption("get internal key".to_string()))
+fn get_internal_key(input: &[u8]) -> api::Result<(InternalKey, usize)> {
+    let (s, s_size) = util::get_length_prefixed_slice(input)
+        .map_err(|_| api::Error::Corruption("get internal key".to_string()))?;
+        Ok((InternalKey{rep:Vec::from(s)}, s_size))
+}
+
+
+mod test {
+    use crate::{ValueType, InternalKey};
+
+    use super::VersionEdit;
+
+    const BIG:u64= 1u64 << 50;
+
+    #[test]
+    fn test_version_edit() {
+        let mut edit= VersionEdit::default();
+        for i in 0..4 {
+            test_encode_decode(&edit);
+            edit.add_file(3, BIG+300+i, BIG+400+i, &InternalKey::new("foo".as_bytes(), BIG+500+i, ValueType::TypeValue),
+        &InternalKey::new("zoo".as_bytes(), BIG+600+i, ValueType::TypeDeletion));
+        edit.remove_file(4, BIG+700+i);
+        edit.set_compact_pointer(i as u32, &InternalKey::new("x".as_bytes(), BIG+900+1, ValueType::TypeValue));
+        }
+
+        edit.set_comparator_name("foot");
+        edit.set_log_number(BIG+100);
+        edit.set_next_file(BIG+200);
+        edit.set_last_sequence(BIG+1000);
+
+        test_encode_decode(&edit)
+    }
+
+    fn test_encode_decode(edit: &VersionEdit) {
+        let mut encoded = Vec::new();
+        edit.encode_to(&mut encoded);
+        let decode_result= VersionEdit::decode_from(&encoded);
+        assert!(decode_result.is_ok());
+        let mut encoded2= Vec::new();
+        let parsed= decode_result.unwrap();
+        parsed.encode_to(&mut encoded2);
+        assert_eq!(encoded, encoded2);
+    }
 }

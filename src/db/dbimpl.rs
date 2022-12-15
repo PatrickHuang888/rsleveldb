@@ -10,7 +10,7 @@ use crate::{Options, WritableFile, WriteBatch, DB, NUM_NON_TABLE_CACHE_FILES};
 use super::log::{self, Writer as LWriter};
 use super::memtable::{InternalKeyComparator, LookupKey, MemTable};
 use super::table_cache::TableCache;
-use super::version_set::VersionSet;
+use super::version_edit::VersionSet;
 
 fn clip_to_range<V: Ord>(mut v: V, minvalue: V, maxvalue: V) {
     if v > maxvalue {
@@ -121,7 +121,7 @@ impl<W: WritableFile> DB for DBImpl<W> {
         todo!()
     }
 
-    fn get(&self, options: &ReadOptions, key: &[u8]) -> api::Result<&[u8]> {
+    fn get(&mut self, options: &ReadOptions, key: &[u8]) -> api::Result<&[u8]> {
         let _guard = self.lock.lock().unwrap();
 
         let snaphsot = self.versions.last_sequence();
@@ -158,7 +158,7 @@ impl<W: WritableFile> DB for DBImpl<W> {
                 }
             }
         })?; */
-        match self.mem.get(&lkey) {
+        /* match self.mem.get(&lkey) {
             Ok(v) => return Ok(&v),
             Err((found, e)) => {
                 if found {
@@ -180,7 +180,7 @@ impl<W: WritableFile> DB for DBImpl<W> {
                     }
                 }
             }
-        }
+        } */
 
         //let _guard = self.lock.lock().unwrap();
 
@@ -249,7 +249,7 @@ impl<W: WritableFile> DB for DBImpl<W> {
                         //todo:
                         //self.log_file.sync()?;
                     }
-                    status = write_batch.insert_into(&mut self.mem);
+                    //status = write_batch.insert_into(&mut self.mem);
                     _guard = self.lock.lock().unwrap();
 
                     // todo: sync error

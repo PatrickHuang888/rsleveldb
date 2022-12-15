@@ -36,7 +36,8 @@ pub fn put_varint32(dst: &mut Vec<u8>, v: u32) {
     dst.push(x as u8);
 }
 
-struct UtilError {
+#[derive(Debug)]
+pub struct UtilError {
     reason: String,
 }
 

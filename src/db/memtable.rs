@@ -1,19 +1,15 @@
 use std::{
-    cell::RefCell,
     cmp::{self, Ordering},
     rc::Rc,
 };
 
 use crate::{
     api::{self, Comparator},
-    db::MAX_SEQUENCE_NUMBER,
-    util::{self, decode_fixed64},
+    util::{self, decode_fixed64}, ValueType, SequenceNumber, pack_sequence_and_type, extract_user_key, MAX_SEQUENCE_NUMBER,
 };
 
 use super::{
-    pack_sequence_and_type,
     skiplist::{Comparator as SkipListComparator, Iterator, SkipList, SkipListIterator},
-    SequenceNumber, ValueType,
 };
 
 type Table = SkipList<KeyComparator, Vec<u8>>;
@@ -106,7 +102,9 @@ impl MemTable {
             // sequence number since the Seek() call above should have skipped
             // all entries with overly large sequence numbers.
             let entry = iter.key();
-            let (key_length, key_start) = util::get_varint32(&entry[..5]);
+            let (key_length, key_start) = util::get_varint32(&entry[..5]).map_err(|_|{
+                todo!();
+            })?;
             let key_end = key_start + (key_length as usize);
             if self
                 .comparator
@@ -117,16 +115,21 @@ impl MemTable {
                 .is_eq()
             {
                 // correct user key
-                let tag = util::decode_fixed64(&entry[key_end - 8..key_end]);
+                let tag = util::decode_fixed64(&entry[key_end - 8..key_end]) as u8;
                 match (tag & 0xff).into() {
                     ValueType::TypeValue => {
-                        let (v, _) = util::get_length_prefixed_slice(&entry[key_end..]);
+                        let (v, _) = util::get_length_prefixed_slice(&entry[key_end..]).map_err(|_|{
+                            todo!()
+                        })?;
                         let mut value = Vec::with_capacity(v.len());
                         value.extend_from_slice(v);
                         return Ok(value);
                     }
                     ValueType::TypeDeletion => {
                         return Err((true, api::Error::NotFound));
+                    }
+                    _ => {
+                        panic!("value type unknown");
                     }
                 }
             }
@@ -176,13 +179,21 @@ pub(crate) struct MemTableIterator<'a> {
 
 impl<'a> api::Iterator for MemTableIterator<'a> {
     fn key(&self) -> api::Result<&[u8]> {
-        Ok(util::get_length_prefixed_slice(self.iter.key()).0)
+        let (key, _)= util::get_length_prefixed_slice(self.iter.key()).map_err(|_|{
+            api::Error::Corruption("key".to_string())
+        })?;
+        Ok(key)
     }
 
     fn value(&self) -> api::Result<&[u8]> {
         let kv = self.iter.key();
-        let (_, offset) = util::get_length_prefixed_slice(kv);
-        Ok(util::get_length_prefixed_slice(&kv[offset..]).0)
+        let (_, offset) = util::get_length_prefixed_slice(kv).map_err(|_|{
+            api::Error::Corruption("value".to_string())
+        })?;
+        let (value, _) = util::get_length_prefixed_slice(&kv[offset..]).map_err(|_|{
+            api::Error::Corruption("value".to_string())
+        })?;
+        Ok(value)
     }
 
     fn next(&mut self) -> api::Result<()> {
@@ -299,10 +310,6 @@ impl api::Comparator for InternalKeyComparator {
     }
 }
 
-fn extract_user_key(internal_key: &[u8]) -> &[u8] {
-    assert!(internal_key.len() >= 8);
-    return &internal_key[..internal_key.len() - 8];
-}
 
 fn encode_key(scratch: &mut Vec<u8>, key: &[u8]) {
     scratch.clear();
@@ -318,26 +325,9 @@ struct KeyComparator {
 impl super::skiplist::Comparator<Vec<u8>> for KeyComparator {
     fn compare(&self, key_a: &Vec<u8>, key_b: &Vec<u8>) -> cmp::Ordering {
         // Internal keys are encoded as length-prefixed strings.
-        let (a, _) = util::get_length_prefixed_slice(key_a);
-        let (b, _) = util::get_length_prefixed_slice(key_b);
+        let (a, _) = util::get_length_prefixed_slice(key_a).unwrap();
+        let (b, _) = util::get_length_prefixed_slice(key_b).unwrap();
         self.comparator.compare(a, b)
     }
 }
 
-// Modules in this directory should keep internal keys wrapped inside
-// the following class instead of plain strings so that we do not
-// incorrectly use string comparisons instead of an InternalKeyComparator.
-#[derive(Clone)]
-struct InternalKey {
-    key: Vec<u8>,
-}
-
-impl InternalKey {
-    fn user_key(&self) -> &[u8] {
-        extract_user_key(&self.key)
-    }
-
-    /* fn encode(&self) -> &[u8] {
-
-    } */
-}
