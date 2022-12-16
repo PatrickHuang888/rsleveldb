@@ -415,19 +415,6 @@ pub(crate) fn parse_internal_key<'a>(
     Ok((user_key, sequence, t))
 }
 
-pub struct Version {
-    // List of files per level
-    files: Vec<Vec<Box<FileMetaData>>>,
-}
-
-#[derive(Default)]
-pub(crate) struct FileMetaData {
-    number: u64,
-    file_size: u64, // File size in bytes
-    smallest: InternalKey,
-    largest: InternalKey,
-}
-
 // Modules in this directory should keep internal keys wrapped inside
 // the following class instead of plain strings so that we do not
 // incorrectly use string comparisons instead of an InternalKeyComparator.
@@ -454,3 +441,4 @@ fn extract_user_key(internal_key: &[u8]) -> &[u8] {
     assert!(internal_key.len() >= 8);
     return &internal_key[..internal_key.len() - 8];
 }
+

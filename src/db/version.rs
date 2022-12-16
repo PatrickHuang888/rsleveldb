@@ -1,11 +1,108 @@
-use crate::{api, util, config, Version, SequenceNumber, FileMetaData, InternalKey};
 
-pub struct VersionSet {
+use std::rc::Rc;
+
+use crate::{api::{self, ReadOptions, Comparator}, util, config, SequenceNumber, InternalKey};
+
+use super::{memtable::{LookupKey, InternalKeyComparator}, log};
+
+#[derive(Default)]
+pub(crate) struct FileMetaData {
+    number: u64,
+    file_size: u64, // File size in bytes
+    smallest: InternalKey,
+    largest: InternalKey,
+}
+
+
+pub(crate) struct GetStats(FileMetaData, u32);
+pub(crate) struct Version {
+    vset: VersionSet // VersionSet to which this Version belongs
+}
+
+impl Version {
+    fn for_each_overlapping(&self, user_key:&[u8], internal_key:&[u8]) {
+        
+    }
+}
+
+struct State {
+    saver: Saver,
+    stats: GetStats,
+    options:ReadOptions,
+    ikey: Vec<u8>,
+    last_file_read: FileMetaData,
+    last_file_read_level:u32,
+
+    vset: VersionSet,
+    found:bool,
+}
+
+impl State {
+    fn fn_match(&self, level:u32, f: FileMetaData) -> bool {
+        todo!()
+    }
+}
+
+enum SaverState {
+    NotFound,
+    Found,
+    Deleted,
+    Corrupt,
+}
+
+struct Saver {
+    state: SaverState,
+    ucmp: Rc<dyn Comparator>,
+    user_key:Vec<u8>,
+    value: Vec<u8>,
+}
+
+impl Version {
+    // Lookup the value for key.  If found, store it in *val and
+  // return OK.  Else return a non-OK status.  Fills *stats.
+  // REQUIRES: lock is not held
+    fn get(&self, options:&ReadOptions, k:&LookupKey, stats:&GetStats) -> api::Result<&[u8]> {
+        todo!()
+    }
+}
+
+pub(crate) struct VersionSet {
     last_sequence: u64,
     current: Box<Version>,
+    log_number:u64,
+    next_file_number:u64,
+    prev_log_number:u64, // 0 or backing store for memtable being compacted
 }
 
 impl VersionSet {
+    // Apply *edit to the current version to form a new descriptor that
+  // is both saved to persistent state and installed as the new
+  // current version.  Will release *mu while actually writing to the file.
+  // REQUIRES: *mu is held on entry.
+  // REQUIRES: no other thread concurrently calls LogAndApply()
+    fn log_and_apply(&self, edit:&mut VersionEdit) -> api::Result<()> {
+        match edit.log_number {
+            None => {
+                edit.set_log_number(self.log_number);
+            },
+            Some(log_number) => {
+                assert!(log_number >= self.log_number);
+                assert!(log_number < self.next_file_number);
+            }
+        }
+
+        if let Some(prev_log_number) = edit.prev_log_number {
+            edit.set_prev_log_number(self.prev_log_number);
+        }
+
+        edit.set_next_file(self.next_file_number);
+        edit.set_last_sequence(self.last_sequence);
+
+
+
+        Ok(())
+    }
+
     // Return the last sequence number.
     pub fn last_sequence(&self) -> u64 {
         self.last_sequence
@@ -18,9 +115,34 @@ impl VersionSet {
 
     // Return the number of Table files at the specified level.
     pub fn num_level_files(&self, level: u32) -> usize {
+        todo!();
         assert!(level < config::NUM_LEVELS);
-        self.current.files[level as usize].len()
+        //self.current.files[level as usize].len()
     }
+}
+
+
+// Helper to sort by v->files_[file_number].smallest
+struct BySmallestKey {
+    internal_comparator:InternalKeyComparator,
+}
+impl BySmallestKey {
+    fn compare(&self, f1: &FileMetaData, f2: &FileMetaData) -> std::cmp::Ordering {
+        super::skiplist::Comparator::compare(&self.internal_comparator, &f1.smallest, &f2.smallest)
+    }
+}
+
+struct LevelState {
+    deleted_files:Vec<u64>,
+    added_files: Vec<(FileMetaData, BySmallestKey)>,
+}
+// A helper class so we can efficiently apply a whole sequence
+// of edits to a particular state without creating intermediate
+// Versions that contain full copies of the intermediate state.
+struct VersionSetBuilder {
+    vset: VersionSet,
+    base: Version,
+    //levels: [config::NUM_LEVELS],
 }
 
 enum Tag {

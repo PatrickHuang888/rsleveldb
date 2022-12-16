@@ -5,7 +5,7 @@ use std::{
 
 use crate::{
     api::{self, Comparator},
-    util::{self, decode_fixed64}, ValueType, SequenceNumber, pack_sequence_and_type, extract_user_key, MAX_SEQUENCE_NUMBER,
+    util::{self, decode_fixed64}, ValueType, SequenceNumber, pack_sequence_and_type, extract_user_key, MAX_SEQUENCE_NUMBER, InternalKey,
 };
 
 use super::{
@@ -238,6 +238,12 @@ impl InternalKeyComparator {
     }
 }
 
+impl super::skiplist::Comparator<InternalKey> for InternalKeyComparator {
+    fn compare(&self, a: &InternalKey, b: &InternalKey) -> cmp::Ordering {
+        api::Comparator::compare(self, &a.rep, &b.rep)
+    }
+}
+
 impl api::Comparator for InternalKeyComparator {
     fn name(&self) -> &'static str {
         "leveldb.InternalKeyComparator"
@@ -285,8 +291,8 @@ impl api::Comparator for InternalKeyComparator {
                 &mut tmp,
                 pack_sequence_and_type(MAX_SEQUENCE_NUMBER, VALUE_TYPE_FOR_SEEK),
             );
-            assert!(self.compare(start, &tmp).is_lt());
-            assert!(self.compare(&tmp, limit).is_lt());
+            assert!(api::Comparator::compare(self, start, &tmp).is_lt());
+            assert!(api::Comparator::compare(self, &tmp, limit).is_lt());
             start = &mut start[..tmp.len()];
             start.copy_from_slice(&tmp);
         }
@@ -303,7 +309,7 @@ impl api::Comparator for InternalKeyComparator {
                 &mut tmp,
                 pack_sequence_and_type(MAX_SEQUENCE_NUMBER, VALUE_TYPE_FOR_SEEK),
             );
-            assert!(self.compare(key, &tmp).is_lt());
+            assert!(api::Comparator::compare(self, key, &tmp).is_lt());
             key = &mut key[..tmp.len()];
             key.copy_from_slice(&tmp);
         }
@@ -327,7 +333,7 @@ impl super::skiplist::Comparator<Vec<u8>> for KeyComparator {
         // Internal keys are encoded as length-prefixed strings.
         let (a, _) = util::get_length_prefixed_slice(key_a).unwrap();
         let (b, _) = util::get_length_prefixed_slice(key_b).unwrap();
-        self.comparator.compare(a, b)
+        api::Comparator::compare(&self.comparator, a, b)
     }
 }
 

@@ -10,7 +10,7 @@ use crate::{Options, WritableFile, WriteBatch, DB, NUM_NON_TABLE_CACHE_FILES};
 use super::log::{self, Writer as LWriter};
 use super::memtable::{InternalKeyComparator, LookupKey, MemTable};
 use super::table_cache::TableCache;
-use super::version_edit::VersionSet;
+use super::version::VersionSet;
 
 fn clip_to_range<V: Ord>(mut v: V, minvalue: V, maxvalue: V) {
     if v > maxvalue {

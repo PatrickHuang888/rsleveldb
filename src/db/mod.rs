@@ -5,8 +5,7 @@ mod log;
 pub mod memtable;
 mod skiplist;
 mod table_cache;
-mod version_set;
-mod version_edit;
+mod version;
 pub mod write_batch;
 
 mod test {
