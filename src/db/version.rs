@@ -14,12 +14,21 @@ pub(crate) struct FileMetaData {
 }
 
 
+#[derive(Default)]
 pub(crate) struct GetStats(FileMetaData, u32);
+
 pub(crate) struct Version {
-    vset: VersionSet // VersionSet to which this Version belongs
+    //vset: VersionSet // VersionSet to which this Version belongs
 }
 
 impl Version {
+        // Lookup the value for key.  If found, store it in *val and
+  // return OK.  Else return a non-OK status.  Fills *stats.
+  // REQUIRES: lock is not held
+  fn get(&self, options:&ReadOptions, k:&LookupKey, stats:&GetStats) -> api::Result<&[u8]> {
+    todo!()
+    }
+
     fn for_each_overlapping(&self, user_key:&[u8], internal_key:&[u8]) {
         
     }
@@ -57,21 +66,18 @@ struct Saver {
     value: Vec<u8>,
 }
 
-impl Version {
-    // Lookup the value for key.  If found, store it in *val and
-  // return OK.  Else return a non-OK status.  Fills *stats.
-  // REQUIRES: lock is not held
-    fn get(&self, options:&ReadOptions, k:&LookupKey, stats:&GetStats) -> api::Result<&[u8]> {
-        todo!()
-    }
-}
-
 pub(crate) struct VersionSet {
     last_sequence: u64,
-    current: Box<Version>,
+    current: Version,
     log_number:u64,
     next_file_number:u64,
     prev_log_number:u64, // 0 or backing store for memtable being compacted
+}
+
+impl VersionSet {
+    pub fn current(&self) -> &Version {
+        &self.current
+    }
 }
 
 impl VersionSet {
@@ -279,9 +285,6 @@ impl VersionEdit {
         let input = src;
         let mut offset = 0;
 
-        let mut tag_size = 0;
-        let mut tag_number;
-
         let mut comparator_name = None;
         let mut log_number = None;
         let mut prev_log_number = None;
@@ -292,7 +295,7 @@ impl VersionEdit {
         let mut new_files = Vec::new();
 
         while offset < input.len() {
-            (tag_number, tag_size) = util::get_varint32(&input[offset..])
+            let (tag_number, tag_size) = util::get_varint32(&input[offset..])
                 .map_err(|_| api::Error::Corruption("invalid tag".to_string()))?;
             offset += tag_size;
             let tag = Tag::from(tag_number);

@@ -5,12 +5,12 @@ use std::sync::{Condvar, Mutex, MutexGuard};
 use std::collections::{self};
 
 use crate::api::{self, Error, ReadOptions, WriteOptions};
-use crate::{Options, WritableFile, WriteBatch, DB, NUM_NON_TABLE_CACHE_FILES};
+use crate::{Options, WritableFile, WriteBatch, DB, NUM_NON_TABLE_CACHE_FILES, SequenceNumber};
 
 use super::log::{self, Writer as LWriter};
 use super::memtable::{InternalKeyComparator, LookupKey, MemTable};
 use super::table_cache::TableCache;
-use super::version::VersionSet;
+use super::version::{VersionSet, GetStats};
 
 fn clip_to_range<V: Ord>(mut v: V, minvalue: V, maxvalue: V) {
     if v > maxvalue {
@@ -124,27 +124,32 @@ impl<W: WritableFile> DB for DBImpl<W> {
     fn get(&mut self, options: &ReadOptions, key: &[u8]) -> api::Result<&[u8]> {
         let _guard = self.lock.lock().unwrap();
 
-        let snaphsot = self.versions.last_sequence();
-        /* match &options.snapshot {
+        let snaphsot:SequenceNumber;
+        match &options.snapshot {
             None => {
                 snaphsot= self.versions.last_sequence();
             },
             Some(ss) => {
-                // todo:
-                snaphsot= &options.snapshot.get_r
+                snaphsot= ss.sequence_number();
             },
-        } */
+        }
+
+        let current= self.versions.current();
+
+        let mut have_stat_update= false;
+        let stats= GetStats::default();
 
         // Unlock while reading from files and memtables
         drop(_guard);
 
-        // First look in the memtable, then in the immutable memtable (if any).
         //let mut found: bool;
         //let mut status: api::Error;
+
+        // First look in the memtable, then in the immutable memtable (if any).
         let lkey = LookupKey::new(key, snaphsot);
         //let mut value:Option<Vec<u8>>= None;
         let mut value: Vec<u8>;
-        /* value= self.mem.get(&lkey).map_err(|e|{
+        value= self.mem.get(&lkey).map_err(|e|{
             match e {
                 Error::NotFound => {
                     if let Some(imem) = &self.imem {
@@ -157,7 +162,7 @@ impl<W: WritableFile> DB for DBImpl<W> {
                     Err(e);
                 }
             }
-        })?; */
+        })?;
         /* match self.mem.get(&lkey) {
             Ok(v) => return Ok(&v),
             Err((found, e)) => {
