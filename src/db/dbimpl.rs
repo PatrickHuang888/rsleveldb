@@ -121,7 +121,7 @@ impl<W: WritableFile> DB for DBImpl<W> {
         todo!()
     }
 
-    fn get(&mut self, options: &ReadOptions, key: &[u8]) -> api::Result<&[u8]> {
+    fn get(&mut self, options: &ReadOptions, key: &[u8], value: &mut Vec<u8>) -> api::Result<()> {
         let _guard = self.lock.lock().unwrap();
 
         let snaphsot:SequenceNumber;
@@ -149,7 +149,7 @@ impl<W: WritableFile> DB for DBImpl<W> {
         let lkey = LookupKey::new(key, snaphsot);
         //let mut value:Option<Vec<u8>>= None;
         let mut value: Vec<u8>;
-        value= self.mem.get(&lkey).map_err(|e|{
+        /* value= self.mem.get(&lkey).map_err(|e|{
             match e {
                 Error::NotFound => {
                     if let Some(imem) = &self.imem {
@@ -162,7 +162,7 @@ impl<W: WritableFile> DB for DBImpl<W> {
                     Err(e);
                 }
             }
-        })?;
+        })?; */
         /* match self.mem.get(&lkey) {
             Ok(v) => return Ok(&v),
             Err((found, e)) => {

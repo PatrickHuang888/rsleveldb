@@ -218,7 +218,7 @@ pub trait DB: Sized {
     // a status for which Status::IsNotFound() returns true.
     //
     // May return some other Status on an error.
-    fn get(&mut self, options: &ReadOptions, key: &[u8]) -> api::Result<&[u8]>;
+    fn get(&mut self, options: &ReadOptions, key: &[u8], value:&mut Vec<u8>) -> api::Result<()>;
 
     // Set the database entry for "key" to "value".  Returns OK on success,
     // and a non-OK status on error.

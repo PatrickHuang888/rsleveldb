@@ -132,12 +132,13 @@ impl std::fmt::Display for DbError {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Error {
-    NotFound,
+    NotFound,  
     Corruption(String),
     NotSupported(String),
     InvalidArgument(String),
     IOError(String),
     Other(String),
+    InternalNotFound(bool), // bool used for Memtable get, true found deleted
 }
 
 impl From<std::io::Error> for Error {
@@ -155,6 +156,7 @@ impl Display for Error {
             Self::InvalidArgument(s) => write!(f, "Invalid Argument, {}", s),
             Self::IOError(s) => write!(f, "IO Error, {}", s),
             Self::Other(s) => write!(f, "Other, {}", s),
+            Self::InternalNotFound(b) => write!(f, "Internal Not Found {}", b),
         }
     }
 }
@@ -167,7 +169,8 @@ impl Error {
             Self::NotSupported(s) => Self::NotSupported(format! {"{}, {}", msg, s}),
             Self::InvalidArgument(s) => Self::InvalidArgument(format! {"{}, {}", msg, s}),
             Self::IOError(s) => Self::IOError(format! {"{}, {}", msg, s}),
-            Self::Other(s) => Self::Other(format! {"{}, {}", msg, s}),
+            Self::Other(s) => Self::Other(format! ("{}, {}", msg, s)),
+            Self::InternalNotFound(b) => Self::InternalNotFound(*b),
         }
     }
 }

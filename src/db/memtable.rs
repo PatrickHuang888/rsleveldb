@@ -87,7 +87,7 @@ impl MemTable {
     // If memtable contains a value for key, store it in value and return true.
     // If memtable contains a deletion for key, store a NotFound() error in status and return true.
     // Else, return false.
-    pub fn get(&mut self, key: &LookupKey) -> std::result::Result<Vec<u8>, (bool, api::Error)> {
+    pub fn get(&mut self, key: &LookupKey, value:&mut Vec<u8>) -> api::Result<()> {
         let memkey = key.memtable_key();
         let mut iter = self.table.new_iterator();
         iter.seek(&Vec::from(memkey));
@@ -103,7 +103,7 @@ impl MemTable {
             // all entries with overly large sequence numbers.
             let entry = iter.key();
             let (key_length, key_start) = util::get_varint32(&entry[..5]).map_err(|_|{
-                todo!();
+                api::Error::Corruption("decode key".to_string())
             })?;
             let key_end = key_start + (key_length as usize);
             if self
@@ -119,14 +119,13 @@ impl MemTable {
                 match (tag & 0xff).into() {
                     ValueType::TypeValue => {
                         let (v, _) = util::get_length_prefixed_slice(&entry[key_end..]).map_err(|_|{
-                            todo!()
+                            api::Error::Corruption("decode value".to_string())
                         })?;
-                        let mut value = Vec::with_capacity(v.len());
                         value.extend_from_slice(v);
-                        return Ok(value);
+                        return Ok(());
                     }
                     ValueType::TypeDeletion => {
-                        return Err((true, api::Error::NotFound));
+                        return Err(api::Error::InternalNotFound(true));
                     }
                     _ => {
                         panic!("value type unknown");
@@ -134,7 +133,7 @@ impl MemTable {
                 }
             }
         };
-        Err((false, api::Error::NotFound))
+        Err(api::Error::InternalNotFound(false))
     }
 
     // Add an entry into memtable that maps key to value at the
