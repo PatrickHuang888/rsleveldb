@@ -5,32 +5,57 @@ use crate::{api::{self, ReadOptions, Comparator}, util, config, SequenceNumber, 
 
 use super::{memtable::{LookupKey, InternalKeyComparator}, log};
 
-#[derive(Default)]
+#[derive(Default, PartialEq)]
 pub(crate) struct FileMetaData {
     number: u64,
     file_size: u64, // File size in bytes
     smallest: InternalKey,
     largest: InternalKey,
+
+    allowed_seeks:u32 // Seeks allowed until compaction
 }
 
 
 #[derive(Default)]
-pub(crate) struct GetStats(FileMetaData, u32);
+pub(crate) struct GetStats{
+    seek_file: Option<FileMetaData>, 
+    seek_file_level:u32,
+}
 
-pub(crate) struct Version {
+pub(crate) struct Version{
     //vset: VersionSet // VersionSet to which this Version belongs
+
+    // Next file to compact based on seek stats.
+    file_to_compact:Option<FileMetaData>,
+    file_to_compact_level:u32,
 }
 
 impl Version {
         // Lookup the value for key.  If found, store it in *val and
   // return OK.  Else return a non-OK status.  Fills *stats.
   // REQUIRES: lock is not held
-  fn get(&self, options:&ReadOptions, k:&LookupKey, stats:&GetStats) -> api::Result<&[u8]> {
+    pub fn get(&self, options:&ReadOptions, key:&LookupKey, value:&mut Vec<u8>) -> api::Result<GetStats> {
     todo!()
     }
 
     fn for_each_overlapping(&self, user_key:&[u8], internal_key:&[u8]) {
         
+    }
+
+    pub fn update_stats(&mut self, stats:GetStats) -> bool {
+        match stats.seek_file {
+            None => {
+                return false;
+            },
+            Some(mut seek_file) => {
+                seek_file.allowed_seeks -= 1;
+                if seek_file.allowed_seeks==0 && self.file_to_compact==None {
+                    self.file_to_compact = Some(seek_file);
+                    self.file_to_compact_level= stats.seek_file_level;
+                }
+                return true;
+            }
+        }
     }
 }
 
@@ -75,8 +100,8 @@ pub(crate) struct VersionSet {
 }
 
 impl VersionSet {
-    pub fn current(&self) -> &Version {
-        &self.current
+    pub fn current_mut(&mut self) -> &mut Version {
+        &mut self.current
     }
 }
 
@@ -226,6 +251,7 @@ impl VersionEdit {
         let f = FileMetaData {
             number: file,
             file_size,
+            allowed_seeks:0,
             smallest: smallest_key.clone(),
             largest: largest_key.clone(),
         };

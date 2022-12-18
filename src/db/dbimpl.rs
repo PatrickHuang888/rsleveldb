@@ -5,12 +5,12 @@ use std::sync::{Condvar, Mutex, MutexGuard};
 use std::collections::{self};
 
 use crate::api::{self, Error, ReadOptions, WriteOptions};
-use crate::{Options, WritableFile, WriteBatch, DB, NUM_NON_TABLE_CACHE_FILES, SequenceNumber};
+use crate::{Options, SequenceNumber, WritableFile, WriteBatch, DB, NUM_NON_TABLE_CACHE_FILES};
 
 use super::log::{self, Writer as LWriter};
 use super::memtable::{InternalKeyComparator, LookupKey, MemTable};
 use super::table_cache::TableCache;
-use super::version::{VersionSet, GetStats};
+use super::version::{GetStats, VersionSet};
 
 fn clip_to_range<V: Ord>(mut v: V, minvalue: V, maxvalue: V) {
     if v > maxvalue {
@@ -123,83 +123,47 @@ impl<W: WritableFile> DB for DBImpl<W> {
 
     fn get(&mut self, options: &ReadOptions, key: &[u8], value: &mut Vec<u8>) -> api::Result<()> {
         let _guard = self.lock.lock().unwrap();
-
-        let snaphsot:SequenceNumber;
+        let snaphsot: SequenceNumber;
         match &options.snapshot {
             None => {
-                snaphsot= self.versions.last_sequence();
-            },
+                snaphsot = self.versions.last_sequence();
+            }
             Some(ss) => {
-                snaphsot= ss.sequence_number();
-            },
+                snaphsot = ss.sequence_number();
+            }
         }
-
-        let current= self.versions.current();
-
-        let mut have_stat_update= false;
-        let stats= GetStats::default();
-
         // Unlock while reading from files and memtables
         drop(_guard);
 
-        //let mut found: bool;
-        //let mut status: api::Error;
-
         // First look in the memtable, then in the immutable memtable (if any).
         let lkey = LookupKey::new(key, snaphsot);
-        //let mut value:Option<Vec<u8>>= None;
-        let mut value: Vec<u8>;
-        /* value= self.mem.get(&lkey).map_err(|e|{
+
+        if let Some(e) = self.mem.get(&lkey, value).err() {
             match e {
-                Error::NotFound => {
-                    if let Some(imem) = &self.imem {
-                        value = imem.get(&lkey).map_err(|e|{
-                            Err(e);
-                        })?;
+                Error::InternalNotFound(deleted) => {
+                    if deleted {
+                        return Err(api::Error::NotFound);
+                    } else {
+                        // todo: imm get
+
+                        let current = self.versions.current_mut();
+                        let stats = current.get(options, &lkey, value)?;
+
+                        // lock again
+                        let _guard = self.lock.lock().unwrap();
+                        if current.update_stats(stats) {
+                            //maybe_schedule_compaction();
+                            todo!()
+                        }
+                        return Ok(());
                     }
                 },
                 _ => {
-                    Err(e);
-                }
-            }
-        })?; */
-        /* match self.mem.get(&lkey) {
-            Ok(v) => return Ok(&v),
-            Err((found, e)) => {
-                if found {
                     return Err(e);
-                } else {
-                    if let Some(imem) = &mut self.imem {
-                        match imem.get(&lkey) {
-                            Ok(v) => return Ok(&v),
-                            Err((found, e)) => {
-                                if found {
-                                    return Err(e);
-                                } else {
-                                    // current search
-                                }
-                            }
-                        }
-                    } else {
-                        // current search
-                    }
                 }
-            }
-        } */
-
-        //let _guard = self.lock.lock().unwrap();
-
-        // extra steps
-
-        /* match value {
-            None => {
-                Err(Error::NotFound)
-            }
-            Some(v)=> {
-                Ok(v)
-            }
-        } */
-        Err(Error::NotFound)
+            } 
+        }
+        Ok(())
     }
 
     fn delete(&mut self, options: &WriteOptions, key: &[u8]) -> api::Result<()> {
