@@ -153,7 +153,7 @@ NOTE: All fixed-length integer are little-endian.
 // restarts[i] contains the offset within the block of the ith restart point.
 
 mod block;
-mod table;
+pub mod table;
 
 // 1-byte type + 32-bit crc
 const BLOCK_TRAILER_SIZE: usize = 5;
@@ -214,11 +214,10 @@ mod tests {
 
     use crate::{
         api::{self, Iterator},
-        db::{
-            memtable::{self, InternalKeyComparator, MemTable, MemTableIterator},
-        },
+        db::memtable::{self, InternalKeyComparator, MemTable, MemTableIterator},
+        pack_sequence_and_type, parse_internal_key,
         table::table::{ReadOptions, Table},
-        util, Options, RandomAccessFile, WritableFile, ValueType, parse_internal_key, pack_sequence_and_type, MAX_SEQUENCE_NUMBER,
+        util, Options, RandomAccessFile, ValueType, WritableFile, MAX_SEQUENCE_NUMBER,
     };
 
     use super::{
@@ -258,7 +257,7 @@ mod tests {
             let mut sink = StringSink {
                 contents: Vec::new(),
             };
-            let file_size: usize;
+            let file_size: u64;
 
             {
                 let mut builder = TableBuilder::new(&mut sink, options.clone());
@@ -270,13 +269,13 @@ mod tests {
                 file_size = builder.file_size();
             }
 
-            assert_eq!(sink.contents.len(), file_size);
+            assert_eq!(sink.contents.len(), file_size as usize);
 
             let source = Rc::new(StringSource {
                 contents: sink.contents,
             });
 
-            let table = Table::open(options.clone(), source, file_size)?;
+            let table = Table::open(options.clone(), source, file_size as usize)?;
             self.table = Some(table);
 
             Ok(())

@@ -241,8 +241,8 @@ impl<'a, W: WritableFile> TableBuilder<'a, W> {
         self.num_entries
     }
 
-    pub fn file_size(&self) -> usize {
-        self.offset
+    pub fn file_size(&self) -> u64 {
+        self.offset as u64
     }
 }
 

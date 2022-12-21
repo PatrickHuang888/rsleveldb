@@ -1,57 +1,64 @@
-
 use std::rc::Rc;
 
-use crate::{api::{self, ReadOptions, Comparator}, util, config, SequenceNumber, InternalKey};
+use crate::{
+    api::{self, Comparator, ReadOptions},
+    config, util, InternalKey, SequenceNumber,
+};
 
-use super::{memtable::{LookupKey, InternalKeyComparator}, log};
+use super::{
+    log,
+    memtable::{InternalKeyComparator, LookupKey},
+};
 
 #[derive(Default, PartialEq)]
 pub(crate) struct FileMetaData {
-    number: u64,
-    file_size: u64, // File size in bytes
-    smallest: InternalKey,
-    largest: InternalKey,
+    pub number: u64,
+    pub file_size: u64, // File size in bytes
+    pub smallest: InternalKey,
+    pub largest: InternalKey,
 
-    allowed_seeks:u32 // Seeks allowed until compaction
+    pub allowed_seeks: u32, // Seeks allowed until compaction
 }
-
 
 #[derive(Default)]
-pub(crate) struct GetStats{
-    seek_file: Option<FileMetaData>, 
-    seek_file_level:u32,
+pub(crate) struct GetStats {
+    seek_file: Option<FileMetaData>,
+    seek_file_level: u32,
 }
 
-pub(crate) struct Version{
+pub(crate) struct Version {
     //vset: VersionSet // VersionSet to which this Version belongs
 
     // Next file to compact based on seek stats.
-    file_to_compact:Option<FileMetaData>,
-    file_to_compact_level:u32,
+    file_to_compact: Option<FileMetaData>,
+    file_to_compact_level: u32,
 }
 
 impl Version {
-        // Lookup the value for key.  If found, store it in *val and
-  // return OK.  Else return a non-OK status.  Fills *stats.
-  // REQUIRES: lock is not held
-    pub fn get(&self, options:&ReadOptions, key:&LookupKey, value:&mut Vec<u8>) -> api::Result<GetStats> {
-    todo!()
+    // Lookup the value for key.  If found, store it in *val and
+    // return OK.  Else return a non-OK status.  Fills *stats.
+    // REQUIRES: lock is not held
+    pub fn get(
+        &self,
+        options: &ReadOptions,
+        key: &LookupKey,
+        value: &mut Vec<u8>,
+    ) -> api::Result<GetStats> {
+        todo!()
     }
 
-    fn for_each_overlapping(&self, user_key:&[u8], internal_key:&[u8]) {
-        
-    }
+    fn for_each_overlapping(&self, user_key: &[u8], internal_key: &[u8]) {}
 
-    pub fn update_stats(&mut self, stats:GetStats) -> bool {
+    pub fn update_stats(&mut self, stats: GetStats) -> bool {
         match stats.seek_file {
             None => {
                 return false;
-            },
+            }
             Some(mut seek_file) => {
                 seek_file.allowed_seeks -= 1;
-                if seek_file.allowed_seeks==0 && self.file_to_compact==None {
+                if seek_file.allowed_seeks == 0 && self.file_to_compact == None {
                     self.file_to_compact = Some(seek_file);
-                    self.file_to_compact_level= stats.seek_file_level;
+                    self.file_to_compact_level = stats.seek_file_level;
                 }
                 return true;
             }
@@ -62,17 +69,17 @@ impl Version {
 struct State {
     saver: Saver,
     stats: GetStats,
-    options:ReadOptions,
+    options: ReadOptions,
     ikey: Vec<u8>,
     last_file_read: FileMetaData,
-    last_file_read_level:u32,
+    last_file_read_level: u32,
 
     vset: VersionSet,
-    found:bool,
+    found: bool,
 }
 
 impl State {
-    fn fn_match(&self, level:u32, f: FileMetaData) -> bool {
+    fn fn_match(&self, level: u32, f: FileMetaData) -> bool {
         todo!()
     }
 }
@@ -87,16 +94,16 @@ enum SaverState {
 struct Saver {
     state: SaverState,
     ucmp: Rc<dyn Comparator>,
-    user_key:Vec<u8>,
+    user_key: Vec<u8>,
     value: Vec<u8>,
 }
 
 pub(crate) struct VersionSet {
     last_sequence: u64,
     current: Version,
-    log_number:u64,
-    next_file_number:u64,
-    prev_log_number:u64, // 0 or backing store for memtable being compacted
+    log_number: u64,
+    next_file_number: u64,
+    prev_log_number: u64, // 0 or backing store for memtable being compacted
 }
 
 impl VersionSet {
@@ -106,16 +113,23 @@ impl VersionSet {
 }
 
 impl VersionSet {
+    // Allocate and return a new file number
+    pub fn new_file_number(&mut self) -> u64 {
+        let r = self.next_file_number;
+        self.next_file_number += 1;
+        r
+    }
+
     // Apply *edit to the current version to form a new descriptor that
-  // is both saved to persistent state and installed as the new
-  // current version.  Will release *mu while actually writing to the file.
-  // REQUIRES: *mu is held on entry.
-  // REQUIRES: no other thread concurrently calls LogAndApply()
-    fn log_and_apply(&self, edit:&mut VersionEdit) -> api::Result<()> {
+    // is both saved to persistent state and installed as the new
+    // current version.  Will release *mu while actually writing to the file.
+    // REQUIRES: *mu is held on entry.
+    // REQUIRES: no other thread concurrently calls LogAndApply()
+    fn log_and_apply(&self, edit: &mut VersionEdit) -> api::Result<()> {
         match edit.log_number {
             None => {
                 edit.set_log_number(self.log_number);
-            },
+            }
             Some(log_number) => {
                 assert!(log_number >= self.log_number);
                 assert!(log_number < self.next_file_number);
@@ -128,8 +142,6 @@ impl VersionSet {
 
         edit.set_next_file(self.next_file_number);
         edit.set_last_sequence(self.last_sequence);
-
-
 
         Ok(())
     }
@@ -152,10 +164,9 @@ impl VersionSet {
     }
 }
 
-
 // Helper to sort by v->files_[file_number].smallest
 struct BySmallestKey {
-    internal_comparator:InternalKeyComparator,
+    internal_comparator: InternalKeyComparator,
 }
 impl BySmallestKey {
     fn compare(&self, f1: &FileMetaData, f2: &FileMetaData) -> std::cmp::Ordering {
@@ -164,7 +175,7 @@ impl BySmallestKey {
 }
 
 struct LevelState {
-    deleted_files:Vec<u64>,
+    deleted_files: Vec<u64>,
     added_files: Vec<(FileMetaData, BySmallestKey)>,
 }
 // A helper class so we can efficiently apply a whole sequence
@@ -209,7 +220,7 @@ impl From<u32> for Tag {
 #[derive(Default)]
 pub(super) struct VersionEdit {
     compact_pointers: Vec<(u32, InternalKey)>, // (level, key)
-    deleted_files: Vec<(u32, u64)>,        // (level, file_number)
+    deleted_files: Vec<(u32, u64)>,            // (level, file_number)
     new_files: Vec<(u32, FileMetaData)>,
 
     comparator_name: Option<String>,
@@ -220,38 +231,45 @@ pub(super) struct VersionEdit {
 }
 
 impl VersionEdit {
-    fn set_comparator_name(&mut self, name:&str) {
-        self.comparator_name= Some(name.to_string());
+    fn set_comparator_name(&mut self, name: &str) {
+        self.comparator_name = Some(name.to_string());
     }
 
-    fn set_log_number(&mut self, num:u64) {
-        self.log_number= Some(num);
+    fn set_log_number(&mut self, num: u64) {
+        self.log_number = Some(num);
     }
 
-    fn set_prev_log_number(&mut self, num:u64) {
-        self.prev_log_number= Some(num);
+    fn set_prev_log_number(&mut self, num: u64) {
+        self.prev_log_number = Some(num);
     }
 
-    fn set_next_file(&mut self, num:u64) {
-        self.next_file_number= Some(num);
+    fn set_next_file(&mut self, num: u64) {
+        self.next_file_number = Some(num);
     }
 
-    fn set_last_sequence(&mut self, seq:SequenceNumber) {
-        self.last_sequence= Some(seq);
+    fn set_last_sequence(&mut self, seq: SequenceNumber) {
+        self.last_sequence = Some(seq);
     }
 
-    fn set_compact_pointer(&mut self, level:u32, key:&InternalKey) {
+    fn set_compact_pointer(&mut self, level: u32, key: &InternalKey) {
         self.compact_pointers.push((level, key.clone()));
     }
 
     // Add the specified file at the specified number.
     // REQUIRES: This version has not been saved (see VersionSet::SaveTo)
     // REQUIRES: "smallest" and "largest" are smallest and largest keys in file
-    fn add_file(&mut self, level: u32, file: u64, file_size: u64, smallest_key: &InternalKey, largest_key: &InternalKey) {
+    fn add_file(
+        &mut self,
+        level: u32,
+        file: u64,
+        file_size: u64,
+        smallest_key: &InternalKey,
+        largest_key: &InternalKey,
+    ) {
         let f = FileMetaData {
             number: file,
             file_size,
-            allowed_seeks:0,
+            allowed_seeks: 0,
             smallest: smallest_key.clone(),
             largest: largest_key.clone(),
         };
@@ -386,10 +404,10 @@ impl VersionEdit {
                     f.file_size = fs;
                     let (smallest, s_size) = get_internal_key(&input[offset..])?;
                     offset += s_size;
-                    f.smallest= smallest;
+                    f.smallest = smallest;
                     let (largest, s_size) = get_internal_key(&input[offset..])?;
                     offset += s_size;
-                    f.largest= largest;
+                    f.largest = largest;
 
                     new_files.push((level, f));
                 }
@@ -427,32 +445,39 @@ fn get_level(input: &[u8]) -> api::Result<(u32, usize)> {
 fn get_internal_key(input: &[u8]) -> api::Result<(InternalKey, usize)> {
     let (s, s_size) = util::get_length_prefixed_slice(input)
         .map_err(|_| api::Error::Corruption("get internal key".to_string()))?;
-        Ok((InternalKey{rep:Vec::from(s)}, s_size))
+    Ok((InternalKey { rep: Vec::from(s) }, s_size))
 }
 
-
 mod test {
-    use crate::{ValueType, InternalKey};
+    use crate::{InternalKey, ValueType};
 
     use super::VersionEdit;
 
-    const BIG:u64= 1u64 << 50;
+    const BIG: u64 = 1u64 << 50;
 
     #[test]
     fn test_version_edit() {
-        let mut edit= VersionEdit::default();
+        let mut edit = VersionEdit::default();
         for i in 0..4 {
             test_encode_decode(&edit);
-            edit.add_file(3, BIG+300+i, BIG+400+i, &InternalKey::new("foo".as_bytes(), BIG+500+i, ValueType::TypeValue),
-        &InternalKey::new("zoo".as_bytes(), BIG+600+i, ValueType::TypeDeletion));
-        edit.remove_file(4, BIG+700+i);
-        edit.set_compact_pointer(i as u32, &InternalKey::new("x".as_bytes(), BIG+900+1, ValueType::TypeValue));
+            edit.add_file(
+                3,
+                BIG + 300 + i,
+                BIG + 400 + i,
+                &InternalKey::new("foo".as_bytes(), BIG + 500 + i, ValueType::TypeValue),
+                &InternalKey::new("zoo".as_bytes(), BIG + 600 + i, ValueType::TypeDeletion),
+            );
+            edit.remove_file(4, BIG + 700 + i);
+            edit.set_compact_pointer(
+                i as u32,
+                &InternalKey::new("x".as_bytes(), BIG + 900 + 1, ValueType::TypeValue),
+            );
         }
 
         edit.set_comparator_name("foot");
-        edit.set_log_number(BIG+100);
-        edit.set_next_file(BIG+200);
-        edit.set_last_sequence(BIG+1000);
+        edit.set_log_number(BIG + 100);
+        edit.set_next_file(BIG + 200);
+        edit.set_last_sequence(BIG + 1000);
 
         test_encode_decode(&edit)
     }
@@ -460,10 +485,10 @@ mod test {
     fn test_encode_decode(edit: &VersionEdit) {
         let mut encoded = Vec::new();
         edit.encode_to(&mut encoded);
-        let decode_result= VersionEdit::decode_from(&encoded);
+        let decode_result = VersionEdit::decode_from(&encoded);
         assert!(decode_result.is_ok());
-        let mut encoded2= Vec::new();
-        let parsed= decode_result.unwrap();
+        let mut encoded2 = Vec::new();
+        let parsed = decode_result.unwrap();
         parsed.encode_to(&mut encoded2);
         assert_eq!(encoded, encoded2);
     }

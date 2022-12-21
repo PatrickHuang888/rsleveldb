@@ -218,7 +218,7 @@ pub trait DB: Sized {
     // a status for which Status::IsNotFound() returns true.
     //
     // May return some other Status on an error.
-    fn get(&mut self, options: &ReadOptions, key: &[u8], value:&mut Vec<u8>) -> api::Result<()>;
+    fn get(&mut self, options: &ReadOptions, key: &[u8], value: &mut Vec<u8>) -> api::Result<()>;
 
     // Set the database entry for "key" to "value".  Returns OK on success,
     // and a non-OK status on error.
@@ -292,27 +292,30 @@ impl WriteBatch {
         let mut key: &[u8];
         let mut value: &[u8];
         let mut found = 0;
-        let mut offset= 0;
-        while offset <  input.len() {
+        let mut offset = 0;
+        while offset < input.len() {
             found += 1;
             let tag: ValueType = ValueType::from(input[offset]);
             offset += 1;
             match tag {
                 ValueType::TypeValue => {
-                    let(key, key_size) = util::get_length_prefixed_slice(&input[offset..]).map_err(|_|{
-                        api::Error::Corruption("bad WriteBatch put, key".to_string())
-                    })?;
-                    offset+=key_size;
-                    let (value, value_size) = util::get_length_prefixed_slice(&input[offset..]).map_err(|_|{
-                        api::Error::Corruption("bad WriteBatch put, value".to_string())
-                    })?;
+                    let (key, key_size) = util::get_length_prefixed_slice(&input[offset..])
+                        .map_err(|_| {
+                            api::Error::Corruption("bad WriteBatch put, key".to_string())
+                        })?;
+                    offset += key_size;
+                    let (value, value_size) = util::get_length_prefixed_slice(&input[offset..])
+                        .map_err(|_| {
+                            api::Error::Corruption("bad WriteBatch put, value".to_string())
+                        })?;
                     offset += value_size;
                     handler.put(key, value);
                 }
                 ValueType::TypeDeletion => {
-                    let (key, key_size) = util::get_length_prefixed_slice(&input[offset..]).map_err(|_|{
-                        api::Error::Corruption(String::from("bad WriteBatch delete, key"))
-                    })?;
+                    let (key, key_size) = util::get_length_prefixed_slice(&input[offset..])
+                        .map_err(|_| {
+                            api::Error::Corruption(String::from("bad WriteBatch delete, key"))
+                        })?;
                     offset += key_size;
                     handler.delete(key);
                 }
@@ -424,8 +427,8 @@ struct InternalKey {
 }
 
 impl InternalKey {
-    fn new(user_key:&[u8], s:SequenceNumber, t:ValueType) -> Self {
-        let mut rep= Vec::new();
+    fn new(user_key: &[u8], s: SequenceNumber, t: ValueType) -> Self {
+        let mut rep = Vec::new();
         rep.extend_from_slice(user_key);
         util::put_fixed64(&mut rep, pack_sequence_and_type(s, t));
         InternalKey { rep }
@@ -435,10 +438,14 @@ impl InternalKey {
         extract_user_key(&self.rep)
     }
 
+    fn decode_from(&mut self, s: &[u8]) -> bool {
+        self.rep.clear();
+        self.rep.extend_from_slice(s);
+        !self.rep.is_empty()
+    }
 }
 
 fn extract_user_key(internal_key: &[u8]) -> &[u8] {
     assert!(internal_key.len() >= 8);
     return &internal_key[..internal_key.len() - 8];
 }
-

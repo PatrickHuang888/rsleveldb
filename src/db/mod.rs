@@ -1,8 +1,19 @@
-use std::{rc::Rc, cell::{RefCell, Cell}, ptr::NonNull};
+use std::{
+    cell::{Cell, RefCell},
+    ptr::NonNull,
+    rc::Rc,
+};
 
-use crate::{api, util, Options, SequenceNumber};
+use crate::{
+    api::{self, Iterator},
+    table::table::TableBuilder,
+    util, Options, SequenceNumber, WritableFile,
+};
+
+use self::{memtable::MemTableIterator, version::FileMetaData};
 
 mod dbimpl;
+mod filename;
 mod log;
 pub mod memtable;
 mod skiplist;
@@ -10,17 +21,15 @@ mod table_cache;
 mod version;
 pub mod write_batch;
 
-
-
 // Snapshots are kept in a doubly-linked list in the DB.
 // Each SnapshotImpl corresponds to a particular sequence number.
 // Abstract handle to particular state of a DB.
 // A Snapshot is an immutable object and can therefore be safely
 // accessed from multiple threads without any external synchronization.
 #[derive(PartialEq, Debug)]
-pub struct Snapshot{
-    sequence_number:SequenceNumber,
-    index:usize,
+pub struct Snapshot {
+    sequence_number: SequenceNumber,
+    index: usize,
 }
 
 impl Snapshot {
@@ -30,12 +39,12 @@ impl Snapshot {
 }
 
 struct SnapshotList {
-    list:Vec<Snapshot>
+    list: Vec<Snapshot>,
 }
 
 impl SnapshotList {
     fn new() -> Self {
-        let list= Vec::new();
+        let list = Vec::new();
         SnapshotList { list }
     }
 
@@ -46,34 +55,76 @@ impl SnapshotList {
     fn oldest(&self) -> &Snapshot {
         assert!(!self.empty());
         &self.list[0]
-    } 
+    }
 
     fn newest(&self) -> &Snapshot {
         assert!(!self.empty());
-        &self.list[self.list.len()-1]
+        &self.list[self.list.len() - 1]
     }
 
     // Creates a SnapshotImpl and appends it to the end of the list.
-    fn new_snapshot(&mut self, sequence_number:SequenceNumber) -> &Snapshot{
+    fn new_snapshot(&mut self, sequence_number: SequenceNumber) -> &Snapshot {
         let index = self.list.len();
-        let snapshot= Snapshot{sequence_number, index};        
+        let snapshot = Snapshot {
+            sequence_number,
+            index,
+        };
         self.list.push(snapshot);
         self.newest()
     }
 
     // Removes a SnapshotImpl from this list.
-  //
-  // The snapshot must have been created by calling New() on this list.
-  //
-  // The snapshot pointer should not be const, because its memory is
-  // deallocated. However, that would force us to change DB::ReleaseSnapshot(),
-  // which is in the API, and currently takes a const Snapshot.
-    fn delete(&mut self, snapshot:&Snapshot) {
+    //
+    // The snapshot must have been created by calling New() on this list.
+    //
+    // The snapshot pointer should not be const, because its memory is
+    // deallocated. However, that would force us to change DB::ReleaseSnapshot(),
+    // which is in the API, and currently takes a const Snapshot.
+    fn delete(&mut self, snapshot: &Snapshot) {
         // not sure using vec is approporate rightnoew, considering of O[n]
         self.list.remove(snapshot.index);
     }
 }
 
+fn build_table(
+    dbname: &str,
+    options: &Options,
+    iter: &mut MemTableIterator,
+    meta: &mut FileMetaData,
+) -> api::Result<()> {
+    meta.file_size = 0;
+    iter.seek_to_first()?;
+
+    let fname = filename::table_file_name(dbname, meta.number);
+    let mut file = util::new_writable_file(fname)?;
+
+    {
+        let mut builder = TableBuilder::new(&mut file, options.clone());
+        meta.smallest.decode_from(iter.key().unwrap());
+        let mut key = Vec::new();
+        while iter.valid().unwrap() {
+            key.clear();
+            key.extend_from_slice(iter.key().unwrap());
+            builder.add(&key, iter.value().unwrap())?;
+            iter.next();
+        }
+        if !key.is_empty() {
+            meta.largest.decode_from(&key);
+        }
+
+        builder.finish()?;
+        meta.file_size = builder.file_size();
+        assert!(meta.file_size > 0);
+    }
+
+    file.sync()?;
+    file.close()?;
+
+    // Verify that the table is usable
+    // todo: table_cache
+
+    Ok(())
+}
 
 mod test {
     use std::{default, env, ops::AddAssign};

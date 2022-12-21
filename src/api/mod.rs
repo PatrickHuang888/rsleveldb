@@ -132,7 +132,7 @@ impl std::fmt::Display for DbError {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Error {
-    NotFound,  
+    NotFound,
     Corruption(String),
     NotSupported(String),
     InvalidArgument(String),
@@ -169,7 +169,7 @@ impl Error {
             Self::NotSupported(s) => Self::NotSupported(format! {"{}, {}", msg, s}),
             Self::InvalidArgument(s) => Self::InvalidArgument(format! {"{}, {}", msg, s}),
             Self::IOError(s) => Self::IOError(format! {"{}, {}", msg, s}),
-            Self::Other(s) => Self::Other(format! ("{}, {}", msg, s)),
+            Self::Other(s) => Self::Other(format!("{}, {}", msg, s)),
             Self::InternalNotFound(b) => Self::InternalNotFound(*b),
         }
     }
@@ -209,4 +209,3 @@ pub struct ReadOptions {
     // snapshot of the state at the beginning of this read operation.
     pub snapshot: Option<Snapshot>,
 }
-

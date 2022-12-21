@@ -5,12 +5,13 @@ use std::sync::{Condvar, Mutex, MutexGuard};
 use std::collections::{self};
 
 use crate::api::{self, Error, ReadOptions, WriteOptions};
+use crate::db::version::VersionEdit;
 use crate::{Options, SequenceNumber, WritableFile, WriteBatch, DB, NUM_NON_TABLE_CACHE_FILES};
 
 use super::log::{self, Writer as LWriter};
 use super::memtable::{InternalKeyComparator, LookupKey, MemTable};
 use super::table_cache::TableCache;
-use super::version::{GetStats, VersionSet};
+use super::version::{FileMetaData, GetStats, Version, VersionSet};
 
 fn clip_to_range<V: Ord>(mut v: V, minvalue: V, maxvalue: V) {
     if v > maxvalue {
@@ -63,6 +64,10 @@ struct DBImpl<W: WritableFile> {
     log_file: Rc<RefCell<W>>,
     // table_cache_ provides its own synchronization
     table_cache: TableCache,
+
+    // Set of table files to protect from deletion because they are
+    // part of ongoing compactions.
+    pending_outputs: Vec<u64>,
 }
 
 fn table_cache_size(sanitized_options: &Options) -> usize {
@@ -89,6 +94,7 @@ impl<W: WritableFile> DBImpl<W> {
             options,
             dbname,
             table_cache,
+            pending_outputs: Vec::new(),
         }
     }
 
@@ -112,6 +118,37 @@ impl<W: WritableFile> DBImpl<W> {
           }
           */
         // todo:
+        Ok(())
+    }
+
+    fn compact_memtable(&mut self) {
+        assert!(self.imem.is_some());
+
+        // Save the contents of the memtable as a new Table
+        let edit = VersionEdit::default();
+        let base = self.versions.current_mut();
+    }
+
+    fn write_level0_table(
+        &mut self,
+        mem: &mut MemTable,
+        edit: &VersionEdit,
+        base: &mut Version,
+    ) -> api::Result<()> {
+        //assert lock held
+
+        //let start_micros:u64= util::now_micros();
+        let mut meta = FileMetaData::default();
+        meta.number = self.versions.new_file_number();
+        self.pending_outputs.push(meta.number);
+        let it = mem.new_iter();
+
+        // todo: log
+        //drop(lock);
+        // build table
+        //lock.lock();
+        // todo: log
+
         Ok(())
     }
 }
@@ -157,11 +194,11 @@ impl<W: WritableFile> DB for DBImpl<W> {
                         }
                         return Ok(());
                     }
-                },
+                }
                 _ => {
                     return Err(e);
                 }
-            } 
+            }
         }
         Ok(())
     }

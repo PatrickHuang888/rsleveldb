@@ -1,7 +1,28 @@
 use crc::{Crc, CRC_32_ISCSI};
 use rand::{rngs::ThreadRng, thread_rng, Rng};
 
-use crate::api;
+use crate::{api, WritableFile};
+
+struct Oops {}
+impl WritableFile for Oops {
+    fn append(&mut self, data: &[u8]) -> api::Result<()> {
+        todo!()
+    }
+    fn close(&mut self) -> api::Result<()> {
+        todo!()
+    }
+    fn flush(&mut self) -> api::Result<()> {
+        todo!()
+    }
+    fn sync(&mut self) -> api::Result<()> {
+        todo!()
+    }
+}
+
+pub fn new_writable_file(fname: String) -> api::Result<impl WritableFile> {
+    todo!();
+    Ok(Oops {})
+}
 
 static B: u8 = 0x80;
 

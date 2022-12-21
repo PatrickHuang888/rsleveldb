@@ -5,12 +5,12 @@ use std::{
 
 use crate::{
     api::{self, Comparator},
-    util::{self, decode_fixed64}, ValueType, SequenceNumber, pack_sequence_and_type, extract_user_key, MAX_SEQUENCE_NUMBER, InternalKey,
+    extract_user_key, pack_sequence_and_type,
+    util::{self, decode_fixed64},
+    InternalKey, SequenceNumber, ValueType, MAX_SEQUENCE_NUMBER,
 };
 
-use super::{
-    skiplist::{Comparator as SkipListComparator, Iterator, SkipList, SkipListIterator},
-};
+use super::skiplist::{Comparator as SkipListComparator, Iterator, SkipList, SkipListIterator};
 
 type Table = SkipList<KeyComparator, Vec<u8>>;
 type TableIterator<'a> = SkipListIterator<'a, KeyComparator, Vec<u8>>;
@@ -87,7 +87,7 @@ impl MemTable {
     // If memtable contains a value for key, store it in value and return true.
     // If memtable contains a deletion for key, store a NotFound() error in status and return true.
     // Else, return false.
-    pub fn get(&mut self, key: &LookupKey, value:&mut Vec<u8>) -> api::Result<()> {
+    pub fn get(&mut self, key: &LookupKey, value: &mut Vec<u8>) -> api::Result<()> {
         let memkey = key.memtable_key();
         let mut iter = self.table.new_iterator();
         iter.seek(&Vec::from(memkey));
@@ -102,9 +102,8 @@ impl MemTable {
             // sequence number since the Seek() call above should have skipped
             // all entries with overly large sequence numbers.
             let entry = iter.key();
-            let (key_length, key_start) = util::get_varint32(&entry[..5]).map_err(|_|{
-                api::Error::Corruption("decode key".to_string())
-            })?;
+            let (key_length, key_start) = util::get_varint32(&entry[..5])
+                .map_err(|_| api::Error::Corruption("decode key".to_string()))?;
             let key_end = key_start + (key_length as usize);
             if self
                 .comparator
@@ -118,9 +117,8 @@ impl MemTable {
                 let tag = util::decode_fixed64(&entry[key_end - 8..key_end]) as u8;
                 match (tag & 0xff).into() {
                     ValueType::TypeValue => {
-                        let (v, _) = util::get_length_prefixed_slice(&entry[key_end..]).map_err(|_|{
-                            api::Error::Corruption("decode value".to_string())
-                        })?;
+                        let (v, _) = util::get_length_prefixed_slice(&entry[key_end..])
+                            .map_err(|_| api::Error::Corruption("decode value".to_string()))?;
                         value.extend_from_slice(v);
                         return Ok(());
                     }
@@ -178,20 +176,17 @@ pub(crate) struct MemTableIterator<'a> {
 
 impl<'a> api::Iterator for MemTableIterator<'a> {
     fn key(&self) -> api::Result<&[u8]> {
-        let (key, _)= util::get_length_prefixed_slice(self.iter.key()).map_err(|_|{
-            api::Error::Corruption("key".to_string())
-        })?;
+        let (key, _) = util::get_length_prefixed_slice(self.iter.key())
+            .map_err(|_| api::Error::Corruption("key".to_string()))?;
         Ok(key)
     }
 
     fn value(&self) -> api::Result<&[u8]> {
         let kv = self.iter.key();
-        let (_, offset) = util::get_length_prefixed_slice(kv).map_err(|_|{
-            api::Error::Corruption("value".to_string())
-        })?;
-        let (value, _) = util::get_length_prefixed_slice(&kv[offset..]).map_err(|_|{
-            api::Error::Corruption("value".to_string())
-        })?;
+        let (_, offset) = util::get_length_prefixed_slice(kv)
+            .map_err(|_| api::Error::Corruption("value".to_string()))?;
+        let (value, _) = util::get_length_prefixed_slice(&kv[offset..])
+            .map_err(|_| api::Error::Corruption("value".to_string()))?;
         Ok(value)
     }
 
@@ -315,7 +310,6 @@ impl api::Comparator for InternalKeyComparator {
     }
 }
 
-
 fn encode_key(scratch: &mut Vec<u8>, key: &[u8]) {
     scratch.clear();
     util::put_varint32(scratch, key.len() as u32);
@@ -335,4 +329,3 @@ impl super::skiplist::Comparator<Vec<u8>> for KeyComparator {
         api::Comparator::compare(&self.comparator, a, b)
     }
 }
-
