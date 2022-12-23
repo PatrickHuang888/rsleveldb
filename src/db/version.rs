@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use crate::{
     api::{self, Comparator, ReadOptions},
-    config, util, InternalKey, SequenceNumber,
+    config, util, InternalKey, SequenceNumber, MAX_SEQUENCE_NUMBER, TYPE_FOR_SEEK,
 };
 
 use super::{
@@ -64,7 +64,79 @@ impl Version {
             }
         }
     }
+
+      // Return the level at which we should place a new memtable compaction
+  // result that covers the range [smallest_user_key,largest_user_key].
+    pub fn pick_level_for_memtable_output(&self, smallest_user_key:&[u8], largest_user_key:&[u8]) -> u32 {
+        let mut level= 0;
+
+    }
+
+    // Returns true iff some file in the specified level overlaps
+  // some part of [*smallest_user_key,*largest_user_key].
+  // smallest_user_key==nullptr represents a key smaller than all the DB's keys.
+  // largest_user_key==nullptr represents a key largest than all the DB's keys.
+    fn overlap_in_level(&self, smallest_user_key:Option<&u8>, largest_user_key:Option<&[u8]>) -> bool {
+
+    }
+
 }
+
+// Returns true iff some file in "files" overlaps the user key range
+// [*smallest,*largest].
+// smallest==nullptr represents a key smaller than all keys in the DB.
+// largest==nullptr represents a key largest than all keys in the DB.
+// REQUIRES: If disjoint_sorted_files, files[] contains disjoint ranges
+//           in sorted order.
+fn some_file_overlaps_range(icmp:&InternalKeyComparator, disjoint_sorted_files:bool, files:Vec<&FileMetaData>,
+     smallest_user_key_opt:Option<&[u8]>, largest_user_key_opt:Option<&[u8]>) -> bool {
+        let ucmp= icmp.user_comparator();
+        if !disjoint_sorted_files {
+            // Need to check against all files
+            for i in 0..files.len() {
+                let f= files[i];
+                if after_file(ucmp, smallest_user_key_opt, f) || before_file(ucmp, largest_user_key_opt, f) {
+                    // No overlap
+                }else {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Binary search over file list
+        let mut index= 0;
+        if let Some(smallest_user_key) = smallest_user_key_opt {
+            // Find the earliest possible internal key for smallest_user_key
+            let small_key= InternalKey::new(smallest_user_key, MAX_SEQUENCE_NUMBER, TYPE_FOR_SEEK);
+            todo!()
+            //index= find_file(icmp, files, small_key.encode());
+        }
+
+        if index >= files.len() {
+            // beginning of range is after all files, so no overlap.
+            return false;
+        }
+        
+        !before_file(ucmp, largest_user_key_opt, files[index])
+}
+
+fn after_file(ucmp:Rc<dyn api::Comparator>, user_key_opt:Option<&[u8]>, f: &FileMetaData) -> bool{
+    // null user_key occurs before all keys and is therefore never after *f
+    if let Some(user_key) = user_key_opt {
+        return ucmp.compare(user_key, f.largest.user_key()).is_lt();
+    }
+    return false;
+}
+
+fn before_file(ucmp:Rc<dyn api::Comparator>, user_key_opt:Option<&[u8]>, f:&FileMetaData) -> bool {
+    // null user_key occurs after all keys and is therefore never before *f
+    if let Some(user_key) = user_key_opt {
+        return ucmp.compare(user_key, f.smallest.user_key()).is_lt();
+    }
+    return false;
+}
+
 
 struct State {
     saver: Saver,
@@ -104,6 +176,7 @@ pub(crate) struct VersionSet {
     log_number: u64,
     next_file_number: u64,
     prev_log_number: u64, // 0 or backing store for memtable being compacted
+    icmp: InternalKeyComparator
 }
 
 impl VersionSet {
@@ -258,7 +331,7 @@ impl VersionEdit {
     // Add the specified file at the specified number.
     // REQUIRES: This version has not been saved (see VersionSet::SaveTo)
     // REQUIRES: "smallest" and "largest" are smallest and largest keys in file
-    fn add_file(
+    pub fn add_file(
         &mut self,
         level: u32,
         file: u64,

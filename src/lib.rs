@@ -39,7 +39,7 @@ pub struct Options {
     // REQUIRES: The client must ensure that the comparator supplied
     // here has the same name and orders keys *exactly* the same as the
     // comparator provided to previous open calls on the same DB.
-    comparator: Rc<dyn Comparator>,
+    comparator: Box<dyn Comparator>,
 
     // If true, the implementation will do aggressive checking of the
     // data it is processing and will stop early if it detects any
@@ -382,6 +382,14 @@ pub enum ValueType {
     Unknown,
 }
 
+    // kValueTypeForSeek defines the ValueType that should be passed when
+// constructing a ParsedInternalKey object for seeking to a particular
+// sequence number (since we sort sequence numbers in decreasing order
+// and the value type is embedded as the low 8 bits in the sequence
+// number in internal keys, we need to use the highest-numbered
+// ValueType, not the lowest).
+const TYPE_FOR_SEEK:ValueType= ValueType::TypeValue;
+
 impl From<u8> for ValueType {
     fn from(v: u8) -> Self {
         match v {
@@ -442,6 +450,11 @@ impl InternalKey {
         self.rep.clear();
         self.rep.extend_from_slice(s);
         !self.rep.is_empty()
+    }
+
+    fn encode(&mut self) -> &[u8] {
+        assert!(!self.rep.is_empty());
+        &self.rep
     }
 }
 

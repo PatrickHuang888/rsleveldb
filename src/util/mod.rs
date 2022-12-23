@@ -231,3 +231,7 @@ impl Random {
         self.uniform(1 << x)
     }
 }
+
+pub fn now_micros() -> u64 {
+    todo!()
+}

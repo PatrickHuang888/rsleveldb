@@ -12,8 +12,8 @@ use crate::{
 
 use super::skiplist::{Comparator as SkipListComparator, Iterator, SkipList, SkipListIterator};
 
-type Table = SkipList<KeyComparator, Vec<u8>>;
-type TableIterator<'a> = SkipListIterator<'a, KeyComparator, Vec<u8>>;
+type Table<'a> = SkipList<KeyComparator<'a>, Vec<u8>>;
+type TableIterator<'a> = SkipListIterator<'a, KeyComparator<'a>, Vec<u8>>;
 
 const LookupKeySpaceSize: usize = 200;
 
@@ -66,16 +66,16 @@ impl LookupKey {
     }
 }
 
-pub struct MemTable {
-    table: Table,
-    comparator: KeyComparator,
+pub struct MemTable<'a> {
+    table: Table<'a>,
+    comparator: KeyComparator<'a>,
 }
 
-impl MemTable {
-    pub fn new(cmp: InternalKeyComparator) -> Self {
+impl<'a> MemTable<'a> {
+    pub fn new(cmp: &InternalKeyComparator) -> Self {
         let head_key = vec![0];
         let key_cmp = KeyComparator {
-            comparator: cmp.clone(),
+            comparator: cmp,
         };
         let table = Table::new(key_cmp.clone(), &head_key);
         MemTable {
@@ -222,23 +222,26 @@ impl<'a> api::Iterator for MemTableIterator<'a> {
 }
 
 #[derive(Clone)]
-pub struct InternalKeyComparator {
-    user_comparator: Rc<dyn api::Comparator>,
+pub struct InternalKeyComparator<'a> {
+    user_comparator: &'a dyn api::Comparator,
 }
 
-impl InternalKeyComparator {
-    pub fn new(user_comparator: Rc<dyn api::Comparator>) -> Self {
+impl<'a> InternalKeyComparator<'a> {
+    pub fn new(user_comparator: &'a dyn api::Comparator) -> Self {
         Self { user_comparator }
+    }
+    pub fn user_comparator(&self) -> &dyn api::Comparator {
+        self.user_comparator
     }
 }
 
-impl super::skiplist::Comparator<InternalKey> for InternalKeyComparator {
+/* impl<'a> super::skiplist::Comparator<InternalKey> for InternalKeyComparator<'a> {
     fn compare(&self, a: &InternalKey, b: &InternalKey) -> cmp::Ordering {
         api::Comparator::compare(self, &a.rep, &b.rep)
     }
-}
+} */
 
-impl api::Comparator for InternalKeyComparator {
+impl<'a> api::Comparator for InternalKeyComparator<'a> {
     fn name(&self) -> &'static str {
         "leveldb.InternalKeyComparator"
     }
@@ -317,15 +320,15 @@ fn encode_key(scratch: &mut Vec<u8>, key: &[u8]) {
 }
 
 #[derive(Clone)]
-struct KeyComparator {
-    comparator: InternalKeyComparator,
+struct KeyComparator<'a> {
+    comparator: &'a InternalKeyComparator<'a>,
 }
 
-impl super::skiplist::Comparator<Vec<u8>> for KeyComparator {
+impl<'a> super::skiplist::Comparator<Vec<u8>> for KeyComparator<'a> {
     fn compare(&self, key_a: &Vec<u8>, key_b: &Vec<u8>) -> cmp::Ordering {
         // Internal keys are encoded as length-prefixed strings.
         let (a, _) = util::get_length_prefixed_slice(key_a).unwrap();
         let (b, _) = util::get_length_prefixed_slice(key_b).unwrap();
-        api::Comparator::compare(&self.comparator, a, b)
+        self.comparator.compare(a, b)
     }
 }

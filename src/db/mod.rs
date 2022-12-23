@@ -106,7 +106,7 @@ fn build_table(
             key.clear();
             key.extend_from_slice(iter.key().unwrap());
             builder.add(&key, iter.value().unwrap())?;
-            iter.next();
+            iter.next()?;
         }
         if !key.is_empty() {
             meta.largest.decode_from(&key);
