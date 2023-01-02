@@ -355,8 +355,8 @@ fn init_type_crc(type_crc: &mut [u32; MAX_RECORD_TYPE]) {
 
 const MAX_RECORD_TYPE: usize = RecordType::Last as usize + 1;
 
-pub struct Writer<W: WritableFile> {
-    dest: Rc<RefCell<W>>,
+pub struct Writer {
+    dest: Box<dyn WritableFile>,
     block_offset: usize, // Current offset in block
 
                          // crc32c values for all supported record types.  These are
@@ -365,8 +365,8 @@ pub struct Writer<W: WritableFile> {
                          //type_crc: [u32;MAX_RECORD_TYPE]
 }
 
-impl<W: WritableFile> Writer<W> {
-    pub fn new(dest: Rc<RefCell<W>>) -> Self {
+impl Writer {
+    pub fn new(dest: Box<dyn WritableFile>) -> Self {
         /* let mut type_crc= [0;MAX_RECORD_TYPE];
         init_type_crc(&mut type_crc); */
         Writer {
@@ -391,7 +391,7 @@ impl<W: WritableFile> Writer<W> {
         util::encode_fixed32(&mut buf[..4], crc);
 
         // Write the header and the payload
-        let mut dest = self.dest.borrow_mut();
+        let mut dest = self.dest.as_mut();
         dest.append(&buf)?;
         dest.append(record)?;
         dest.flush()?;
@@ -414,7 +414,7 @@ impl<W: WritableFile> Writer<W> {
                 // Switch to a new block
                 if leftover > 0 {
                     // Fill the trailer (literal below relies on kHeaderSize being 7)
-                    self.dest.borrow_mut().append(&ZERO_TRAILER[..leftover])?;
+                    self.dest.as_mut().append(&ZERO_TRAILER[..leftover])?;
                 }
                 self.block_offset = 0;
             }
@@ -450,6 +450,10 @@ impl<W: WritableFile> Writer<W> {
             }
         }
         Ok(())
+    }
+
+    pub fn sync(&mut self) -> api::Result<()> {
+        self.dest.sync()
     }
 }
 
@@ -507,11 +511,11 @@ mod test {
     use super::{Reader, RecordType, Reporter, Writer, BLOCK_SIZE, HEADER_SIZE};
 
     struct StringDest {
-        contents: Vec<u8>,
+        rep: Rc<RefCell<Vec<u8>>>,
     }
     impl WritableFile for StringDest {
         fn append(&mut self, data: &[u8]) -> api::Result<()> {
-            self.contents.extend_from_slice(data);
+            self.rep.borrow_mut().extend_from_slice(data);
             Ok(())
         }
         fn close(&mut self) -> api::Result<()> {
@@ -587,8 +591,8 @@ mod test {
 
     struct LogTest {
         reading: bool,
-        dest: Rc<RefCell<StringDest>>,
-        writer: Writer<StringDest>,
+        dest: Rc<RefCell<Vec<u8>>>,
+        writer: Writer,
         reader: Reader<StringSource, ReportCollector>,
         reporter: Rc<RefCell<ReportCollector>>,
     }
@@ -596,9 +600,8 @@ mod test {
     impl LogTest {
         fn new() -> Self {
             let source = Vec::new();
-            let dest = Rc::new(RefCell::new(StringDest {
-                contents: Vec::new(),
-            }));
+            let space = Rc::new(RefCell::new(Vec::new()));
+            let string_dest = Box::new(StringDest { rep: space.clone() });
             let reporter = Rc::new(RefCell::new(ReportCollector {
                 dropped_bytes: 0,
                 message: String::new(),
@@ -614,10 +617,10 @@ mod test {
                 true,
             );
 
-            let writer = Writer::new(dest.clone());
+            let writer = Writer::new(string_dest);
             LogTest {
                 reader,
-                dest,
+                dest: space.clone(),
                 writer,
                 reading: false,
                 reporter,
@@ -630,7 +633,7 @@ mod test {
                 self.reader
                     .file
                     .contents
-                    .extend_from_slice(&self.dest.borrow().contents);
+                    .extend_from_slice(&self.dest.borrow());
             }
             let mut scratch = Vec::new();
             let mut record = Vec::new();
@@ -647,7 +650,7 @@ mod test {
         }
 
         fn written_bytes(&self) -> usize {
-            self.dest.borrow().contents.len()
+            self.dest.borrow().len()
         }
 
         fn dropped_bytes(&self) -> usize {
@@ -671,23 +674,23 @@ mod test {
         }
 
         fn increment_byte(&mut self, offset: usize, delta: u8) {
-            self.dest.borrow_mut().contents[offset] += delta
+            self.dest.borrow_mut()[offset] += delta
         }
 
         fn set_byte(&mut self, offset: usize, new_byte: u8) {
-            self.dest.borrow_mut().contents[offset] = new_byte;
+            self.dest.borrow_mut()[offset] = new_byte;
         }
 
         fn fix_checksum(&mut self, header_offset: usize, len: usize) {
             // Compute crc of type/len/data
             let start = header_offset + HEADER_SIZE;
-            let crc = util::crc(&self.dest.borrow().contents[start..start + len]);
-            util::encode_fixed32(&mut self.dest.borrow_mut().contents[header_offset..], crc);
+            let crc = util::crc(&self.dest.borrow()[start..start + len]);
+            util::encode_fixed32(&mut self.dest.borrow_mut()[header_offset..], crc);
         }
 
         fn shrink_size(&mut self, bytes: usize) {
-            let len = self.dest.borrow().contents.len();
-            self.dest.borrow_mut().contents.truncate(len - bytes);
+            let len = self.dest.borrow().len();
+            self.dest.borrow_mut().truncate(len - bytes);
         }
     }
 

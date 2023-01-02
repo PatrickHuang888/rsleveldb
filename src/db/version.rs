@@ -1,16 +1,24 @@
-use std::rc::Rc;
+use core::num;
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    sync::{Mutex, MutexGuard},
+};
 
 use crate::{
     api::{self, Comparator, ReadOptions},
-    config, util, InternalKey, SequenceNumber, MAX_SEQUENCE_NUMBER, TYPE_FOR_SEEK,
+    config::{self, L0_COMPACTION_TRIGGER, NUM_LEVELS},
+    util, Env, InternalKey, Options, SequenceNumber, WritableFile, MAX_SEQUENCE_NUMBER,
+    TYPE_FOR_SEEK,
 };
 
 use super::{
-    log,
+    filename::{self, set_current_file},
+    log::{self, Writer},
     memtable::{InternalKeyComparator, LookupKey},
 };
 
-#[derive(Default, PartialEq)]
+#[derive(Default, PartialEq, Clone)]
 pub(crate) struct FileMetaData {
     pub number: u64,
     pub file_size: u64, // File size in bytes
@@ -23,18 +31,44 @@ pub(crate) struct FileMetaData {
 #[derive(Default)]
 pub(crate) struct GetStats {
     seek_file: Option<FileMetaData>,
-    seek_file_level: u32,
+    seek_file_level: i32,
 }
 
 pub(crate) struct Version {
-    //vset: VersionSet // VersionSet to which this Version belongs
-
+    //vset: &'a VersionSet, // VersionSet to which this Version belongs
+    // List of files per level
+    files: Vec<Vec<Rc<FileMetaData>>>,
     // Next file to compact based on seek stats.
     file_to_compact: Option<FileMetaData>,
-    file_to_compact_level: u32,
+    file_to_compact_level: i32,
+
+    // Level that should be compacted next and its compaction score.
+    // Score < 1 means compaction is not strictly needed.  These fields
+    // are initialized by Finalize().
+    compaction_score: f64,
+    compaction_level: i32,
+
+    next: Option<Rc<Version>>,
+    prev: Option<Rc<Version>>,
 }
 
 impl Version {
+    fn new(vset: &VersionSet) -> Self {
+        let mut files = Vec::with_capacity(NUM_LEVELS as usize);
+        for _ in 0..NUM_LEVELS {
+            files.push(Vec::new());
+        }
+        Version {
+            files,
+            file_to_compact: None,
+            file_to_compact_level: -1,
+            next: None,
+            prev: None,
+            compaction_score: -1.,
+            compaction_level: -1,
+        }
+    }
+
     // Lookup the value for key.  If found, store it in *val and
     // return OK.  Else return a non-OK status.  Fills *stats.
     // REQUIRES: lock is not held
@@ -65,21 +99,34 @@ impl Version {
         }
     }
 
-      // Return the level at which we should place a new memtable compaction
-  // result that covers the range [smallest_user_key,largest_user_key].
-    pub fn pick_level_for_memtable_output(&self, smallest_user_key:&[u8], largest_user_key:&[u8]) -> u32 {
-        let mut level= 0;
-
+    // Return the level at which we should place a new memtable compaction
+    // result that covers the range [smallest_user_key,largest_user_key].
+    pub fn pick_level_for_memtable_output(
+        &self,
+        smallest_user_key: &[u8],
+        largest_user_key: &[u8],
+    ) -> u32 {
+        let mut level = 0;
+        todo!()
     }
 
     // Returns true iff some file in the specified level overlaps
-  // some part of [*smallest_user_key,*largest_user_key].
-  // smallest_user_key==nullptr represents a key smaller than all the DB's keys.
-  // largest_user_key==nullptr represents a key largest than all the DB's keys.
-    fn overlap_in_level(&self, smallest_user_key:Option<&u8>, largest_user_key:Option<&[u8]>) -> bool {
-
+    // some part of [*smallest_user_key,*largest_user_key].
+    // smallest_user_key==nullptr represents a key smaller than all the DB's keys.
+    // largest_user_key==nullptr represents a key largest than all the DB's keys.
+    fn overlap_in_level(
+        &self,
+        level: u32,
+        smallest_user_key_opt: Option<&u8>,
+        largest_user_key_opt: Option<&[u8]>,
+    ) -> bool {
+        let mut disjoint = false;
+        if level > 0 {
+            disjoint = true;
+        }
+        todo!()
+        //some_file_overlaps_range(&self.vset.icmp, disjoint, self.files[level], smallest_user_key_opt, largest_user_key_opt)
     }
-
 }
 
 // Returns true iff some file in "files" overlaps the user key range
@@ -88,40 +135,47 @@ impl Version {
 // largest==nullptr represents a key largest than all keys in the DB.
 // REQUIRES: If disjoint_sorted_files, files[] contains disjoint ranges
 //           in sorted order.
-fn some_file_overlaps_range(icmp:&InternalKeyComparator, disjoint_sorted_files:bool, files:Vec<&FileMetaData>,
-     smallest_user_key_opt:Option<&[u8]>, largest_user_key_opt:Option<&[u8]>) -> bool {
-        let ucmp= icmp.user_comparator();
-        if !disjoint_sorted_files {
-            // Need to check against all files
-            for i in 0..files.len() {
-                let f= files[i];
-                if after_file(ucmp, smallest_user_key_opt, f) || before_file(ucmp, largest_user_key_opt, f) {
-                    // No overlap
-                }else {
-                    return true;
-                }
+fn some_file_overlaps_range(
+    icmp: &InternalKeyComparator,
+    disjoint_sorted_files: bool,
+    files: Vec<&FileMetaData>,
+    smallest_user_key_opt: Option<&[u8]>,
+    largest_user_key_opt: Option<&[u8]>,
+) -> bool {
+    let ucmp = icmp.user_comparator();
+    if !disjoint_sorted_files {
+        // Need to check against all files
+        for i in 0..files.len() {
+            let f = files[i];
+            if after_file(ucmp, smallest_user_key_opt, f)
+                || before_file(ucmp, largest_user_key_opt, f)
+            {
+                // No overlap
+            } else {
+                return true;
             }
-            return false;
         }
+        return false;
+    }
 
-        // Binary search over file list
-        let mut index= 0;
-        if let Some(smallest_user_key) = smallest_user_key_opt {
-            // Find the earliest possible internal key for smallest_user_key
-            let small_key= InternalKey::new(smallest_user_key, MAX_SEQUENCE_NUMBER, TYPE_FOR_SEEK);
-            todo!()
-            //index= find_file(icmp, files, small_key.encode());
-        }
+    // Binary search over file list
+    let mut index = 0;
+    if let Some(smallest_user_key) = smallest_user_key_opt {
+        // Find the earliest possible internal key for smallest_user_key
+        let small_key = InternalKey::new(smallest_user_key, MAX_SEQUENCE_NUMBER, TYPE_FOR_SEEK);
+        todo!()
+        //index= find_file(icmp, files, small_key.encode());
+    }
 
-        if index >= files.len() {
-            // beginning of range is after all files, so no overlap.
-            return false;
-        }
-        
-        !before_file(ucmp, largest_user_key_opt, files[index])
+    if index >= files.len() {
+        // beginning of range is after all files, so no overlap.
+        return false;
+    }
+
+    !before_file(ucmp, largest_user_key_opt, files[index])
 }
 
-fn after_file(ucmp:Rc<dyn api::Comparator>, user_key_opt:Option<&[u8]>, f: &FileMetaData) -> bool{
+fn after_file(ucmp: &dyn api::Comparator, user_key_opt: Option<&[u8]>, f: &FileMetaData) -> bool {
     // null user_key occurs before all keys and is therefore never after *f
     if let Some(user_key) = user_key_opt {
         return ucmp.compare(user_key, f.largest.user_key()).is_lt();
@@ -129,14 +183,13 @@ fn after_file(ucmp:Rc<dyn api::Comparator>, user_key_opt:Option<&[u8]>, f: &File
     return false;
 }
 
-fn before_file(ucmp:Rc<dyn api::Comparator>, user_key_opt:Option<&[u8]>, f:&FileMetaData) -> bool {
+fn before_file(ucmp: &dyn api::Comparator, user_key_opt: Option<&[u8]>, f: &FileMetaData) -> bool {
     // null user_key occurs after all keys and is therefore never before *f
     if let Some(user_key) = user_key_opt {
         return ucmp.compare(user_key, f.smallest.user_key()).is_lt();
     }
     return false;
 }
-
 
 struct State {
     saver: Saver,
@@ -172,16 +225,24 @@ struct Saver {
 
 pub(crate) struct VersionSet {
     last_sequence: u64,
-    current: Version,
+    current: Rc<Version>,
     log_number: u64,
     next_file_number: u64,
     prev_log_number: u64, // 0 or backing store for memtable being compacted
-    icmp: InternalKeyComparator
+    icmp: InternalKeyComparator,
+    // Per-level key at which the next compaction at that level should start.
+    // Either an empty string, or a valid InternalKey.
+    compact_pointer: [Vec<u8>; config::NUM_LEVELS as usize],
+    descriptor_log: Option<log::Writer>,
+    dbname: String,
+    manifest_file_number: u64,
+    env: Rc<RefCell<dyn Env>>,
 }
 
 impl VersionSet {
     pub fn current_mut(&mut self) -> &mut Version {
-        &mut self.current
+        todo!()
+        //&mut self.current
     }
 }
 
@@ -198,7 +259,12 @@ impl VersionSet {
     // current version.  Will release *mu while actually writing to the file.
     // REQUIRES: *mu is held on entry.
     // REQUIRES: no other thread concurrently calls LogAndApply()
-    fn log_and_apply(&self, edit: &mut VersionEdit) -> api::Result<()> {
+    fn log_and_apply<'a>(
+        &mut self,
+        edit: &mut VersionEdit,
+        _guard: &'a Mutex<()>,
+        _lock: &MutexGuard<()>,
+    ) -> api::Result<MutexGuard<'a, ()>> {
         match edit.log_number {
             None => {
                 edit.set_log_number(self.log_number);
@@ -216,7 +282,131 @@ impl VersionSet {
         edit.set_next_file(self.next_file_number);
         edit.set_last_sequence(self.last_sequence);
 
-        Ok(())
+        let mut v = Version::new(self);
+        {
+            let mut builder = VersionSetBuilder::new(self, self.current.clone());
+            builder.apply(edit);
+            builder.save_to(&mut v);
+        }
+        self.finalize(&mut v);
+
+        // Initialize new descriptor log file if necessary by creating
+        // a temporary file that contains a snapshot of the current version.
+        let mut new_manifest_file = "".to_string();
+        if self.descriptor_log.is_none() {
+            // No reason to unlock *mu here since we only hit this path in the
+            // first call to LogAndApply (when opening the database).
+            new_manifest_file =
+                filename::descriptor_file_name(&self.dbname, self.manifest_file_number);
+            let log = self
+                .env
+                .borrow_mut()
+                .new_writable_file(&new_manifest_file)?;
+            self.descriptor_log = Some(log::Writer::new(log));
+            self.write_snapshot()?;
+        }
+
+        // Unlock during expensive MANIFEST log write
+        {
+            drop(_lock);
+            // Write new record to MANIFEST log
+            let mut record = Vec::new();
+            edit.encode_to(&mut record);
+            self.descriptor_log.as_mut().unwrap().add_record(&record)?;
+            self.descriptor_log.as_mut().unwrap().sync()?;
+
+            // todo:log
+
+            // If we just created a new descriptor file, install it by writing a
+            // new CURRENT file that points to it.
+            if !new_manifest_file.is_empty() {
+                set_current_file(&self.env, self.dbname.as_str(), self.manifest_file_number)?;
+            }
+        }
+        let _lock_again = _guard.lock().unwrap();
+
+        // Install the new version
+        self.append_version(v);
+        self.log_number= edit.log_number.unwrap();
+        self.prev_log_number= edit.prev_log_number.unwrap();
+
+        // todo: remove new_manifest_file when error
+        Ok(_lock_again)
+    }
+
+    fn append_version(&mut self, v:Rc<Version>) {
+        // Make "v" current
+        self.current= v;
+    }
+
+    fn finalize(&self, v: &mut Version) {
+        // Precomputed best level for next compaction
+        let mut best_level = -1i32;
+        let mut best_score = -1f64;
+
+        for level in 0..NUM_LEVELS {
+            let score: f64;
+            if level == 0 {
+                // We treat level-0 specially by bounding the number of files
+                // instead of number of bytes for two reasons:
+                //
+                // (1) With larger write-buffer sizes, it is nice not to do too
+                // many level-0 compactions.
+                //
+                // (2) The files in level-0 are merged on every read and
+                // therefore we wish to avoid too many files when the individual
+                // file size is small (perhaps because of a small write-buffer
+                // setting, or very high compression ratios, or lots of
+                // overwrites/deletions).
+                score = v.files[level as usize].len() as f64 / L0_COMPACTION_TRIGGER as f64;
+            } else {
+                // Compute the ratio of current size to size limit.
+                let level_bytes = total_file_size(&v.files[level as usize]);
+                score = level_bytes as f64 / max_bytes_for_level(level);
+            }
+            if score > best_score {
+                best_level = level as i32;
+                best_score = score;
+            }
+        }
+
+        v.compaction_level = best_level;
+        v.compaction_score = best_score;
+    }
+
+    fn write_snapshot(&mut self) -> api::Result<()> {
+        // TODO: Break up into multiple records to reduce memory usage on recovery?
+
+        // Save metadata
+        let mut edit = VersionEdit::default();
+        edit.set_comparator_name(self.icmp.name());
+
+        // Save compaction pointers
+        for level in 0..NUM_LEVELS {
+            if !self.compact_pointer[level as usize].is_empty() {
+                let mut key = InternalKey::default();
+                key.decode_from(&self.compact_pointer[level as usize]);
+                edit.set_compact_pointer(level, &key);
+            }
+        }
+
+        // Save files
+        for level in 0..NUM_LEVELS {
+            let files = &self.current.files[level as usize];
+            for file in files {
+                edit.add_file(
+                    level,
+                    file.number,
+                    file.file_size,
+                    &file.smallest,
+                    &file.largest,
+                );
+            }
+        }
+
+        let mut record = Vec::new();
+        edit.encode_to(&mut record);
+        self.descriptor_log.as_mut().unwrap().add_record(&record)
     }
 
     // Return the last sequence number.
@@ -237,27 +427,183 @@ impl VersionSet {
     }
 }
 
-// Helper to sort by v->files_[file_number].smallest
-struct BySmallestKey {
-    internal_comparator: InternalKeyComparator,
+fn total_file_size(files: &Vec<Rc<FileMetaData>>) -> f64 {
+    let mut sum = 0f64;
+    files.iter().for_each(|f| {
+        sum += f.file_size as f64;
+    });
+    sum
 }
-impl BySmallestKey {
+
+fn max_bytes_for_level(level: u32) -> f64 {
+    // Note: the result for level zero is not really used since we set
+    // the level-0 compaction threshold based on number of files.
+
+    // Result for both level-0 and level-1
+    let mut result = 10. * 1048576.0;
+    let mut l = level;
+    while l > 1 {
+        result *= 10.;
+        l -= 1;
+    }
+    result
+}
+
+// Helper to sort by v->files_[file_number].smallest
+struct BySmallestKey<'a> {
+    internal_comparator: &'a InternalKeyComparator,
+}
+impl<'a> BySmallestKey<'a> {
     fn compare(&self, f1: &FileMetaData, f2: &FileMetaData) -> std::cmp::Ordering {
-        super::skiplist::Comparator::compare(&self.internal_comparator, &f1.smallest, &f2.smallest)
+        super::skiplist::Comparator::compare(self.internal_comparator, &f1.smallest, &f2.smallest)
     }
 }
 
 struct LevelState {
     deleted_files: Vec<u64>,
-    added_files: Vec<(FileMetaData, BySmallestKey)>,
+    added_files: Vec<Rc<FileMetaData>>,
 }
+
 // A helper class so we can efficiently apply a whole sequence
 // of edits to a particular state without creating intermediate
 // Versions that contain full copies of the intermediate state.
-struct VersionSetBuilder {
-    vset: VersionSet,
-    base: Version,
-    //levels: [config::NUM_LEVELS],
+struct VersionSetBuilder<'a> {
+    vset: &'a mut VersionSet,
+    base: Rc<Version>,
+    levels: Vec<LevelState>,
+}
+
+impl<'a> VersionSetBuilder<'a> {
+    fn new(vset: &'a mut VersionSet, base: Rc<Version>) -> Self {
+        let mut levels = Vec::with_capacity(NUM_LEVELS as usize);
+        for _ in 0..NUM_LEVELS {
+            levels.push(LevelState {
+                deleted_files: Vec::new(),
+                added_files: Vec::new(),
+            });
+        }
+        VersionSetBuilder { vset, base, levels }
+    }
+
+    // Apply all of the edits in *edit to the current state.
+    fn apply(&mut self, edit: &VersionEdit) {
+        // Update compaction pointers
+        for (level, ikey) in &edit.compact_pointers {
+            self.vset.compact_pointer[*level as usize].clear();
+            self.vset.compact_pointer[*level as usize].extend_from_slice(ikey.encode());
+        }
+
+        // Delete files
+        for (level, number) in &edit.deleted_files {
+            self.levels[*level as usize].deleted_files.push(*number);
+        }
+
+        // Add new files
+        for (level, fmd) in &edit.new_files {
+            let mut f = fmd.clone();
+
+            // We arrange to automatically compact this file after
+            // a certain number of seeks.  Let's assume:
+            //   (1) One seek costs 10ms
+            //   (2) Writing or reading 1MB costs 10ms (100MB/s)
+            //   (3) A compaction of 1MB does 25MB of IO:
+            //         1MB read from this level
+            //         10-12MB read from next level (boundaries may be misaligned)
+            //         10-12MB written to next level
+            // This implies that 25 seeks cost the same as the compaction
+            // of 1MB of data.  I.e., one seek costs approximately the
+            // same as the compaction of 40KB of data.  We are a little
+            // conservative and allow approximately one seek for every 16KB
+            // of data before triggering a compaction.
+            f.allowed_seeks = (f.file_size / 16384) as u32;
+            if f.allowed_seeks < 100 {
+                f.allowed_seeks = 100;
+            }
+
+            let deleted_files = &mut self.levels[*level as usize].deleted_files;
+            let pos = deleted_files.iter().position(|x| *x == f.number);
+            deleted_files.remove(pos.unwrap());
+            self.levels[*level as usize].added_files.push(Rc::new(f));
+        }
+    }
+
+    // Save the current state in *v.
+    fn save_to(&self, v: &mut Version) {
+        let cmp = BySmallestKey {
+            internal_comparator: &self.vset.icmp,
+        };
+        for level in 0..config::NUM_LEVELS {
+            // Merge the set of added files with the set of pre-existing files.
+            // Drop any deleted files.  Store the result in *v.
+            let base_files = &self.base.files[level as usize];
+            let added_files = &self.levels[level as usize].added_files;
+            v.files[level as usize].reserve(base_files.len() + added_files.len());
+            let mut base_index = 0;
+            added_files.iter().for_each(|added_file| {
+                // Add all smaller files listed in base_
+                let pos = base_files
+                    .iter()
+                    .position(|base_file| cmp.compare(&base_file, &added_file).is_lt())
+                    .unwrap();
+                while base_index < pos {
+                    self.maybe_add_file(v, level, &base_files[base_index]);
+                    base_index += 1;
+                }
+                self.maybe_add_file(v, level, added_file);
+            });
+
+            // Add remaining base files
+            while base_index < base_files.len() {
+                self.maybe_add_file(v, level, &base_files[base_index]);
+                base_index += 1;
+            }
+
+            // debug
+            // Make sure there is no overlap in levels > 0
+            if level > 0 {
+                let files = &v.files[level as usize];
+                let mut i = 1;
+                while i < files.len() {
+                    let prev_end = &files[i - 1].largest;
+                    let this_begin = &files[i].smallest;
+                    if super::skiplist::Comparator::compare(&self.vset.icmp, prev_end, this_begin)
+                        .is_le()
+                    {
+                        panic!(
+                            "overlapping ranges in same level {:?} vs. {:?}",
+                            prev_end, this_begin
+                        );
+                    }
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    fn maybe_add_file(&self, v: &mut Version, level: u32, f: &Rc<FileMetaData>) {
+        match self.levels[level as usize]
+            .deleted_files
+            .iter()
+            .position(|dn| *dn == f.number)
+        {
+            None => {
+                let files = &mut v.files[level as usize];
+                if level > 0 && !files.is_empty() {
+                    // Must not overlap
+                    assert!(super::skiplist::Comparator::compare(
+                        &self.vset.icmp,
+                        &files[files.len() - 1].largest,
+                        &f.smallest
+                    )
+                    .is_lt());
+                }
+                files.push(f.clone())
+            }
+            Some(_) => {
+                // File is deleted: do nothing
+            }
+        }
+    }
 }
 
 enum Tag {
@@ -334,13 +680,13 @@ impl VersionEdit {
     pub fn add_file(
         &mut self,
         level: u32,
-        file: u64,
+        number: u64,
         file_size: u64,
         smallest_key: &InternalKey,
         largest_key: &InternalKey,
     ) {
         let f = FileMetaData {
-            number: file,
+            number,
             file_size,
             allowed_seeks: 0,
             smallest: smallest_key.clone(),

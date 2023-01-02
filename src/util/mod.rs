@@ -1,7 +1,9 @@
+use std::{cell::RefCell, rc::Rc};
+
 use crc::{Crc, CRC_32_ISCSI};
 use rand::{rngs::ThreadRng, thread_rng, Rng};
 
-use crate::{api, WritableFile};
+use crate::{api, Env, WritableFile};
 
 struct Oops {}
 impl WritableFile for Oops {
@@ -17,6 +19,33 @@ impl WritableFile for Oops {
     fn sync(&mut self) -> api::Result<()> {
         todo!()
     }
+}
+
+pub fn write_string_to_file_sync(
+    env: &Rc<RefCell<dyn Env>>,
+    data: &[u8],
+    fname: &str,
+) -> api::Result<()> {
+    do_write_string_to_file(env, data, fname, true)
+}
+
+pub fn do_write_string_to_file(
+    env: &Rc<RefCell<dyn Env>>,
+    data: &[u8],
+    fname: &str,
+    should_sync: bool,
+) -> api::Result<()> {
+    let mut file = env.borrow_mut().new_writable_file(fname)?;
+    let mut r = file.as_mut().append(data);
+    if r.is_ok() && should_sync {
+        r = file.sync();
+    }
+    if r.is_ok() {
+        file.close();
+    } else {
+        env.borrow_mut().remove_file(fname)?;
+    }
+    Ok(())
 }
 
 pub fn new_writable_file(fname: String) -> api::Result<impl WritableFile> {

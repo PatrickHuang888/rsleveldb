@@ -39,7 +39,9 @@ pub struct Options {
     // REQUIRES: The client must ensure that the comparator supplied
     // here has the same name and orders keys *exactly* the same as the
     // comparator provided to previous open calls on the same DB.
-    comparator: Box<dyn Comparator>,
+
+    // seem like Box cannot be cloned ? Box 是 Sized 不能变成trait object
+    comparator: Rc<dyn Comparator>,
 
     // If true, the implementation will do aggressive checking of the
     // data it is processing and will stop early if it detects any
@@ -382,13 +384,13 @@ pub enum ValueType {
     Unknown,
 }
 
-    // kValueTypeForSeek defines the ValueType that should be passed when
+// kValueTypeForSeek defines the ValueType that should be passed when
 // constructing a ParsedInternalKey object for seeking to a particular
 // sequence number (since we sort sequence numbers in decreasing order
 // and the value type is embedded as the low 8 bits in the sequence
 // number in internal keys, we need to use the highest-numbered
 // ValueType, not the lowest).
-const TYPE_FOR_SEEK:ValueType= ValueType::TypeValue;
+const TYPE_FOR_SEEK: ValueType = ValueType::TypeValue;
 
 impl From<u8> for ValueType {
     fn from(v: u8) -> Self {
@@ -429,7 +431,7 @@ pub(crate) fn parse_internal_key<'a>(
 // Modules in this directory should keep internal keys wrapped inside
 // the following class instead of plain strings so that we do not
 // incorrectly use string comparisons instead of an InternalKeyComparator.
-#[derive(Clone, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq, Debug)]
 struct InternalKey {
     rep: Vec<u8>,
 }
@@ -452,7 +454,7 @@ impl InternalKey {
         !self.rep.is_empty()
     }
 
-    fn encode(&mut self) -> &[u8] {
+    fn encode(&self) -> &[u8] {
         assert!(!self.rep.is_empty());
         &self.rep
     }
@@ -461,4 +463,10 @@ impl InternalKey {
 fn extract_user_key(internal_key: &[u8]) -> &[u8] {
     assert!(internal_key.len() >= 8);
     return &internal_key[..internal_key.len() - 8];
+}
+
+pub trait Env {
+    fn new_writable_file(&mut self, filename: &str) -> api::Result<Box<dyn WritableFile>>;
+    fn remove_file(&mut self, filename: &str) -> api::Result<()>;
+    fn rename_file(&mut self, s: &str, t: &str) -> api::Result<()>;
 }

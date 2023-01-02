@@ -327,8 +327,8 @@ mod tests {
             keys: &Vec<Vec<u8>>,
             kvmap: &KVMap,
         ) -> api::Result<()> {
-            let internal_comparator = InternalKeyComparator::new(options.comparator);
-            let mut memtable = MemTable::new(&internal_comparator);
+            let internal_comparator = InternalKeyComparator::new(options.comparator.clone());
+            let mut memtable = MemTable::new(internal_comparator);
             let mut seq = 1;
             for k in keys {
                 let v = kvmap.get(k).unwrap();

@@ -5,8 +5,11 @@ use std::sync::{Condvar, Mutex, MutexGuard};
 use std::collections::{self};
 
 use crate::api::{self, Error, ReadOptions, WriteOptions};
+use crate::config::NUM_LEVELS;
 use crate::db::version::VersionEdit;
-use crate::{Options, SequenceNumber, WritableFile, WriteBatch, DB, NUM_NON_TABLE_CACHE_FILES, util, config};
+use crate::{
+    config, util, Options, SequenceNumber, WritableFile, WriteBatch, DB, NUM_NON_TABLE_CACHE_FILES,
+};
 
 use super::build_table;
 use super::log::{self, Writer as LWriter};
@@ -53,7 +56,7 @@ struct Guarded {
     // Set of table files to protect from deletion because they are
     // part of ongoing compactions.
     pending_outputs: Vec<u64>,
-    stats:[CompactionStats;config::NUM_LEVELS as usize],
+    stats: [CompactionStats; config::NUM_LEVELS as usize],
 }
 
 struct DBImpl<W: WritableFile> {
@@ -67,14 +70,14 @@ struct DBImpl<W: WritableFile> {
     writers: collections::VecDeque<Writer>,
     mem: MemTable,
     imem: Option<MemTable>,
-    log: log::Writer<W>,
+    log: log::Writer,
     log_file: Rc<RefCell<W>>,
     // table_cache_ provides its own synchronization
     table_cache: TableCache,
 
     versions: VersionSet,
 
-    guard:Mutex<Guarded>,
+    guard: Mutex<Guarded>,
 }
 
 fn table_cache_size(sanitized_options: &Options) -> usize {
@@ -101,8 +104,9 @@ impl<W: WritableFile> DBImpl<W> {
             options,
             dbname,
             table_cache,
-            guard:Mutex::new(Guarded{
+            guard: Mutex::new(Guarded {
                 pending_outputs: Vec::new(),
+                stats: [CompactionStats::default(); NUM_LEVELS as usize],
             }),
         }
     }
@@ -141,11 +145,11 @@ impl<W: WritableFile> DBImpl<W> {
     fn write_level0_table(
         &mut self,
         mem: &mut MemTable,
-        edit: &VersionEdit,
+        edit: &mut VersionEdit,
         base: Option<&mut Version>,
         guard: &mut MutexGuard<Guarded>,
     ) -> api::Result<()> {
-        let start_micros= util::now_micros();
+        let start_micros = util::now_micros();
         let mut meta = FileMetaData::default();
         meta.number = self.versions.new_file_number();
         guard.pending_outputs.push(meta.number);
@@ -157,29 +161,39 @@ impl<W: WritableFile> DBImpl<W> {
 
         build_table(self.dbname.as_str(), &self.options, &mut it, &mut meta)?;
 
-        let mut guard_again= self.guard.lock().unwrap();
+        let mut guard_again = self.guard.lock().unwrap();
 
         // todo: log
 
-        let pos= guard_again.pending_outputs.iter().position(|x|*x== meta.number).unwrap();
+        let pos = guard_again
+            .pending_outputs
+            .iter()
+            .position(|x| *x == meta.number)
+            .unwrap();
         guard_again.pending_outputs.remove(pos);
 
         // Note that if file_size is zero, the file has been deleted and
         // should not be added to the manifest.
-        let mut level= 0;
+        let mut level = 0;
         if meta.file_size > 0 {
-            let min_user_key= meta.smallest.user_key();
-            let max_user_key= meta.largest.user_key();
-            if let Some(base)= base {
-                level= base.pick_level_for_memtable_output(min_user_key, max_user_key);
+            let min_user_key = meta.smallest.user_key();
+            let max_user_key = meta.largest.user_key();
+            if let Some(base) = base {
+                level = base.pick_level_for_memtable_output(min_user_key, max_user_key);
             }
-            edit.add_file(level, meta.number, meta.file_size, &meta.smallest, &meta.largest);
+            edit.add_file(
+                level,
+                meta.number,
+                meta.file_size,
+                &meta.smallest,
+                &meta.largest,
+            );
         }
 
-        let mut stats= CompactionStats::default();
-        stats.micros= util::now_micros() - start_micros;
-        stats.bytes_written= meta.file_size;
-        guard_again.stats[level as usize].add(stats);
+        let mut stats = CompactionStats::default();
+        stats.micros = util::now_micros() - start_micros;
+        stats.bytes_written = meta.file_size;
+        guard_again.stats[level as usize].add(&stats);
         Ok(())
     }
 }
@@ -412,11 +426,11 @@ impl PartialEq for Writer {
 struct CompactionStats {
     micros: u64,
     bytes_read: u64,
-    bytes_written: u64 
+    bytes_written: u64,
 }
 
 impl CompactionStats {
-    fn add(&mut self, c:&CompactionStats) {
+    fn add(&mut self, c: &CompactionStats) {
         self.micros += c.micros;
         self.bytes_read += c.bytes_read;
         self.bytes_written += c.bytes_written;
