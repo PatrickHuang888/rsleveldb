@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::{Condvar, Mutex, MutexGuard};
+use std::sync::{Condvar, Mutex, MutexGuard, atomic};
 
 use std::collections::{self};
 
@@ -8,14 +8,14 @@ use crate::api::{self, Error, ReadOptions, WriteOptions};
 use crate::config::NUM_LEVELS;
 use crate::db::version::VersionEdit;
 use crate::{
-    config, util, Options, SequenceNumber, WritableFile, WriteBatch, DB, NUM_NON_TABLE_CACHE_FILES,
+    config, util, Options, SequenceNumber, WritableFile, WriteBatch, DB, NUM_NON_TABLE_CACHE_FILES, InternalKey,
 };
 
 use super::build_table;
 use super::log::{self, Writer as LWriter};
 use super::memtable::{InternalKeyComparator, LookupKey, MemTable};
 use super::table_cache::TableCache;
-use super::version::{FileMetaData, GetStats, Version, VersionSet};
+use super::version::{FileMetaData, GetStats, Version, VersionSet, Compaction};
 
 fn clip_to_range<V: Ord>(mut v: V, minvalue: V, maxvalue: V) {
     if v > maxvalue {
@@ -52,32 +52,172 @@ fn sanitize_options(dbname: &str, icmp: Rc<InternalKeyComparator>, src: &Options
     result
 }
 
-struct Guarded {
-    // Set of table files to protect from deletion because they are
-    // part of ongoing compactions.
-    pending_outputs: Vec<u64>,
-    stats: [CompactionStats; config::NUM_LEVELS as usize],
-}
 
 struct DBImpl<W: WritableFile> {
     internal_comparator: Rc<InternalKeyComparator>,
     options: Options,
     dbname: String,
 
+    inner:Mutex<DBInner<W>>,
+}
+
+impl<W:WritableFile> DBImpl<W> {
+    fn write_level0_table<'a>(&mut self, lock:MutexGuard<'a, DBInner<W>>,
+    edit: &mut VersionEdit,
+    is_mem:bool, has_base:bool) -> api::Result<MutexGuard<'a, DBInner<W>>> {
+
+    let mem:&MemTable;
+    if is_mem {
+        mem= &lock.mem;
+    }else {
+        mem= &lock.imem.unwrap();
+    }
+    let start_micros = util::now_micros();
+    let mut meta = FileMetaData::default();
+    meta.number = lock.vset.new_file_number();
+    lock.pending_outputs.push(meta.number);
+    let mut it = mem.new_iter();
+
+    // todo: log
+
+    drop(lock);
+
+    build_table(self.dbname.as_str(), &self.options, &mut it, &mut meta)?;
+
+    let lock_again= self.inner.lock().unwrap();
+    // todo: log
+
+    let pos = lock_again.pending_outputs
+        .iter()
+        .position(|x| *x == meta.number)
+        .unwrap();
+    lock_again.pending_outputs.remove(pos);
+
+    // Note that if file_size is zero, the file has been deleted and
+    // should not be added to the manifest.
+    let mut level = 0;
+    if meta.file_size > 0 {
+        let min_user_key = meta.smallest.user_key();
+        let max_user_key = meta.largest.user_key();
+        if has_base{
+            let base= lock.vset.current_mut().unwrap();
+            level = base.pick_level_for_memtable_output(min_user_key, max_user_key);
+        }
+        edit.add_file(
+            level,
+            meta.number,
+            meta.file_size,
+            &meta.smallest,
+            &meta.largest,
+        );
+    }
+
+    let mut stats = CompactionStats::default();
+    stats.micros = util::now_micros() - start_micros;
+    stats.bytes_written = meta.file_size;
+    lock_again.stats[level as usize].add(&stats);
+    Ok(lock_again)
+}
+}
+
+struct DBInner<W:WritableFile>{
+
     /* internal: Mutex<GuardedDBInternal>,
     cv: Condvar, */
-    lock: Mutex<bool>,
     writers: collections::VecDeque<Writer>,
-    mem: MemTable,
-    imem: Option<MemTable>,
     log: log::Writer,
     log_file: Rc<RefCell<W>>,
     // table_cache_ provides its own synchronization
     table_cache: TableCache,
 
-    versions: VersionSet,
+    vset: VersionSet,
 
-    guard: Mutex<Guarded>,
+    mem: MemTable,
+    imem: Option<MemTable>,
+
+    shutting_down: atomic::AtomicBool,
+    logfile_number:u64,
+    // Set of table files to protect from deletion because they are
+    // part of ongoing compactions.
+    pending_outputs: Vec<u64>,
+    stats: [CompactionStats; config::NUM_LEVELS as usize],
+    mannual_compaction:Option<ManualCompaction>,
+}
+
+impl<W:WritableFile> DBInner<W> {
+    fn compact_memtable(&mut self){
+        // Save the contents of the memtable as a new Table
+        let mut edit = VersionEdit::default();
+        let base = self.vset.current();
+        let mut r= write_level0_table(guard, lock, &mut edit, true, true, dbname, options);
+    
+        if self.shutting_down.load(atomic::Ordering::Acquire) {
+            r= Err(api::Error::IOError("Deleting DB during memtable compaction".to_string()));
+        }
+    
+        // Replace immutable memtable with the generated Table
+        edit.set_prev_log_number(0);
+        edit.set_log_number(self.logfile_number); // Earlier logs no longer needed
+        let guard_again= r.vset.log_and_apply(&self.lock, _guard, &mut edit)?;
+    
+        // Commit to the new state
+        r.imem= None;
+        remove_obsolete_files();
+        
+        // todo: record_background_error
+        
+    }
+    
+
+    fn background_compaction(&mut self) {
+        if let Some(imm)= self.imem {
+            self.compact_memtable();
+            return;
+        }
+
+        let oc:Option<Compaction>;
+        if let Some(mut manual) = self.mannual_compaction {
+            oc = self.vset.compact_range(manual.level, &manual.begin, &manual.end);
+            match oc {
+                None => {
+                    manual.done= true;
+                },
+                Some(c) => {
+                    let manual_end= &c.input(0, c.num_input_files(0) - 1).largest;
+                    // todo: log
+
+                }
+            }
+        }else {
+            oc = self.vset.pick_compaction();
+        }
+
+        match oc {
+            None => {
+                // Nothing to do
+            },
+            Some(c) => {
+
+            }
+        }   
+    }
+
+    
+
+
+
+
+}
+
+
+
+
+
+struct ManualCompaction {
+    level:u32,
+    begin:InternalKey,
+    end:InternalKey,
+    done:bool,
 }
 
 fn table_cache_size(sanitized_options: &Options) -> usize {
@@ -86,7 +226,7 @@ fn table_cache_size(sanitized_options: &Options) -> usize {
 }
 
 impl<W: WritableFile> DBImpl<W> {
-    fn new(raw_options: &Options, db_name: &str) -> Self {
+    /* fn new(raw_options: &Options, db_name: &str) -> Self {
         let internal_comparator =
             Rc::new(InternalKeyComparator::new(raw_options.comparator.clone()));
         let options = sanitize_options(db_name, internal_comparator.clone(), raw_options);
@@ -97,19 +237,16 @@ impl<W: WritableFile> DBImpl<W> {
             log: todo!(),
             log_file: todo!(),
             writers: todo!(),
-            versions: todo!(),
+            vset: todo!(),
             lock: todo!(),
             imem: todo!(),
             internal_comparator,
             options,
             dbname,
             table_cache,
-            guard: Mutex::new(Guarded {
-                pending_outputs: Vec::new(),
-                stats: [CompactionStats::default(); NUM_LEVELS as usize],
-            }),
+            guard: todo!(),
         }
-    }
+    } */
 
     // REQUIRES: mutex_ is held
     // REQUIRES: this thread is currently at the front of the writer queue
@@ -134,68 +271,10 @@ impl<W: WritableFile> DBImpl<W> {
         Ok(())
     }
 
-    fn compact_memtable(&mut self) {
-        assert!(self.imem.is_some());
+    fn remove_obsolete_files(&mut self) {
 
-        // Save the contents of the memtable as a new Table
-        let edit = VersionEdit::default();
-        let base = self.versions.current_mut();
     }
 
-    fn write_level0_table(
-        &mut self,
-        mem: &mut MemTable,
-        edit: &mut VersionEdit,
-        base: Option<&mut Version>,
-        guard: &mut MutexGuard<Guarded>,
-    ) -> api::Result<()> {
-        let start_micros = util::now_micros();
-        let mut meta = FileMetaData::default();
-        meta.number = self.versions.new_file_number();
-        guard.pending_outputs.push(meta.number);
-        let mut it = mem.new_iter();
-
-        // todo: log
-
-        drop(guard);
-
-        build_table(self.dbname.as_str(), &self.options, &mut it, &mut meta)?;
-
-        let mut guard_again = self.guard.lock().unwrap();
-
-        // todo: log
-
-        let pos = guard_again
-            .pending_outputs
-            .iter()
-            .position(|x| *x == meta.number)
-            .unwrap();
-        guard_again.pending_outputs.remove(pos);
-
-        // Note that if file_size is zero, the file has been deleted and
-        // should not be added to the manifest.
-        let mut level = 0;
-        if meta.file_size > 0 {
-            let min_user_key = meta.smallest.user_key();
-            let max_user_key = meta.largest.user_key();
-            if let Some(base) = base {
-                level = base.pick_level_for_memtable_output(min_user_key, max_user_key);
-            }
-            edit.add_file(
-                level,
-                meta.number,
-                meta.file_size,
-                &meta.smallest,
-                &meta.largest,
-            );
-        }
-
-        let mut stats = CompactionStats::default();
-        stats.micros = util::now_micros() - start_micros;
-        stats.bytes_written = meta.file_size;
-        guard_again.stats[level as usize].add(&stats);
-        Ok(())
-    }
 }
 
 impl<W: WritableFile> DB for DBImpl<W> {
@@ -204,23 +283,24 @@ impl<W: WritableFile> DB for DBImpl<W> {
     }
 
     fn get(&mut self, options: &ReadOptions, key: &[u8], value: &mut Vec<u8>) -> api::Result<()> {
-        let _guard = self.lock.lock().unwrap();
+        let lock = self.guard.lock().unwrap();
         let snaphsot: SequenceNumber;
         match &options.snapshot {
             None => {
-                snaphsot = self.versions.last_sequence();
+                snaphsot = lock.vset.last_sequence();
             }
             Some(ss) => {
                 snaphsot = ss.sequence_number();
             }
         }
         // Unlock while reading from files and memtables
-        drop(_guard);
+        drop(lock);
 
         // First look in the memtable, then in the immutable memtable (if any).
         let lkey = LookupKey::new(key, snaphsot);
 
-        if let Some(e) = self.mem.get(&lkey, value).err() {
+        let unguard= self.guard.get_mut().unwrap();
+        if let Some(e) = unguard.mem.get(&lkey, value).err() {
             match e {
                 Error::InternalNotFound(deleted) => {
                     if deleted {
@@ -228,12 +308,12 @@ impl<W: WritableFile> DB for DBImpl<W> {
                     } else {
                         // todo: imm get
 
-                        let current = self.versions.current_mut();
+                        let mut current = unguard.vset.current_mut().unwrap();
                         let stats = current.get(options, &lkey, value)?;
 
                         // lock again
-                        let _guard = self.lock.lock().unwrap();
-                        if current.update_stats(stats) {
+                        let lock= self.guard.lock().unwrap();
+                        if lock.vset.current_mut().unwrap().update_stats(stats) {
                             //maybe_schedule_compaction();
                             todo!()
                         }
@@ -259,15 +339,16 @@ impl<W: WritableFile> DB for DBImpl<W> {
     }
 
     fn write(&mut self, options: &WriteOptions, updates: WriteBatch) -> api::Result<()> {
-        let mut _guard = self.lock.lock().unwrap();
+        let mut lock = self.guard.lock().unwrap();
 
         self.writers
             .push_back(Writer::new(Some(updates), options.sync));
         let w = self.writers.back().unwrap();
 
-        while !w.done && w != self.writers.front().unwrap() {
+        //todo:
+        /* while !w.done && w != self.writers.front().unwrap() {
             _guard = w.cv.wait(_guard).unwrap();
-        }
+        } */
         if w.done {
             return w.status.clone();
         }
@@ -278,19 +359,19 @@ impl<W: WritableFile> DB for DBImpl<W> {
 
         let mut status;
         //let status = self.make_room_for_write(&guard, w.batch.is_none());
-        let mut last_sequence = self.versions.last_sequence();
+        let mut last_sequence = lock.vset.last_sequence();
 
         // none updates for compactions
         match &current.batch {
             None => {}
             Some(_) => {
                 let (mut write_batch, writtens) =
-                    build_batch_group(&mut _guard, &mut self.writers, current);
+                    build_batch_group(lock, &mut self.writers, current);
                 write_batch.set_sequence(last_sequence + 1);
                 last_sequence += write_batch.count() as u64;
 
-                {
-                    drop(_guard);
+                
+                    drop(lock);
                     // Add to log and apply to memtable.  We can release the lock
                     // during this phase since &w is currently responsible for logging
                     // and protects against concurrent loggers and concurrent writes
@@ -301,14 +382,14 @@ impl<W: WritableFile> DB for DBImpl<W> {
                         //self.log_file.sync()?;
                     }
                     //status = write_batch.insert_into(&mut self.mem);
-                    _guard = self.lock.lock().unwrap();
+                    let lock_1= self.guard.lock().unwrap();
 
                     // todo: sync error
-                }
+                
 
                 // ?tmp_batch.clear()
 
-                self.versions.set_last_sequence(last_sequence);
+                lock_1.vset.set_last_sequence(last_sequence);
 
                 for mut w in writtens {
                     w.status = status.clone();
@@ -330,12 +411,10 @@ impl<W: WritableFile> DB for DBImpl<W> {
 // REQUIRES: Writer list must be non-empty
 // REQUIRES: First writer must have a non-null batch
 fn build_batch_group(
-    _guard: &mut MutexGuard<bool>,
+    lock: MutexGuard<DBInner>,
     writers_queue: &mut collections::VecDeque<Writer>,
     first: Writer,
 ) -> (WriteBatch, Vec<Writer>) {
-    // Make sure:
-    **_guard = true;
 
     //assert!(!first.batch.is_none());
     let first_batch = first.batch.as_ref().unwrap();

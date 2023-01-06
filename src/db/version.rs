@@ -34,6 +34,7 @@ pub(crate) struct GetStats {
     seek_file_level: i32,
 }
 
+#[derive(PartialEq)]
 pub(crate) struct Version {
     //vset: &'a VersionSet, // VersionSet to which this Version belongs
     // List of files per level
@@ -48,8 +49,9 @@ pub(crate) struct Version {
     compaction_score: f64,
     compaction_level: i32,
 
-    next: Option<Rc<Version>>,
-    prev: Option<Rc<Version>>,
+    /* next: Option<Rc<RefCell<Version>>>,
+    prev: Option<Rc<RefCell<Version>>>, */
+    index:i32
 }
 
 impl Version {
@@ -62,10 +64,9 @@ impl Version {
             files,
             file_to_compact: None,
             file_to_compact_level: -1,
-            next: None,
-            prev: None,
             compaction_score: -1.,
             compaction_level: -1,
+            index:-1,
         }
     }
 
@@ -225,7 +226,7 @@ struct Saver {
 
 pub(crate) struct VersionSet {
     last_sequence: u64,
-    current: Rc<Version>,
+    current_index: i32,
     log_number: u64,
     next_file_number: u64,
     prev_log_number: u64, // 0 or backing store for memtable being compacted
@@ -237,16 +238,51 @@ pub(crate) struct VersionSet {
     dbname: String,
     manifest_file_number: u64,
     env: Rc<RefCell<dyn Env>>,
+
+    versions:Vec<Version>
 }
 
-impl VersionSet {
-    pub fn current_mut(&mut self) -> &mut Version {
+// A Compaction encapsulates information about a compaction.
+pub struct Compaction {
+
+}
+
+impl Compaction {
+    // Return the ith input file at "level()+which" ("which" must be 0 or 1).
+    pub fn input(&self, which: u32, i:u32) -> &FileMetaData {
+        todo!();
+    }
+    // "which" must be either 0 or 1
+    pub fn num_input_files(&self, which: u32) -> u32 {
         todo!()
-        //&mut self.current
     }
 }
 
 impl VersionSet {
+    pub fn  pick_compaction(&self) -> Option<Compaction>{
+        todo!()
+    }
+
+    pub fn current_mut(&self) -> Option<&mut Version> {
+        todo!()
+        //&mut self.current
+    }
+
+    pub fn current(&self) -> Option<&Version> {
+        Some(&self.versions[self.current_index as usize])
+    }
+}
+
+impl VersionSet {
+
+    // Return a compaction object for compacting the range [begin,end] in
+    // the specified level.  Returns nullptr if there is nothing in that
+    // level that overlaps the specified range.  Caller should delete
+    // the result.
+    pub fn compact_range(&mut self, level: u32, begin:&InternalKey, end:&InternalKey) -> Option<Compaction>{
+        todo!()
+    }
+
     // Allocate and return a new file number
     pub fn new_file_number(&mut self) -> u64 {
         let r = self.next_file_number;
@@ -259,12 +295,11 @@ impl VersionSet {
     // current version.  Will release *mu while actually writing to the file.
     // REQUIRES: *mu is held on entry.
     // REQUIRES: no other thread concurrently calls LogAndApply()
-    fn log_and_apply<'a>(
-        &mut self,
+    pub fn log_and_apply(
+        &mut self, mu:&Mutex<()>, guard: MutexGuard<()>,
         edit: &mut VersionEdit,
-        _guard: &'a Mutex<()>,
-        _lock: &MutexGuard<()>,
-    ) -> api::Result<MutexGuard<'a, ()>> {
+    ) -> api::Result<MutexGuard<()>> {
+        
         match edit.log_number {
             None => {
                 edit.set_log_number(self.log_number);
@@ -284,7 +319,7 @@ impl VersionSet {
 
         let mut v = Version::new(self);
         {
-            let mut builder = VersionSetBuilder::new(self, self.current.clone());
+            let mut builder = VersionSetBuilder::new(self, self.current_index as usize);
             builder.apply(edit);
             builder.save_to(&mut v);
         }
@@ -308,7 +343,7 @@ impl VersionSet {
 
         // Unlock during expensive MANIFEST log write
         {
-            drop(_lock);
+            drop(guard);
             // Write new record to MANIFEST log
             let mut record = Vec::new();
             edit.encode_to(&mut record);
@@ -322,8 +357,8 @@ impl VersionSet {
             if !new_manifest_file.is_empty() {
                 set_current_file(&self.env, self.dbname.as_str(), self.manifest_file_number)?;
             }
+            guard= mu.lock().unwrap();
         }
-        let _lock_again = _guard.lock().unwrap();
 
         // Install the new version
         self.append_version(v);
@@ -331,12 +366,17 @@ impl VersionSet {
         self.prev_log_number= edit.prev_log_number.unwrap();
 
         // todo: remove new_manifest_file when error
-        Ok(_lock_again)
+        Ok(guard)
     }
 
-    fn append_version(&mut self, v:Rc<Version>) {
+    fn append_version(&mut self, mut v:Version) {
+        //let rv= Rc::new(RefCell::new(v));
         // Make "v" current
-        self.current= v;
+        //assert!(rv != self.current);
+        //self.current= rv;
+
+        v.index= self.versions.len() as i32;
+        self.versions.push(v);
     }
 
     fn finalize(&self, v: &mut Version) {
@@ -392,7 +432,7 @@ impl VersionSet {
 
         // Save files
         for level in 0..NUM_LEVELS {
-            let files = &self.current.files[level as usize];
+            let files = &self.versions[self.current_index as usize].files[level as usize];
             for file in files {
                 edit.add_file(
                     level,
@@ -469,12 +509,12 @@ struct LevelState {
 // Versions that contain full copies of the intermediate state.
 struct VersionSetBuilder<'a> {
     vset: &'a mut VersionSet,
-    base: Rc<Version>,
+    base_index: usize,
     levels: Vec<LevelState>,
 }
 
 impl<'a> VersionSetBuilder<'a> {
-    fn new(vset: &'a mut VersionSet, base: Rc<Version>) -> Self {
+    fn new(vset: &'a mut VersionSet, base_index: usize) -> Self {
         let mut levels = Vec::with_capacity(NUM_LEVELS as usize);
         for _ in 0..NUM_LEVELS {
             levels.push(LevelState {
@@ -482,7 +522,7 @@ impl<'a> VersionSetBuilder<'a> {
                 added_files: Vec::new(),
             });
         }
-        VersionSetBuilder { vset, base, levels }
+        VersionSetBuilder { vset, base_index, levels }
     }
 
     // Apply all of the edits in *edit to the current state.
@@ -535,7 +575,7 @@ impl<'a> VersionSetBuilder<'a> {
         for level in 0..config::NUM_LEVELS {
             // Merge the set of added files with the set of pre-existing files.
             // Drop any deleted files.  Store the result in *v.
-            let base_files = &self.base.files[level as usize];
+            let base_files = &self.vset.versions[self.base_index].files[level as usize];
             let added_files = &self.levels[level as usize].added_files;
             v.files[level as usize].reserve(base_files.len() + added_files.len());
             let mut base_index = 0;
@@ -654,11 +694,11 @@ impl VersionEdit {
         self.comparator_name = Some(name.to_string());
     }
 
-    fn set_log_number(&mut self, num: u64) {
+    pub fn set_log_number(&mut self, num: u64) {
         self.log_number = Some(num);
     }
 
-    fn set_prev_log_number(&mut self, num: u64) {
+    pub fn set_prev_log_number(&mut self, num: u64) {
         self.prev_log_number = Some(num);
     }
 
