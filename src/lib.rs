@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::{rc::Rc, sync::Arc};
 
 use api::{ByteswiseComparator, Comparator, Error, ReadOptions, WriteOptions};
 
@@ -41,7 +41,7 @@ pub struct Options {
     // comparator provided to previous open calls on the same DB.
 
     // seem like Box cannot be cloned ? Box 是 Sized 不能变成trait object
-    comparator: Rc<dyn Comparator>,
+    comparator: Arc<dyn Comparator>,
 
     // If true, the implementation will do aggressive checking of the
     // data it is processing and will stop early if it detects any
@@ -94,7 +94,7 @@ pub struct Options {
 
     // If non-null, use the specified cache for blocks.
     // If null, leveldb will automatically create and use an 8MB internal cache.
-    block_cache: Option<Rc<dyn Cache>>,
+    block_cache: Option<Arc<dyn Cache>>,
 }
 
 pub const NUM_NON_TABLE_CACHE_FILES: usize = 10;
@@ -105,7 +105,7 @@ impl Options {
             block_restart_interval: 16,
             block_size: 4 * 1024,
             compression: CompressionType::SnappyCompression,
-            comparator: Rc::new(ByteswiseComparator {}),
+            comparator: Arc::new(ByteswiseComparator {}),
             paranoid_checks: false,
             max_open_files: 1000,
             write_buffer_size: 4 * 1024 * 1024,
@@ -141,7 +141,7 @@ impl From<u8> for CompressionType {
 // A file abstraction for sequential writing.  The implementation
 // must provide buffering since callers may append small fragments
 // at a time to the file.
-pub trait WritableFile {
+pub trait WritableFile:Send {
     fn append(&mut self, data: &[u8]) -> api::Result<()>;
     fn close(&mut self) -> api::Result<()>;
     fn flush(&mut self) -> api::Result<()>;
@@ -466,7 +466,7 @@ fn extract_user_key(internal_key: &[u8]) -> &[u8] {
 }
 
 pub trait Env {
-    fn new_writable_file(&mut self, filename: &str) -> api::Result<Box<dyn WritableFile>>;
-    fn remove_file(&mut self, filename: &str) -> api::Result<()>;
-    fn rename_file(&mut self, s: &str, t: &str) -> api::Result<()>;
+    fn new_writable_file(&self, filename: &str) -> api::Result<Box<dyn WritableFile>>;
+    fn remove_file(&self, filename: &str) -> api::Result<()>;
+    fn rename_file(&self, s: &str, t: &str) -> api::Result<()>;
 }

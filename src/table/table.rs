@@ -6,6 +6,7 @@ use crate::{
 use std::{
     io::{Read, Write},
     rc::Rc,
+    sync::Arc,
     vec,
 };
 
@@ -521,7 +522,7 @@ pub struct TableIterator {
     data_iter: Option<BlockIterator>,
     data_block_handle: Vec<u8>,
     file: Rc<dyn RandomAccessFile>,
-    comparator: Rc<dyn Comparator>,
+    comparator: Arc<dyn Comparator>,
 }
 
 impl TableIterator {
@@ -529,7 +530,7 @@ impl TableIterator {
         option: ReadOptions,
         index_iter: BlockIterator,
         file: Rc<dyn RandomAccessFile>,
-        cmp: Rc<dyn Comparator>,
+        cmp: Arc<dyn Comparator>,
     ) -> Self {
         TableIterator {
             option,

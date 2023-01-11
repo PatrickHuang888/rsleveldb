@@ -1,4 +1,4 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use crate::{api, util, Env};
 
@@ -15,7 +15,7 @@ pub fn descriptor_file_name(dbname: &str, number: u64) -> String {
 }
 
 pub fn set_current_file(
-    env: &Rc<RefCell<dyn Env>>,
+    env: &Arc<dyn Env>,
     dbname: &str,
     descriptor_number: u64,
 ) -> api::Result<()> {
@@ -29,10 +29,9 @@ pub fn set_current_file(
     contents.push_str("\n");
     let tmp = temp_file_name(dbname, descriptor_number);
     util::write_string_to_file_sync(env, contents.as_bytes(), tmp.as_str())?;
-    env.borrow_mut()
-        .rename_file(tmp.as_str(), current_file_name(dbname).as_str())
+    env.rename_file(tmp.as_str(), current_file_name(dbname).as_str())
         .map_err(|e| {
-            let _ = env.borrow_mut().remove_file(tmp.as_str());
+            let _ = env.remove_file(tmp.as_str());
             e
         })?;
     Ok(())

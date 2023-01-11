@@ -355,8 +355,8 @@ fn init_type_crc(type_crc: &mut [u32; MAX_RECORD_TYPE]) {
 
 const MAX_RECORD_TYPE: usize = RecordType::Last as usize + 1;
 
-pub struct Writer {
-    dest: Box<dyn WritableFile>,
+pub struct Writer<W> {
+    dest: W,
     block_offset: usize, // Current offset in block
 
                          // crc32c values for all supported record types.  These are
@@ -365,8 +365,8 @@ pub struct Writer {
                          //type_crc: [u32;MAX_RECORD_TYPE]
 }
 
-impl Writer {
-    pub fn new(dest: Box<dyn WritableFile>) -> Self {
+impl<W:WritableFile> Writer<W> {
+    pub fn new(dest: W) -> Self {
         /* let mut type_crc= [0;MAX_RECORD_TYPE];
         init_type_crc(&mut type_crc); */
         Writer {
@@ -391,10 +391,9 @@ impl Writer {
         util::encode_fixed32(&mut buf[..4], crc);
 
         // Write the header and the payload
-        let mut dest = self.dest.as_mut();
-        dest.append(&buf)?;
-        dest.append(record)?;
-        dest.flush()?;
+        self.dest.append(&buf)?;
+        self.dest.append(record)?;
+        self.dest.flush()?;
         self.block_offset += HEADER_SIZE + length;
         Ok(())
     }
@@ -414,7 +413,7 @@ impl Writer {
                 // Switch to a new block
                 if leftover > 0 {
                     // Fill the trailer (literal below relies on kHeaderSize being 7)
-                    self.dest.as_mut().append(&ZERO_TRAILER[..leftover])?;
+                    self.dest.append(&ZERO_TRAILER[..leftover])?;
                 }
                 self.block_offset = 0;
             }
@@ -504,6 +503,7 @@ const HEADER_SIZE: usize = 4 + 2 + 1;
 mod test {
     use std::{cell::RefCell, io, rc::Rc};
 
+    use parking_lot::Mutex;
     use rand::{rngs::ThreadRng, thread_rng, Rng};
 
     use crate::{api, util, SequentialFile, WritableFile};
@@ -511,11 +511,11 @@ mod test {
     use super::{Reader, RecordType, Reporter, Writer, BLOCK_SIZE, HEADER_SIZE};
 
     struct StringDest {
-        rep: Rc<RefCell<Vec<u8>>>,
+        rep: Vec<u8>,
     }
     impl WritableFile for StringDest {
         fn append(&mut self, data: &[u8]) -> api::Result<()> {
-            self.rep.borrow_mut().extend_from_slice(data);
+            self.rep.extend_from_slice(data);
             Ok(())
         }
         fn close(&mut self) -> api::Result<()> {
@@ -589,19 +589,18 @@ mod test {
         }
     }
 
-    struct LogTest {
+    struct LogTest<W> {
         reading: bool,
         dest: Rc<RefCell<Vec<u8>>>,
-        writer: Writer,
+        writer: Writer<W>,
         reader: Reader<StringSource, ReportCollector>,
         reporter: Rc<RefCell<ReportCollector>>,
     }
 
-    impl LogTest {
+    impl<W:WritableFile> LogTest<W> {
         fn new() -> Self {
             let source = Vec::new();
-            let space = Rc::new(RefCell::new(Vec::new()));
-            let string_dest = Box::new(StringDest { rep: space.clone() });
+            let string_dest = Box::new(StringDest { rep: Vec::new() });
             let reporter = Rc::new(RefCell::new(ReportCollector {
                 dropped_bytes: 0,
                 message: String::new(),

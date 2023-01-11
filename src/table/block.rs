@@ -1,7 +1,7 @@
-use std::cmp::Ordering;
 use std::io::Write;
 use std::mem::size_of;
 use std::rc::Rc;
+use std::{cmp::Ordering, sync::Arc};
 
 use byteorder::{ByteOrder, LittleEndian, WriteBytesExt};
 
@@ -175,7 +175,7 @@ impl Block {
         block
     }
 
-    pub fn new_iter(self, cmp: Rc<dyn api::Comparator>) -> BlockIterator {
+    pub fn new_iter(self, cmp: Arc<dyn api::Comparator>) -> BlockIterator {
         BlockIterator::new(self.data, self.num_restarts, self.restart_offset, cmp)
     }
 }
@@ -195,7 +195,7 @@ pub struct BlockIterator {
 
     data: Vec<u8>, // underlying block contents
 
-    comparator: Rc<dyn Comparator>,
+    comparator: Arc<dyn Comparator>,
 }
 
 impl BlockIterator {
@@ -203,7 +203,7 @@ impl BlockIterator {
         data: Vec<u8>,
         num_restarts: usize,
         restarts: usize,
-        cmp: Rc<dyn api::Comparator>,
+        cmp: Arc<dyn api::Comparator>,
     ) -> Self {
         assert!(num_restarts > 0);
         Self {

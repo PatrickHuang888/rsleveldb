@@ -1,6 +1,7 @@
 use std::{
     cmp::{self, Ordering},
     rc::Rc,
+    sync::Arc,
 };
 
 use crate::{
@@ -221,11 +222,11 @@ impl<'a> api::Iterator for MemTableIterator<'a> {
 
 #[derive(Clone)]
 pub struct InternalKeyComparator {
-    user_comparator: Rc<dyn api::Comparator>,
+    user_comparator: Arc<dyn api::Comparator>,
 }
 
 impl InternalKeyComparator {
-    pub fn new(user_comparator: Rc<dyn api::Comparator>) -> Self {
+    pub fn new(user_comparator: Arc<dyn api::Comparator>) -> Self {
         Self { user_comparator }
     }
     pub fn user_comparator(&self) -> &dyn api::Comparator {
