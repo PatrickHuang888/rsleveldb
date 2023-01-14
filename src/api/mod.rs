@@ -5,7 +5,7 @@ use std::{
 
 use crate::db::Snapshot;
 
-pub trait Comparator {
+pub trait Comparator:Clone{
     fn name(&self) -> &'static str;
 
     // Three-way comparison.  Returns value:

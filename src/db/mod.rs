@@ -5,9 +5,9 @@ use std::{
 };
 
 use crate::{
-    api::{self, Iterator},
+    api::{self, Iterator, Comparator},
     table::table::TableBuilder,
-    util, Options, SequenceNumber, WritableFile,
+    util, Options, SequenceNumber, WritableFile, Env,
 };
 
 use self::{memtable::MemTableIterator, version::FileMetaData};
@@ -86,9 +86,10 @@ impl SnapshotList {
     }
 }
 
-fn build_table(
+fn build_table<C:Comparator>(
+    env: &Env,
     dbname: &str,
-    options: &Options,
+    options: &Options<C>,
     iter: &mut MemTableIterator,
     meta: &mut FileMetaData,
 ) -> api::Result<()> {
@@ -96,7 +97,7 @@ fn build_table(
     iter.seek_to_first()?;
 
     let fname = filename::table_file_name(dbname, meta.number);
-    let mut file = util::new_writable_file(fname)?;
+    let mut file = env.new_posix_writable_file(fname.as_str())?;
 
     {
         let mut builder = TableBuilder::new(&mut file, options.clone());

@@ -15,7 +15,7 @@ pub fn descriptor_file_name(dbname: &str, number: u64) -> String {
 }
 
 pub fn set_current_file(
-    env: &Arc<dyn Env>,
+    env: &Env,
     dbname: &str,
     descriptor_number: u64,
 ) -> api::Result<()> {

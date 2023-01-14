@@ -589,18 +589,18 @@ mod test {
         }
     }
 
-    struct LogTest<W> {
+    struct LogTest {
         reading: bool,
-        dest: Rc<RefCell<Vec<u8>>>,
-        writer: Writer<W>,
+        //dest: Rc<RefCell<Vec<u8>>>,
+        writer: Writer<StringDest>,
         reader: Reader<StringSource, ReportCollector>,
         reporter: Rc<RefCell<ReportCollector>>,
     }
 
-    impl<W:WritableFile> LogTest<W> {
+    impl LogTest {
         fn new() -> Self {
             let source = Vec::new();
-            let string_dest = Box::new(StringDest { rep: Vec::new() });
+            let string_dest = StringDest { rep: Vec::new() };
             let reporter = Rc::new(RefCell::new(ReportCollector {
                 dropped_bytes: 0,
                 message: String::new(),
@@ -619,7 +619,6 @@ mod test {
             let writer = Writer::new(string_dest);
             LogTest {
                 reader,
-                dest: space.clone(),
                 writer,
                 reading: false,
                 reporter,
@@ -632,7 +631,7 @@ mod test {
                 self.reader
                     .file
                     .contents
-                    .extend_from_slice(&self.dest.borrow());
+                    .extend_from_slice(&self.writer.dest.rep);
             }
             let mut scratch = Vec::new();
             let mut record = Vec::new();
@@ -649,7 +648,7 @@ mod test {
         }
 
         fn written_bytes(&self) -> usize {
-            self.dest.borrow().len()
+            self.writer.dest.rep.len()
         }
 
         fn dropped_bytes(&self) -> usize {
@@ -673,23 +672,23 @@ mod test {
         }
 
         fn increment_byte(&mut self, offset: usize, delta: u8) {
-            self.dest.borrow_mut()[offset] += delta
+            self.writer.dest.rep[offset] += delta
         }
 
         fn set_byte(&mut self, offset: usize, new_byte: u8) {
-            self.dest.borrow_mut()[offset] = new_byte;
+            self.writer.dest.rep[offset] = new_byte;
         }
 
         fn fix_checksum(&mut self, header_offset: usize, len: usize) {
             // Compute crc of type/len/data
             let start = header_offset + HEADER_SIZE;
-            let crc = util::crc(&self.dest.borrow()[start..start + len]);
-            util::encode_fixed32(&mut self.dest.borrow_mut()[header_offset..], crc);
+            let crc = util::crc(&self.writer.dest.rep[start..start + len]);
+            util::encode_fixed32(&mut self.writer.dest.rep[header_offset..], crc);
         }
 
         fn shrink_size(&mut self, bytes: usize) {
-            let len = self.dest.borrow().len();
-            self.dest.borrow_mut().truncate(len - bytes);
+            let len = self.writer.dest.rep.len();
+            self.writer.dest.rep.truncate(len - bytes);
         }
     }
 

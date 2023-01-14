@@ -22,7 +22,7 @@ impl WritableFile for Oops {
 }
 
 pub fn write_string_to_file_sync(
-    env: &Arc<dyn Env>,
+    env: &Env,
     data: &[u8],
     fname: &str,
 ) -> api::Result<()> {
@@ -30,13 +30,13 @@ pub fn write_string_to_file_sync(
 }
 
 pub fn do_write_string_to_file(
-    env: &Arc<dyn Env>,
+    env: &Env,
     data: &[u8],
     fname: &str,
     should_sync: bool,
 ) -> api::Result<()> {
-    let mut file = env.new_writable_file(fname)?;
-    let mut r = file.as_mut().append(data);
+    let mut file = env.new_posix_writable_file(fname)?;
+    let mut r = file.append(data);
     if r.is_ok() && should_sync {
         r = file.sync();
     }
@@ -46,11 +46,6 @@ pub fn do_write_string_to_file(
         env.remove_file(fname)?;
     }
     Ok(())
-}
-
-pub fn new_writable_file(fname: String) -> api::Result<impl WritableFile> {
-    todo!();
-    Ok(Oops {})
 }
 
 static B: u8 = 0x80;

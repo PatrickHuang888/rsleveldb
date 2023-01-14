@@ -16,7 +16,7 @@ use crate::{api::Comparator, api::Iterator, table::MAX_VARINT_LEN64, Compression
 
 use super::block::{Block, BlockBuilder, BlockIterator};
 
-pub struct TableBuilder<'a, W: WritableFile> {
+pub struct TableBuilder<'a, W: WritableFile, C:Comparator> {
     writer: &'a mut W,
 
     data_block: BlockBuilder,
@@ -44,14 +44,14 @@ pub struct TableBuilder<'a, W: WritableFile> {
 
     status: Option<Error>,
 
-    options: Options,
+    options: Options<C>,
     //index_opts:Options<'a>,
 
     //filter_block: Option<FilterBlock<'c>>,
 }
 
-impl<'a, W: WritableFile> TableBuilder<'a, W> {
-    pub fn new(w: &'a mut W, options: Options) -> Self {
+impl<'a, W: WritableFile, C:Comparator> TableBuilder<'a, W, C> {
+    pub fn new(w: &'a mut W, options: Options<C>) -> Self {
         TableBuilder {
             writer: w,
 
@@ -297,7 +297,7 @@ fn write_raw_block<W: WritableFile>(
     Ok(n + BLOCK_TRAILER_SIZE)
 }
 
-impl<'a, W: WritableFile> Drop for TableBuilder<'a, W> {
+impl<'a, W: WritableFile, C:Comparator> Drop for TableBuilder<'a, W, C> {
     fn drop(&mut self) {
         assert!(self.closed) // Catch errors where caller forgot to call Finish()
     }
@@ -380,8 +380,8 @@ impl Default for BlockHandle {
 // A Table is a sorted map from strings to strings.  Tables are
 // immutable and persistent.  A Table may be safely accessed from
 // multiple threads without external synchronization.
-pub struct Table {
-    options: Options,
+pub struct Table<C:Comparator> {
+    options: Options<C>,
     status: Option<String>,
 
     file: Rc<dyn RandomAccessFile>,
@@ -390,9 +390,9 @@ pub struct Table {
     index_iter: BlockIterator,
 }
 
-impl Table {
+impl<C:Comparator> Table<C> {
     pub fn open(
-        options: Options,
+        r_options: &Options<C>,
         file: Rc<dyn RandomAccessFile>,
         size: usize,
     ) -> api::Result<Self> {
@@ -407,9 +407,10 @@ impl Table {
         file.read(size - FOOTER_LEN, FOOTER_LEN, &mut footer_input)?;
         let mut footer = Footer::decode_from(&footer_input)?;
 
+        let options = r_options.clone();
         // Read index block
         let mut opt = ReadOptions::default();
-        if options.paranoid_checks {
+        if r_options.paranoid_checks {
             opt.verify_checksums = true;
         }
         let index_contents = read_block_content(&file, &opt, &mut footer.index_handle)?;

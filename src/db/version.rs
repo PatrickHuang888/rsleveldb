@@ -7,7 +7,7 @@ use crate::{
     api::{self, Comparator, ReadOptions},
     config::{self, L0_COMPACTION_TRIGGER, NUM_LEVELS},
     util, Env, InternalKey, Options, SequenceNumber, WritableFile, MAX_SEQUENCE_NUMBER,
-    TYPE_FOR_SEEK,
+    TYPE_FOR_SEEK, PosixWritableFile,
 };
 
 use super::{
@@ -222,7 +222,7 @@ struct Saver {
     value: Vec<u8>,
 }
 
-pub(crate) struct VersionSet<W>{
+pub(crate) struct VersionSet{
     last_sequence: u64,
     current_index: i32,
     log_number: u64,
@@ -232,10 +232,10 @@ pub(crate) struct VersionSet<W>{
     // Per-level key at which the next compaction at that level should start.
     // Either an empty string, or a valid InternalKey.
     compact_pointer: [Vec<u8>; config::NUM_LEVELS as usize],
-    descriptor_log: Option<log::Writer<W>>,
+    descriptor_log: Option<log::Writer<PosixWritableFile>>,
     dbname: String,
     manifest_file_number: u64,
-    env: Arc<dyn Env>,
+    env: Env,
 
     versions: Vec<Version>,
 }
@@ -254,7 +254,7 @@ impl Compaction {
     }
 }
 
-impl<W:WritableFile> VersionSet<W>{
+impl VersionSet{
     // Returns true iff some level needs a compaction.
     pub fn needs_compaction(&self) -> bool {
         let v = &self.versions[self.current_index as usize];
@@ -275,7 +275,7 @@ impl<W:WritableFile> VersionSet<W>{
     }
 }
 
-impl<W:WritableFile> VersionSet<W>{
+impl VersionSet{
     // Return a compaction object for compacting the range [begin,end] in
     // the specified level.  Returns nullptr if there is nothing in that
     // level that overlaps the specified range.  Caller should delete
@@ -340,10 +340,10 @@ impl<W:WritableFile> VersionSet<W>{
             // first call to LogAndApply (when opening the database).
             new_manifest_file =
                 filename::descriptor_file_name(&self.dbname, self.manifest_file_number);
-            let log = self
+            let log_file = self
                 .env
-                .new_writable_file(&new_manifest_file)?;
-            self.descriptor_log = Some(log::Writer::new(log));
+                .new_posix_writable_file(&new_manifest_file)?;
+            self.descriptor_log = Some(log::Writer::new(log_file));
             r = self.write_snapshot();
         }
 
@@ -523,14 +523,14 @@ struct LevelState {
 // A helper class so we can efficiently apply a whole sequence
 // of edits to a particular state without creating intermediate
 // Versions that contain full copies of the intermediate state.
-struct VersionSetBuilder<'a, W> {
-    vset: &'a mut VersionSet<W>,
+struct VersionSetBuilder<'a> {
+    vset: &'a mut VersionSet,
     base_index: usize,
     levels: Vec<LevelState>,
 }
 
-impl<'a, W:WritableFile> VersionSetBuilder<'a, W> {
-    fn new(vset: &'a mut VersionSet<W>, base_index: usize) -> Self {
+impl<'a> VersionSetBuilder<'a> {
+    fn new(vset: &'a mut VersionSet, base_index: usize) -> Self {
         let mut levels = Vec::with_capacity(NUM_LEVELS as usize);
         for _ in 0..NUM_LEVELS {
             levels.push(LevelState {

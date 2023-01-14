@@ -7,12 +7,12 @@ use std::thread;
 
 use parking_lot::lock_api::RawMutex;
 
-use crate::api::{self, Error, ReadOptions, WriteOptions};
+use crate::api::{self, Error, ReadOptions, WriteOptions, Comparator};
 use crate::config::NUM_LEVELS;
 use crate::db::version::VersionEdit;
 use crate::{
     config, util, InternalKey, Options, SequenceNumber, WritableFile, WriteBatch, DB,
-    NUM_NON_TABLE_CACHE_FILES,
+    NUM_NON_TABLE_CACHE_FILES, Env, PosixWritableFile,
 };
 
 use super::build_table;
@@ -30,9 +30,9 @@ fn clip_to_range<V: Ord>(mut v: V, minvalue: V, maxvalue: V) {
     }
 }
 
-fn sanitize_options(dbname: &str, icmp: Arc<InternalKeyComparator>, src: &Options) -> Options {
+fn sanitize_options<C:Comparator>(dbname: &str, icmp: &InternalKeyComparator, src: &Options<C>) -> Options<C> {
     let mut result = src.clone();
-    result.comparator = icmp;
+    result.comparator = *icmp;
     clip_to_range(
         result.max_open_files,
         64 + NUM_NON_TABLE_CACHE_FILES,
@@ -41,12 +41,12 @@ fn sanitize_options(dbname: &str, icmp: Arc<InternalKeyComparator>, src: &Option
     clip_to_range(result.write_buffer_size, 64 << 10, 1 << 30);
     clip_to_range(result.max_file_size, 1 << 20, 1 << 30);
     clip_to_range(result.block_size, 1 << 10, 4 << 20);
-    match result.info_log {
+    /* match result.info_log {
         None => {
             todo!()
         }
         _ => {}
-    }
+    } */
     match result.block_cache {
         None => {
             todo!()
@@ -56,21 +56,40 @@ fn sanitize_options(dbname: &str, icmp: Arc<InternalKeyComparator>, src: &Option
     result
 }
 
-struct DBImpl<W>{
+struct MutexLock<'a> {
+    mu: &'a parking_lot::RawMutex,
+}
+
+impl<'a> MutexLock<'a> {
+    fn new(mu: &'a parking_lot::RawMutex) -> Self {
+        let ml = MutexLock { mu };
+        ml.mu.lock();
+        ml
+    }
+}
+
+impl<'a> Drop for MutexLock<'a> {
+    fn drop(&mut self) {
+        unsafe { self.mu.unlock() };
+    }
+}
+
+struct DBImpl<C:Comparator>{
     internal_comparator: Arc<InternalKeyComparator>,
-    options: Options,
+    options: Options<C>,
     dbname: String,
+    env:Env,
 
     // State below is protected by mutex_
     mutex: parking_lot::RawMutex,
 
     writers: collections::VecDeque<Writer>,
-    log: log::Writer<W>,
+    log: log::Writer<PosixWritableFile>,
     //log_file: Arc<RefCell<W>>,
     // table_cache_ provides its own synchronization
     table_cache: TableCache,
 
-    vset: VersionSet<W>,
+    vset: VersionSet,
 
     mem: MemTable,
     imem: Option<MemTable>,
@@ -89,27 +108,9 @@ struct DBImpl<W>{
     bg_error: Option<api::Error>,
 }
 
-struct MutexLock {
-    mu: parking_lot::RawMutex,
-}
-
-impl MutexLock {
-    fn new(mu: parking_lot::RawMutex) -> Self {
-        let ml = MutexLock { mu };
-        ml.mu.lock();
-        ml
-    }
-}
-
-impl Drop for MutexLock {
-    fn drop(&mut self) {
-        unsafe { self.mu.unlock() };
-    }
-}
-
-impl<W:WritableFile> DBImpl<W>{
+impl<C:Comparator> DBImpl<C>{
     fn background_call(&mut self) {
-        let _lock = MutexLock::new(self.mutex);
+        let _lock = MutexLock::new(&self.mutex);
 
         assert_eq!(self.background_compaction_scheduled, true);
 
@@ -237,7 +238,7 @@ impl<W:WritableFile> DBImpl<W>{
 
         unsafe { self.mutex.unlock() };
 
-        build_table(self.dbname.as_str(), &self.options, &mut it, &mut meta)?;
+        build_table(&self.env, self.dbname.as_str(), &self.options, &mut it, &mut meta)?;
 
         self.mutex.lock();
 
@@ -312,18 +313,18 @@ struct ManualCompaction {
     done: bool,
 }
 
-fn table_cache_size(sanitized_options: &Options) -> usize {
+fn table_cache_size<C:Comparator>(sanitized_options: &Options<C>) -> usize {
     // Reserve ten files or so for other uses and give the rest to TableCache.
     sanitized_options.max_open_files - NUM_NON_TABLE_CACHE_FILES
 }
 
-impl<W:WritableFile> DB for DBImpl<W>{
-    fn open(options: &Options, dbname: &str) -> api::Result<Self> {
+impl<C:Comparator> DB<C> for DBImpl<C>{
+    fn open(options: &Options<C>, dbname: &str) -> api::Result<Self> {
         todo!()
     }
 
     fn get(&mut self, options: &ReadOptions, key: &[u8], value: &mut Vec<u8>) -> api::Result<()> {
-        let _lock = MutexLock::new(self.mutex);
+        let _lock = MutexLock::new(&self.mutex);
 
         let snaphsot: SequenceNumber;
         match &options.snapshot {
