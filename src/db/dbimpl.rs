@@ -30,9 +30,9 @@ fn clip_to_range<V: Ord>(mut v: V, minvalue: V, maxvalue: V) {
     }
 }
 
-fn sanitize_options<C:Comparator>(dbname: &str, icmp: &InternalKeyComparator, src: &Options<C>) -> Options<C> {
+fn sanitize_options<C:Comparator>(dbname: &str, internal_comparator: &C, src: &Options<C>) -> Options<C> {
     let mut result = src.clone();
-    result.comparator = *icmp;
+    result.comparator = internal_comparator.clone();
     clip_to_range(
         result.max_open_files,
         64 + NUM_NON_TABLE_CACHE_FILES,
@@ -74,8 +74,8 @@ impl<'a> Drop for MutexLock<'a> {
     }
 }
 
-struct DBImpl<C:Comparator>{
-    internal_comparator: Arc<InternalKeyComparator>,
+struct DBImpl<C:Comparator + Send + Sync>{
+    internal_comparator: InternalKeyComparator<C>,
     options: Options<C>,
     dbname: String,
     env:Env,
@@ -89,10 +89,10 @@ struct DBImpl<C:Comparator>{
     // table_cache_ provides its own synchronization
     table_cache: TableCache,
 
-    vset: VersionSet,
+    vset: VersionSet<C>,
 
-    mem: MemTable,
-    imem: Option<MemTable>,
+    mem: MemTable<C>,
+    imem: Option<MemTable<C>>,
 
     shutting_down: atomic::AtomicBool,
     logfile_number: u64,
@@ -108,7 +108,7 @@ struct DBImpl<C:Comparator>{
     bg_error: Option<api::Error>,
 }
 
-impl<C:Comparator> DBImpl<C>{
+impl<C:Comparator + Send + Sync> DBImpl<C>{
     fn background_call(&mut self) {
         let _lock = MutexLock::new(&self.mutex);
 
@@ -146,7 +146,7 @@ impl<C:Comparator> DBImpl<C>{
             // No work to be done
         } else {
             self.background_compaction_scheduled = true;
-            thread::spawn(|| {
+            thread::spawn(move|| {
                 self.background_call();
             });
         }
@@ -222,7 +222,7 @@ impl<C:Comparator> DBImpl<C>{
 
     fn write_level0_table(
         &mut self,
-        mem: &mut MemTable,
+        mem: &mut MemTable<C>,
         edit: &mut VersionEdit,
         o_base: Option<&mut Version>,
     ) -> api::Result<()> {
@@ -318,7 +318,7 @@ fn table_cache_size<C:Comparator>(sanitized_options: &Options<C>) -> usize {
     sanitized_options.max_open_files - NUM_NON_TABLE_CACHE_FILES
 }
 
-impl<C:Comparator> DB<C> for DBImpl<C>{
+impl<C:Comparator + Send + Sync> DB<C> for DBImpl<C>{
     fn open(options: &Options<C>, dbname: &str) -> api::Result<Self> {
         todo!()
     }

@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    api::{self},
+    api::{self, Comparator},
     extract_user_key, pack_sequence_and_type,
     util::{self, decode_fixed64},
     InternalKey, SequenceNumber, ValueType, MAX_SEQUENCE_NUMBER,
@@ -13,8 +13,8 @@ use crate::{
 
 use super::skiplist::{Comparator as SkipListComparator, Iterator, SkipList, SkipListIterator};
 
-type Table = SkipList<KeyComparator, Vec<u8>>;
-type TableIterator<'a> = SkipListIterator<'a, KeyComparator, Vec<u8>>;
+type Table<C:api::Comparator> = SkipList<KeyComparator<C>, Vec<u8>>;
+type TableIterator<'l, C:api::Comparator> = SkipListIterator<'l, KeyComparator<C>, Vec<u8>>;
 
 const LookupKeySpaceSize: usize = 200;
 
@@ -67,18 +67,18 @@ impl LookupKey {
     }
 }
 
-pub struct MemTable {
-    table: Table,
-    comparator: KeyComparator,
+pub struct MemTable<C:Comparator> {
+    table: Table<C>,
+    comparator: KeyComparator<C>,
 }
 
-impl MemTable {
-    pub fn new(cmp: InternalKeyComparator) -> Self {
+impl<C:api::Comparator> MemTable<C> {
+    pub fn new(internal_cmp: InternalKeyComparator<C>) -> Self {
         let head_key = vec![0];
-        let key_cmp = KeyComparator { comparator: cmp };
-        let table = Table::new(key_cmp.clone(), &head_key);
+        let key_cmp = KeyComparator { comparator:internal_cmp};
+        let table = Table::new(key_cmp, &head_key);
         MemTable {
-            comparator: key_cmp,
+            comparator: key_cmp.clone(),
             table,
         }
     }
@@ -160,7 +160,7 @@ impl MemTable {
         self.table.insert(&buf);
     }
 
-    pub(crate) fn new_iter(&mut self) -> MemTableIterator {
+    pub(crate) fn new_iter<'l>(&'l mut self) -> MemTableIterator<'l, C> {
         MemTableIterator {
             scratch: Vec::new(),
             iter: self.table.new_iterator(),
@@ -168,12 +168,12 @@ impl MemTable {
     }
 }
 
-pub(crate) struct MemTableIterator<'a> {
-    iter: TableIterator<'a>,
+pub(crate) struct MemTableIterator<'l, C:Comparator> {
+    iter: TableIterator<'l, C>,
     scratch: Vec<u8>,
 }
 
-impl<'a> api::Iterator for MemTableIterator<'a> {
+impl<'l, C:api::Comparator> api::Iterator for MemTableIterator<'l, C> {
     fn key(&self) -> api::Result<&[u8]> {
         let (key, _) = util::get_length_prefixed_slice(self.iter.key())
             .map_err(|_| api::Error::Corruption("key".to_string()))?;
@@ -221,26 +221,26 @@ impl<'a> api::Iterator for MemTableIterator<'a> {
 }
 
 #[derive(Clone)]
-pub struct InternalKeyComparator {
-    user_comparator: Arc<dyn api::Comparator>,
+pub struct InternalKeyComparator<C>{
+    user_comparator: C,
 }
 
-impl InternalKeyComparator {
-    pub fn new(user_comparator: Arc<dyn api::Comparator>) -> Self {
+impl<C:api::Comparator> InternalKeyComparator<C>{
+    pub fn new(user_comparator: C) -> Self {
         Self { user_comparator }
     }
-    pub fn user_comparator(&self) -> &dyn api::Comparator {
-        self.user_comparator.as_ref()
+    pub fn user_comparator(&self) -> &C {
+        &self.user_comparator
     }
 }
 
-impl super::skiplist::Comparator<InternalKey> for InternalKeyComparator {
+impl<C:api::Comparator> super::skiplist::Comparator<InternalKey> for InternalKeyComparator<C>{
     fn compare(&self, a: &InternalKey, b: &InternalKey) -> cmp::Ordering {
         api::Comparator::compare(self, &a.rep, &b.rep)
     }
 }
 
-impl api::Comparator for InternalKeyComparator {
+impl<C:api::Comparator> api::Comparator for InternalKeyComparator<C> {
     fn name(&self) -> &'static str {
         "leveldb.InternalKeyComparator"
     }
@@ -319,11 +319,11 @@ fn encode_key(scratch: &mut Vec<u8>, key: &[u8]) {
 }
 
 #[derive(Clone)]
-struct KeyComparator {
-    comparator: InternalKeyComparator,
+struct KeyComparator<C>{
+    comparator: InternalKeyComparator<C>,
 }
 
-impl super::skiplist::Comparator<Vec<u8>> for KeyComparator {
+impl<C:api::Comparator> super::skiplist::Comparator<Vec<u8>> for KeyComparator<C> {
     fn compare(&self, key_a: &Vec<u8>, key_b: &Vec<u8>) -> cmp::Ordering {
         // Internal keys are encoded as length-prefixed strings.
         let (a, _) = util::get_length_prefixed_slice(key_a).unwrap();

@@ -260,7 +260,7 @@ impl<C: Comparator<K>, K: PartialEq + Clone> SkipList<C, K> {
         self.max_height.load(Ordering::Relaxed)
     }
 
-    pub fn new_iterator<'a>(&'a mut self) -> SkipListIterator<'a, C, K> {
+    pub fn new_iterator<'l>(&'l mut self) -> SkipListIterator<'l, C, K> {
         SkipListIterator {
             list: self,
             n_ptr: ptr::null_mut(),

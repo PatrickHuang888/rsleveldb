@@ -175,13 +175,13 @@ impl Block {
         block
     }
 
-    pub fn new_iter(self, cmp: Arc<dyn api::Comparator>) -> BlockIterator {
+    pub fn new_iter<'a, C:Comparator>(self, cmp: &'a C) -> BlockIterator<'a, C> {
         BlockIterator::new(self.data, self.num_restarts, self.restart_offset, cmp)
     }
 }
 
 #[derive(Clone)]
-pub struct BlockIterator {
+pub struct BlockIterator<'a, C> {
     key: Vec<u8>,
     value: Vec<u8>,
 
@@ -195,15 +195,15 @@ pub struct BlockIterator {
 
     data: Vec<u8>, // underlying block contents
 
-    comparator: Arc<dyn Comparator>,
+    comparator: &'a C,
 }
 
-impl BlockIterator {
+impl<'a, C:Comparator> BlockIterator<'a, C> {
     fn new(
         data: Vec<u8>,
         num_restarts: usize,
         restarts: usize,
-        cmp: Arc<dyn api::Comparator>,
+        cmp: &'a C,
     ) -> Self {
         assert!(num_restarts > 0);
         Self {
@@ -336,7 +336,7 @@ impl BlockIterator {
     }
 }
 
-impl api::Iterator for BlockIterator {
+impl<'a, C:Comparator> api::Iterator for BlockIterator<'a, C> {
     fn next(&mut self) -> Result<()> {
         self.valid()?;
         self.parse_next_key()?;

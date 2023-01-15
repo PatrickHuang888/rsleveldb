@@ -134,8 +134,8 @@ impl Version{
 // largest==nullptr represents a key largest than all keys in the DB.
 // REQUIRES: If disjoint_sorted_files, files[] contains disjoint ranges
 //           in sorted order.
-fn some_file_overlaps_range(
-    icmp: &InternalKeyComparator,
+fn some_file_overlaps_range<C:api::Comparator>(
+    icmp: &InternalKeyComparator<C>,
     disjoint_sorted_files: bool,
     files: Vec<&FileMetaData>,
     smallest_user_key_opt: Option<&[u8]>,
@@ -174,7 +174,7 @@ fn some_file_overlaps_range(
     !before_file(ucmp, largest_user_key_opt, files[index])
 }
 
-fn after_file(ucmp: &dyn api::Comparator, user_key_opt: Option<&[u8]>, f: &FileMetaData) -> bool {
+fn after_file(ucmp: &impl api::Comparator, user_key_opt: Option<&[u8]>, f: &FileMetaData) -> bool {
     // null user_key occurs before all keys and is therefore never after *f
     if let Some(user_key) = user_key_opt {
         return ucmp.compare(user_key, f.largest.user_key()).is_lt();
@@ -182,7 +182,7 @@ fn after_file(ucmp: &dyn api::Comparator, user_key_opt: Option<&[u8]>, f: &FileM
     return false;
 }
 
-fn before_file(ucmp: &dyn api::Comparator, user_key_opt: Option<&[u8]>, f: &FileMetaData) -> bool {
+fn before_file(ucmp: &impl api::Comparator, user_key_opt: Option<&[u8]>, f: &FileMetaData) -> bool {
     // null user_key occurs after all keys and is therefore never before *f
     if let Some(user_key) = user_key_opt {
         return ucmp.compare(user_key, f.smallest.user_key()).is_lt();
@@ -190,8 +190,8 @@ fn before_file(ucmp: &dyn api::Comparator, user_key_opt: Option<&[u8]>, f: &File
     return false;
 }
 
-struct State {
-    saver: Saver,
+struct State<C> {
+    saver: Saver<C>,
     stats: GetStats,
     options: ReadOptions,
     ikey: Vec<u8>,
@@ -202,7 +202,7 @@ struct State {
     found: bool,
 }
 
-impl State {
+impl<C:api::Comparator> State<C> {
     fn fn_match(&self, level: u32, f: FileMetaData) -> bool {
         todo!()
     }
@@ -215,20 +215,20 @@ enum SaverState {
     Corrupt,
 }
 
-struct Saver {
+struct Saver<C> {
     state: SaverState,
-    ucmp: Rc<dyn Comparator>,
+    ucmp: C,
     user_key: Vec<u8>,
     value: Vec<u8>,
 }
 
-pub(crate) struct VersionSet{
+pub(crate) struct VersionSet<C>{
     last_sequence: u64,
     current_index: i32,
     log_number: u64,
     next_file_number: u64,
     prev_log_number: u64, // 0 or backing store for memtable being compacted
-    icmp: InternalKeyComparator,
+    icmp: InternalKeyComparator<C>,
     // Per-level key at which the next compaction at that level should start.
     // Either an empty string, or a valid InternalKey.
     compact_pointer: [Vec<u8>; config::NUM_LEVELS as usize],
@@ -254,7 +254,7 @@ impl Compaction {
     }
 }
 
-impl VersionSet{
+impl<C:api::Comparator> VersionSet<C>{
     // Returns true iff some level needs a compaction.
     pub fn needs_compaction(&self) -> bool {
         let v = &self.versions[self.current_index as usize];
@@ -273,9 +273,7 @@ impl VersionSet{
     pub fn current(&self) -> Option<&Version> {
         Some(&self.versions[self.current_index as usize])
     }
-}
 
-impl VersionSet{
     // Return a compaction object for compacting the range [begin,end] in
     // the specified level.  Returns nullptr if there is nothing in that
     // level that overlaps the specified range.  Caller should delete
@@ -506,10 +504,10 @@ fn max_bytes_for_level(level: u32) -> f64 {
 }
 
 // Helper to sort by v->files_[file_number].smallest
-struct BySmallestKey<'a> {
-    internal_comparator: &'a InternalKeyComparator,
+struct BySmallestKey<'a, C> {
+    internal_comparator: &'a InternalKeyComparator<C>,
 }
-impl<'a> BySmallestKey<'a> {
+impl<'a, C:api::Comparator> BySmallestKey<'a, C> {
     fn compare(&self, f1: &FileMetaData, f2: &FileMetaData) -> std::cmp::Ordering {
         super::skiplist::Comparator::compare(self.internal_comparator, &f1.smallest, &f2.smallest)
     }
@@ -523,14 +521,14 @@ struct LevelState {
 // A helper class so we can efficiently apply a whole sequence
 // of edits to a particular state without creating intermediate
 // Versions that contain full copies of the intermediate state.
-struct VersionSetBuilder<'a> {
-    vset: &'a mut VersionSet,
+struct VersionSetBuilder<'a, C> {
+    vset: &'a mut VersionSet<C>,
     base_index: usize,
     levels: Vec<LevelState>,
 }
 
-impl<'a> VersionSetBuilder<'a> {
-    fn new(vset: &'a mut VersionSet, base_index: usize) -> Self {
+impl<'a, C:api::Comparator> VersionSetBuilder<'a, C> {
+    fn new(vset: &'a mut VersionSet<C>, base_index: usize) -> Self {
         let mut levels = Vec::with_capacity(NUM_LEVELS as usize);
         for _ in 0..NUM_LEVELS {
             levels.push(LevelState {

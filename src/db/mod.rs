@@ -90,7 +90,7 @@ fn build_table<C:Comparator>(
     env: &Env,
     dbname: &str,
     options: &Options<C>,
-    iter: &mut MemTableIterator,
+    iter: &mut MemTableIterator<C>,
     meta: &mut FileMetaData,
 ) -> api::Result<()> {
     meta.file_size = 0;

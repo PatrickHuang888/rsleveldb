@@ -380,17 +380,17 @@ impl Default for BlockHandle {
 // A Table is a sorted map from strings to strings.  Tables are
 // immutable and persistent.  A Table may be safely accessed from
 // multiple threads without external synchronization.
-pub struct Table<C:Comparator> {
+pub struct Table<'a, C:Comparator> {
     options: Options<C>,
     status: Option<String>,
 
     file: Rc<dyn RandomAccessFile>,
 
     meta_index_handle: BlockHandle,
-    index_iter: BlockIterator,
+    index_iter: BlockIterator<'a, C>,
 }
 
-impl<C:Comparator> Table<C> {
+impl<'a, C:Comparator> Table<'a, C> {
     pub fn open(
         r_options: &Options<C>,
         file: Rc<dyn RandomAccessFile>,
@@ -415,12 +415,11 @@ impl<C:Comparator> Table<C> {
         }
         let index_contents = read_block_content(&file, &opt, &mut footer.index_handle)?;
         let index_block = Block::new(index_contents);
-        let comparator = options.comparator.clone();
         let r = Table {
             options,
             status: None,
             file,
-            index_iter: index_block.new_iter(comparator),
+            index_iter: index_block.new_iter(&options.comparator),
             meta_index_handle: footer.metaindex_handle,
         };
         r.read_meta()?;
@@ -432,13 +431,13 @@ impl<C:Comparator> Table<C> {
         Ok(())
     }
 
-    pub fn iter(&self, option: ReadOptions) -> TableIterator {
+    pub fn iter(&'a self, option: ReadOptions) -> TableIterator<'a, C> {
         //let index_iter = self.index_block.iter(self.options.comparator.clone());
         TableIterator::new(
             option,
             self.index_iter.clone(),
             self.file.clone(),
-            self.options.comparator.clone(),
+            &self.options.comparator,
         )
     }
 }
@@ -517,21 +516,21 @@ fn read_block_content(
 //
 // Uses a supplied function to convert an index_iter value into
 // an iterator over the contents of the corresponding block.
-pub struct TableIterator {
+pub struct TableIterator<'a, C> {
     option: ReadOptions,
-    index_iter: BlockIterator,
-    data_iter: Option<BlockIterator>,
+    index_iter: BlockIterator<'a, C>,
+    data_iter: Option<BlockIterator<'a, C>>,
     data_block_handle: Vec<u8>,
     file: Rc<dyn RandomAccessFile>,
-    comparator: Arc<dyn Comparator>,
+    comparator: &'a C,
 }
 
-impl TableIterator {
+impl<'a, C:Comparator> TableIterator<'a, C> {
     fn new(
         option: ReadOptions,
-        index_iter: BlockIterator,
+        index_iter: BlockIterator<'a, C>,
         file: Rc<dyn RandomAccessFile>,
-        cmp: Arc<dyn Comparator>,
+        cmp: &'a C,
     ) -> Self {
         TableIterator {
             option,
@@ -556,7 +555,7 @@ impl TableIterator {
                 let block = block_reader(&self.file, &self.option, handle)?;
                 self.data_block_handle.clear();
                 self.data_block_handle.extend_from_slice(handle);
-                self.data_iter = Some(block.new_iter(self.comparator.clone()));
+                self.data_iter = Some(block.new_iter(self.comparator));
             }
         }
         Ok(())
@@ -595,7 +594,7 @@ impl TableIterator {
     }
 }
 
-impl api::Iterator for TableIterator {
+impl<'a, C:Comparator> api::Iterator for TableIterator<'a, C> {
     fn next(&mut self) -> api::Result<()> {
         assert!(self.valid()?);
         self.data_iter.as_mut().unwrap().next()?;
