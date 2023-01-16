@@ -100,7 +100,7 @@ fn build_table<C:Comparator>(
     let mut file = env.new_posix_writable_file(fname.as_str())?;
 
     {
-        let mut builder = TableBuilder::new(&mut file, options.clone());
+        let mut builder = TableBuilder::new(&mut file, options);
         meta.smallest.decode_from(iter.key().unwrap());
         let mut key = Vec::new();
         while iter.valid().unwrap() {

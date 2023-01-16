@@ -109,7 +109,7 @@ struct DBImpl<C:Comparator + Send + Sync>{
 }
 
 impl<C:Comparator + Send + Sync> DBImpl<C>{
-    fn background_call(&mut self) {
+    /* fn background_call(&mut self) {
         let _lock = MutexLock::new(&self.mutex);
 
         assert_eq!(self.background_compaction_scheduled, true);
@@ -152,16 +152,16 @@ impl<C:Comparator + Send + Sync> DBImpl<C>{
         }
     }
 
-    fn background_compaction(&mut self) {
+    fn background_compaction(&self) {
         assert!(self.mutex.is_locked());
 
-        if let Some(imm) = self.imem {
+        if self.imem.is_some() {
             self.compact_memtable();
             return;
         }
 
-        let oc: Option<Compaction>;
-        if let Some(mut manual) = self.mannual_compaction {
+        let oc: Option<&Compaction>;
+        if let Some(manual) = &mut self.mannual_compaction {
             oc = self
                 .vset
                 .compact_range(manual.level, &manual.begin, &manual.end);
@@ -218,7 +218,7 @@ impl<C:Comparator + Send + Sync> DBImpl<C>{
                 self.record_background_error(e);
             }
         }
-    }
+    } */
 
     fn write_level0_table(
         &mut self,
@@ -337,7 +337,7 @@ impl<C:Comparator + Send + Sync> DB<C> for DBImpl<C>{
         }
 
         // Unlock while reading from files and memtables
-        unsafe { self.mutex.unlock() };
+        drop(_lock);
 
         // First look in the memtable, then in the immutable memtable (if any).
         let lkey = LookupKey::new(key, snaphsot);
@@ -350,13 +350,14 @@ impl<C:Comparator + Send + Sync> DB<C> for DBImpl<C>{
                     } else {
                         // todo: imm get
 
-                        let mut current = self.vset.current_mut().unwrap();
+                        let current = self.vset.current_mut().unwrap();
                         let stats = current.get(options, &lkey, value)?;
 
                         self.mutex.lock();
 
                         if self.vset.current_mut().unwrap().update_stats(stats) {
-                            self.maybe_schedmule_compaction();
+                            todo!()
+                            //self.maybe_schedmule_compaction();
                         }
                         return Ok(());
                     }

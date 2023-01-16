@@ -1,4 +1,4 @@
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::{cell::RefCell, rc::Rc, sync::Arc, fmt};
 
 use crc::{Crc, CRC_32_ISCSI};
 use rand::{rngs::ThreadRng, thread_rng, Rng};
@@ -82,19 +82,25 @@ pub fn put_varint32(dst: &mut Vec<u8>, v: u32) {
 }
 
 #[derive(Debug)]
-pub struct UtilError {
+pub(crate) struct UtilError {
     reason: String,
 }
 
 impl UtilError {
-    fn new(reason: String) -> Self {
+    pub(crate) fn new(reason: String) -> Self {
         Self { reason }
+    }
+}
+
+impl fmt::Display for UtilError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "util error: {}", self.reason)
     }
 }
 
 const VAR32_LIMIT: usize = 28;
 // usize 0 error
-pub fn get_varint32(src: &[u8]) -> std::result::Result<(u32, usize), UtilError> {
+pub(crate) fn get_varint32(src: &[u8]) -> std::result::Result<(u32, usize), UtilError> {
     let mut value: u32 = 0;
     let mut shift: usize = 0;
 
@@ -114,7 +120,7 @@ pub fn get_varint32(src: &[u8]) -> std::result::Result<(u32, usize), UtilError> 
 
 const VAR64_LIMIT: usize = 63;
 
-pub fn get_varint64(src: &[u8]) -> std::result::Result<(u64, usize), UtilError> {
+pub(crate) fn get_varint64(src: &[u8]) -> std::result::Result<(u64, usize), UtilError> {
     let mut value: u64 = 0;
     let mut shift: usize = 0;
 
@@ -177,7 +183,7 @@ pub fn decode_fixed32(src: &[u8]) -> u32 {
 /*
 return data slice and offset position
  */
-pub fn get_length_prefixed_slice(data: &[u8]) -> std::result::Result<(&[u8], usize), UtilError> {
+pub(crate) fn get_length_prefixed_slice(data: &[u8]) -> std::result::Result<(&[u8], usize), UtilError> {
     let (len, off) = get_varint32(data)?;
     let end = off + len as usize;
     Ok((&data[off..end], end))

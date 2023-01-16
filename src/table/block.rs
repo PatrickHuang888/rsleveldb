@@ -10,7 +10,7 @@ use crate::{
     util,
 };
 
-pub struct BlockBuilder {
+pub(crate) struct BlockBuilder {
     buf: Vec<u8>,
     compressed_buf: Vec<u8>,
 
@@ -175,13 +175,14 @@ impl Block {
         block
     }
 
-    pub fn new_iter<'a, C:Comparator>(self, cmp: &'a C) -> BlockIterator<'a, C> {
-        BlockIterator::new(self.data, self.num_restarts, self.restart_offset, cmp)
+    pub fn new_iter<C:Comparator>(self, cmp: &C) -> BlockIterator<C> {
+        let comparator= cmp.clone();
+        BlockIterator::new(self.data, self.num_restarts, self.restart_offset, comparator)
     }
 }
 
 #[derive(Clone)]
-pub struct BlockIterator<'a, C> {
+pub struct BlockIterator<C> {
     key: Vec<u8>,
     value: Vec<u8>,
 
@@ -195,15 +196,15 @@ pub struct BlockIterator<'a, C> {
 
     data: Vec<u8>, // underlying block contents
 
-    comparator: &'a C,
+    comparator: C,
 }
 
-impl<'a, C:Comparator> BlockIterator<'a, C> {
+impl<C:Comparator> BlockIterator<C> {
     fn new(
         data: Vec<u8>,
         num_restarts: usize,
         restarts: usize,
-        cmp: &'a C,
+        comparator: C,
     ) -> Self {
         assert!(num_restarts > 0);
         Self {
@@ -216,7 +217,7 @@ impl<'a, C:Comparator> BlockIterator<'a, C> {
             num_restarts,
             status: None,
             data,
-            comparator: cmp,
+            comparator,
         }
     }
 
@@ -336,7 +337,7 @@ impl<'a, C:Comparator> BlockIterator<'a, C> {
     }
 }
 
-impl<'a, C:Comparator> api::Iterator for BlockIterator<'a, C> {
+impl<C:Comparator> api::Iterator for BlockIterator<C> {
     fn next(&mut self) -> Result<()> {
         self.valid()?;
         self.parse_next_key()?;

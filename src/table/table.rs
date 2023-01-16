@@ -16,7 +16,7 @@ use crate::{api::Comparator, api::Iterator, table::MAX_VARINT_LEN64, Compression
 
 use super::block::{Block, BlockBuilder, BlockIterator};
 
-pub struct TableBuilder<'a, W: WritableFile, C:Comparator> {
+pub(crate) struct TableBuilder<'a, W: WritableFile, C:Comparator> {
     writer: &'a mut W,
 
     data_block: BlockBuilder,
@@ -51,7 +51,8 @@ pub struct TableBuilder<'a, W: WritableFile, C:Comparator> {
 }
 
 impl<'a, W: WritableFile, C:Comparator> TableBuilder<'a, W, C> {
-    pub fn new(w: &'a mut W, options: Options<C>) -> Self {
+    pub(crate) fn new(w: &'a mut W, opts: &Options<C>) -> Self {
+        let options= opts.clone();
         TableBuilder {
             writer: w,
 
@@ -77,7 +78,7 @@ impl<'a, W: WritableFile, C:Comparator> TableBuilder<'a, W, C> {
     // Add key,value to the table being constructed.
     // REQUIRES: key is after any previously added key according to comparator.
     // REQUIRES: Finish(), Abandon() have not been called
-    pub fn add(&mut self, key: &[u8], value: &[u8]) -> api::Result<()> {
+    pub(crate) fn add(&mut self, key: &[u8], value: &[u8]) -> api::Result<()> {
         assert!(!self.closed);
 
         self.ok()?;
@@ -113,7 +114,7 @@ impl<'a, W: WritableFile, C:Comparator> TableBuilder<'a, W, C> {
         Ok(())
     }
 
-    pub fn flush(&mut self) -> api::Result<()> {
+    pub(crate) fn flush(&mut self) -> api::Result<()> {
         assert!(!self.closed);
         self.ok()?;
 
@@ -148,7 +149,7 @@ impl<'a, W: WritableFile, C:Comparator> TableBuilder<'a, W, C> {
         Ok(())
     }
 
-    pub fn finish(&mut self) -> crate::api::Result<()> {
+    pub(crate) fn finish(&mut self) -> crate::api::Result<()> {
         self.flush()?;
 
         assert!(!self.closed);
@@ -238,16 +239,16 @@ impl<'a, W: WritableFile, C:Comparator> TableBuilder<'a, W, C> {
         }
     }
 
-    pub fn num_entries(&self) -> usize {
+    pub(crate) fn num_entries(&self) -> usize {
         self.num_entries
     }
 
-    pub fn file_size(&self) -> u64 {
+    pub(crate) fn file_size(&self) -> u64 {
         self.offset as u64
     }
 }
 
-pub fn write_block<W: WritableFile>(
+pub(crate) fn write_block<W: WritableFile>(
     writer: &mut W,
     block: &mut BlockBuilder,
     compression: CompressionType,
@@ -340,7 +341,7 @@ impl Footer {
 
 // a pointer to the extent of a file that stores a data
 // block or a meta block.
-struct BlockHandle {
+pub(crate) struct BlockHandle {
     offset: usize,
     size: usize,
 }
@@ -380,19 +381,19 @@ impl Default for BlockHandle {
 // A Table is a sorted map from strings to strings.  Tables are
 // immutable and persistent.  A Table may be safely accessed from
 // multiple threads without external synchronization.
-pub struct Table<'a, C:Comparator> {
+pub struct Table<C:Comparator> {
     options: Options<C>,
     status: Option<String>,
 
     file: Rc<dyn RandomAccessFile>,
 
     meta_index_handle: BlockHandle,
-    index_iter: BlockIterator<'a, C>,
+    index_iter: BlockIterator<C>,
 }
 
-impl<'a, C:Comparator> Table<'a, C> {
+impl<C:Comparator> Table<C> {
     pub fn open(
-        r_options: &Options<C>,
+        opts: &Options<C>,
         file: Rc<dyn RandomAccessFile>,
         size: usize,
     ) -> api::Result<Self> {
@@ -407,19 +408,18 @@ impl<'a, C:Comparator> Table<'a, C> {
         file.read(size - FOOTER_LEN, FOOTER_LEN, &mut footer_input)?;
         let mut footer = Footer::decode_from(&footer_input)?;
 
-        let options = r_options.clone();
         // Read index block
         let mut opt = ReadOptions::default();
-        if r_options.paranoid_checks {
+        if opts.paranoid_checks {
             opt.verify_checksums = true;
         }
         let index_contents = read_block_content(&file, &opt, &mut footer.index_handle)?;
         let index_block = Block::new(index_contents);
         let r = Table {
-            options,
+            options:opts.clone(),
             status: None,
             file,
-            index_iter: index_block.new_iter(&options.comparator),
+            index_iter: index_block.new_iter(&opts.comparator),
             meta_index_handle: footer.metaindex_handle,
         };
         r.read_meta()?;
@@ -431,13 +431,13 @@ impl<'a, C:Comparator> Table<'a, C> {
         Ok(())
     }
 
-    pub fn iter(&'a self, option: ReadOptions) -> TableIterator<'a, C> {
+    pub fn iter(&self, option: ReadOptions) -> TableIterator<C> {
         //let index_iter = self.index_block.iter(self.options.comparator.clone());
         TableIterator::new(
             option,
             self.index_iter.clone(),
             self.file.clone(),
-            &self.options.comparator,
+            self.options.comparator.clone(),
         )
     }
 }
@@ -516,21 +516,21 @@ fn read_block_content(
 //
 // Uses a supplied function to convert an index_iter value into
 // an iterator over the contents of the corresponding block.
-pub struct TableIterator<'a, C> {
+pub struct TableIterator<C> {
     option: ReadOptions,
-    index_iter: BlockIterator<'a, C>,
-    data_iter: Option<BlockIterator<'a, C>>,
+    index_iter: BlockIterator<C>,
+    data_iter: Option<BlockIterator<C>>,
     data_block_handle: Vec<u8>,
     file: Rc<dyn RandomAccessFile>,
-    comparator: &'a C,
+    comparator: C,
 }
 
-impl<'a, C:Comparator> TableIterator<'a, C> {
+impl<C:Comparator> TableIterator<C> {
     fn new(
         option: ReadOptions,
-        index_iter: BlockIterator<'a, C>,
+        index_iter: BlockIterator<C>,
         file: Rc<dyn RandomAccessFile>,
-        cmp: &'a C,
+        comparator: C,
     ) -> Self {
         TableIterator {
             option,
@@ -538,7 +538,7 @@ impl<'a, C:Comparator> TableIterator<'a, C> {
             data_iter: None,
             data_block_handle: vec![],
             file,
-            comparator: cmp,
+            comparator,
         }
     }
 
@@ -555,7 +555,7 @@ impl<'a, C:Comparator> TableIterator<'a, C> {
                 let block = block_reader(&self.file, &self.option, handle)?;
                 self.data_block_handle.clear();
                 self.data_block_handle.extend_from_slice(handle);
-                self.data_iter = Some(block.new_iter(self.comparator));
+                self.data_iter = Some(block.new_iter(&self.comparator));
             }
         }
         Ok(())
@@ -594,7 +594,7 @@ impl<'a, C:Comparator> TableIterator<'a, C> {
     }
 }
 
-impl<'a, C:Comparator> api::Iterator for TableIterator<'a, C> {
+impl<C:Comparator> api::Iterator for TableIterator<C> {
     fn next(&mut self) -> api::Result<()> {
         assert!(self.valid()?);
         self.data_iter.as_mut().unwrap().next()?;

@@ -213,7 +213,7 @@ mod tests {
     use rand::{rngs::ThreadRng, thread_rng, Rng};
 
     use crate::{
-        api::{self, Iterator},
+        api::{self, Iterator, ByteswiseComparator},
         db::memtable::{self, InternalKeyComparator, MemTable, MemTableIterator},
         pack_sequence_and_type, parse_internal_key,
         table::table::{ReadOptions, Table},
@@ -227,15 +227,15 @@ mod tests {
 
     type KVMap = HashMap<Vec<u8>, Vec<u8>>;
     struct Constructor {
-        options: Options,
+        options: Options<ByteswiseComparator>,
         data: KVMap,
         cons_impl: Box<dyn ConstructorImpl>,
     }
 
-    trait ConstructorImpl {
+    trait ConstructorImpl{
         fn finish(
             &mut self,
-            options: &Options,
+            options: &Options<ByteswiseComparator>,
             keys: &Vec<Vec<u8>>,
             kvmap: &KVMap,
         ) -> api::Result<()>;
@@ -244,13 +244,13 @@ mod tests {
     }
 
     struct TableCons {
-        table: Option<Table>,
+        table: Option<Table<ByteswiseComparator>>,
     }
 
-    impl ConstructorImpl for TableCons {
+    impl ConstructorImpl for TableCons{
         fn finish(
             &mut self,
-            options: &Options,
+            options: &Options<ByteswiseComparator>,
             keys: &Vec<Vec<u8>>,
             kvmap: &KVMap,
         ) -> api::Result<()> {
@@ -260,7 +260,7 @@ mod tests {
             let file_size: u64;
 
             {
-                let mut builder = TableBuilder::new(&mut sink, options.clone());
+                let mut builder = TableBuilder::new(&mut sink, &options);
 
                 for k in keys {
                     builder.add(k, kvmap.get(k).unwrap())?;
@@ -275,7 +275,7 @@ mod tests {
                 contents: sink.contents,
             });
 
-            let table = Table::open(options.clone(), source, file_size as usize)?;
+            let table = Table::open(options, source, file_size as usize)?;
             self.table = Some(table);
 
             Ok(())
@@ -287,14 +287,14 @@ mod tests {
         }
     }
 
-    struct BlockCons {
-        block_iter: Option<BlockIterator>,
+    struct BlockCons{
+        block_iter: Option<BlockIterator<ByteswiseComparator>>,
     }
 
     impl ConstructorImpl for BlockCons {
         fn finish(
             &mut self,
-            options: &Options,
+            options: &Options<ByteswiseComparator>,
             keys: &Vec<Vec<u8>>,
             kvmap: &KVMap,
         ) -> api::Result<()> {
@@ -306,7 +306,7 @@ mod tests {
             contents.extend_from_slice(builder.finish());
 
             let block = Block::new(contents);
-            self.block_iter = Some(block.new_iter(options.comparator.clone()));
+            self.block_iter = Some(block.new_iter(&options.comparator));
             Ok(())
         }
 
@@ -316,18 +316,18 @@ mod tests {
         }
     }
 
-    struct MemTableCons {
-        table: Option<memtable::MemTable>,
+    struct MemTableCons{
+        table: Option<MemTable<ByteswiseComparator>>,
     }
 
-    impl ConstructorImpl for MemTableCons {
+    impl ConstructorImpl for MemTableCons{
         fn finish(
             &mut self,
-            options: &Options,
+            options:&Options<ByteswiseComparator>,
             keys: &Vec<Vec<u8>>,
             kvmap: &KVMap,
         ) -> api::Result<()> {
-            let internal_comparator = InternalKeyComparator::new(options.comparator.clone());
+            let internal_comparator = InternalKeyComparator::new(&options.comparator);
             let mut memtable = MemTable::new(internal_comparator);
             let mut seq = 1;
             for k in keys {
@@ -341,10 +341,10 @@ mod tests {
 
         fn iter(&mut self) -> Box<dyn api::Iterator + '_> {
             // A helper class that converts internal format keys into user keys
-            struct KeyConvertingIterator<'a> {
-                iter: MemTableIterator<'a>,
+            struct KeyConvertingIterator<'a, C:api::Comparator> {
+                iter: MemTableIterator<'a, C>,
             }
-            impl<'a> api::Iterator for KeyConvertingIterator<'a> {
+            impl<'a, C:api::Comparator> api::Iterator for KeyConvertingIterator<'a, C> {
                 fn key(&self) -> api::Result<&[u8]> {
                     assert!(self.valid().unwrap());
                     match parse_internal_key(self.iter.key().unwrap()) {
@@ -433,7 +433,7 @@ mod tests {
 
     // Helper class for tests to unify the interface between
     // BlockBuilder/TableBuilder and Block/Table.
-    impl Constructor {
+    impl Constructor{
         fn new(arg: (TestCase, usize)) -> Self {
             let mut options = Options::default();
             options.block_restart_interval = arg.1;

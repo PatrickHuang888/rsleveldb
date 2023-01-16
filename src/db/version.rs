@@ -222,6 +222,20 @@ struct Saver<C> {
     value: Vec<u8>,
 }
 
+// A Compaction encapsulates information about a compaction.
+pub(crate) struct Compaction {}
+
+impl Compaction {
+    // Return the ith input file at "level()+which" ("which" must be 0 or 1).
+    pub fn input(&self, which: u32, i: u32) -> &FileMetaData {
+        todo!();
+    }
+    // "which" must be either 0 or 1
+    pub fn num_input_files(&self, which: u32) -> u32 {
+        todo!()
+    }
+}
+
 pub(crate) struct VersionSet<C>{
     last_sequence: u64,
     current_index: i32,
@@ -240,37 +254,23 @@ pub(crate) struct VersionSet<C>{
     versions: Vec<Version>,
 }
 
-// A Compaction encapsulates information about a compaction.
-pub struct Compaction {}
-
-impl Compaction {
-    // Return the ith input file at "level()+which" ("which" must be 0 or 1).
-    pub fn input(&self, which: u32, i: u32) -> &FileMetaData {
-        todo!();
-    }
-    // "which" must be either 0 or 1
-    pub fn num_input_files(&self, which: u32) -> u32 {
-        todo!()
-    }
-}
-
 impl<C:api::Comparator> VersionSet<C>{
     // Returns true iff some level needs a compaction.
-    pub fn needs_compaction(&self) -> bool {
+    pub(crate) fn needs_compaction(&self) -> bool {
         let v = &self.versions[self.current_index as usize];
         (v.compaction_score >= 1.0) || v.file_to_compact.is_some()
     }
 
-    pub fn pick_compaction(&self) -> Option<Compaction> {
+    pub(crate) fn pick_compaction(&self) -> Option<&Compaction> {
         todo!()
     }
 
-    pub fn current_mut(&self) -> Option<&mut Version> {
+    pub(crate) fn current_mut(&self) -> Option<&mut Version> {
         todo!()
         //&mut self.current
     }
 
-    pub fn current(&self) -> Option<&Version> {
+    pub(crate) fn current(&self) -> Option<&Version> {
         Some(&self.versions[self.current_index as usize])
     }
 
@@ -283,7 +283,7 @@ impl<C:api::Comparator> VersionSet<C>{
         level: u32,
         begin: &InternalKey,
         end: &InternalKey,
-    ) -> Option<Compaction> {
+    ) -> Option<&Compaction> {
         todo!()
     }
 
@@ -332,7 +332,7 @@ impl<C:api::Comparator> VersionSet<C>{
         // Initialize new descriptor log file if necessary by creating
         // a temporary file that contains a snapshot of the current version.
         let mut new_manifest_file = "".to_string();
-        let mut r;
+        let mut r= Ok(());
         if self.descriptor_log.is_none() {
             // No reason to unlock *mu here since we only hit this path in the
             // first call to LogAndApply (when opening the database).
@@ -369,7 +369,7 @@ impl<C:api::Comparator> VersionSet<C>{
         mu.lock();
 
         // Install the new version
-        match r {
+        match &r {
             Ok(_) => {
                 self.append_version(v);
                 self.log_number = edit.log_number.unwrap();
@@ -476,7 +476,7 @@ impl<C:api::Comparator> VersionSet<C>{
     // Return the number of Table files at the specified level.
     pub fn num_level_files(&self, level: u32) -> usize {
         todo!();
-        assert!(level < config::NUM_LEVELS);
+        //assert!(level < config::NUM_LEVELS);
         //self.current.files[level as usize].len()
     }
 }
@@ -695,7 +695,7 @@ impl From<u32> for Tag {
 }
 
 #[derive(Default)]
-pub(super) struct VersionEdit {
+pub(crate) struct VersionEdit {
     compact_pointers: Vec<(u32, InternalKey)>, // (level, key)
     deleted_files: Vec<(u32, u64)>,            // (level, file_number)
     new_files: Vec<(u32, FileMetaData)>,

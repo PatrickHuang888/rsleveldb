@@ -13,8 +13,8 @@ use crate::{
 
 use super::skiplist::{Comparator as SkipListComparator, Iterator, SkipList, SkipListIterator};
 
-type Table<C:api::Comparator> = SkipList<KeyComparator<C>, Vec<u8>>;
-type TableIterator<'l, C:api::Comparator> = SkipListIterator<'l, KeyComparator<C>, Vec<u8>>;
+type Table<C> = SkipList<KeyComparator<C>, Vec<u8>>;
+type TableIterator<'l, C> = SkipListIterator<'l, KeyComparator<C>, Vec<u8>>;
 
 const LookupKeySpaceSize: usize = 200;
 
@@ -76,9 +76,10 @@ impl<C:api::Comparator> MemTable<C> {
     pub fn new(internal_cmp: InternalKeyComparator<C>) -> Self {
         let head_key = vec![0];
         let key_cmp = KeyComparator { comparator:internal_cmp};
+        let comparator= key_cmp.clone();
         let table = Table::new(key_cmp, &head_key);
         MemTable {
-            comparator: key_cmp.clone(),
+            comparator,
             table,
         }
     }
@@ -226,7 +227,8 @@ pub struct InternalKeyComparator<C>{
 }
 
 impl<C:api::Comparator> InternalKeyComparator<C>{
-    pub fn new(user_comparator: C) -> Self {
+    pub fn new(cmp: &C) -> Self {
+        let user_comparator= cmp.clone();
         Self { user_comparator }
     }
     pub fn user_comparator(&self) -> &C {

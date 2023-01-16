@@ -480,7 +480,7 @@ impl Env {
     }
 }
 
-struct PosixWritableFile {
+pub struct PosixWritableFile {
 
 }
 
