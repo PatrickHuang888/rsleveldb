@@ -365,7 +365,7 @@ pub struct Writer<W> {
                          //type_crc: [u32;MAX_RECORD_TYPE]
 }
 
-impl<W:WritableFile> Writer<W> {
+impl<W: WritableFile> Writer<W> {
     pub fn new(dest: W) -> Self {
         /* let mut type_crc= [0;MAX_RECORD_TYPE];
         init_type_crc(&mut type_crc); */

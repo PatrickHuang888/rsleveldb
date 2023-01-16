@@ -16,7 +16,7 @@ use crate::{api::Comparator, api::Iterator, table::MAX_VARINT_LEN64, Compression
 
 use super::block::{Block, BlockBuilder, BlockIterator};
 
-pub(crate) struct TableBuilder<'a, W: WritableFile, C:Comparator> {
+pub(crate) struct TableBuilder<'a, W: WritableFile, C: Comparator> {
     writer: &'a mut W,
 
     data_block: BlockBuilder,
@@ -50,9 +50,9 @@ pub(crate) struct TableBuilder<'a, W: WritableFile, C:Comparator> {
     //filter_block: Option<FilterBlock<'c>>,
 }
 
-impl<'a, W: WritableFile, C:Comparator> TableBuilder<'a, W, C> {
+impl<'a, W: WritableFile, C: Comparator> TableBuilder<'a, W, C> {
     pub(crate) fn new(w: &'a mut W, opts: &Options<C>) -> Self {
-        let options= opts.clone();
+        let options = opts.clone();
         TableBuilder {
             writer: w,
 
@@ -298,7 +298,7 @@ fn write_raw_block<W: WritableFile>(
     Ok(n + BLOCK_TRAILER_SIZE)
 }
 
-impl<'a, W: WritableFile, C:Comparator> Drop for TableBuilder<'a, W, C> {
+impl<'a, W: WritableFile, C: Comparator> Drop for TableBuilder<'a, W, C> {
     fn drop(&mut self) {
         assert!(self.closed) // Catch errors where caller forgot to call Finish()
     }
@@ -381,7 +381,7 @@ impl Default for BlockHandle {
 // A Table is a sorted map from strings to strings.  Tables are
 // immutable and persistent.  A Table may be safely accessed from
 // multiple threads without external synchronization.
-pub struct Table<C:Comparator> {
+pub struct Table<C: Comparator> {
     options: Options<C>,
     status: Option<String>,
 
@@ -391,7 +391,7 @@ pub struct Table<C:Comparator> {
     index_iter: BlockIterator<C>,
 }
 
-impl<C:Comparator> Table<C> {
+impl<C: Comparator> Table<C> {
     pub fn open(
         opts: &Options<C>,
         file: Rc<dyn RandomAccessFile>,
@@ -416,7 +416,7 @@ impl<C:Comparator> Table<C> {
         let index_contents = read_block_content(&file, &opt, &mut footer.index_handle)?;
         let index_block = Block::new(index_contents);
         let r = Table {
-            options:opts.clone(),
+            options: opts.clone(),
             status: None,
             file,
             index_iter: index_block.new_iter(&opts.comparator),
@@ -525,7 +525,7 @@ pub struct TableIterator<C> {
     comparator: C,
 }
 
-impl<C:Comparator> TableIterator<C> {
+impl<C: Comparator> TableIterator<C> {
     fn new(
         option: ReadOptions,
         index_iter: BlockIterator<C>,
@@ -594,7 +594,7 @@ impl<C:Comparator> TableIterator<C> {
     }
 }
 
-impl<C:Comparator> api::Iterator for TableIterator<C> {
+impl<C: Comparator> api::Iterator for TableIterator<C> {
     fn next(&mut self) -> api::Result<()> {
         assert!(self.valid()?);
         self.data_iter.as_mut().unwrap().next()?;

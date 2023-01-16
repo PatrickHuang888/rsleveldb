@@ -1,13 +1,13 @@
 use core::num;
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::{cell::RefCell, fs::File, rc::Rc, sync::Arc};
 
 use parking_lot::lock_api::RawMutex;
 
 use crate::{
     api::{self, Comparator, ReadOptions},
     config::{self, L0_COMPACTION_TRIGGER, NUM_LEVELS},
-    util, Env, InternalKey, Options, SequenceNumber, WritableFile, MAX_SEQUENCE_NUMBER,
-    TYPE_FOR_SEEK, PosixWritableFile,
+    util, Env, InternalKey, Options, PosixWritableFile, SequenceNumber, WritableFile,
+    MAX_SEQUENCE_NUMBER, TYPE_FOR_SEEK,
 };
 
 use super::{
@@ -24,6 +24,13 @@ pub(crate) struct FileMetaData {
     pub largest: InternalKey,
 
     pub allowed_seeks: u32, // Seeks allowed until compaction
+}
+
+impl FileMetaData {
+    fn new(number:u64, smallest:InternalKey, largest:InternalKey) -> Self {
+        let allowed_seeks = 1 << 30;
+        FileMetaData{number, file_size:0, smallest, largest, allowed_seeks}
+    }
 }
 
 #[derive(Default)]
@@ -52,7 +59,7 @@ pub(crate) struct Version {
     index: i32,
 }
 
-impl Version{
+impl Version {
     fn new() -> Self {
         let mut files = Vec::with_capacity(NUM_LEVELS as usize);
         for _ in 0..NUM_LEVELS {
@@ -134,10 +141,10 @@ impl Version{
 // largest==nullptr represents a key largest than all keys in the DB.
 // REQUIRES: If disjoint_sorted_files, files[] contains disjoint ranges
 //           in sorted order.
-fn some_file_overlaps_range<C:api::Comparator>(
+fn some_file_overlaps_range<C: api::Comparator>(
     icmp: &InternalKeyComparator<C>,
     disjoint_sorted_files: bool,
-    files: Vec<&FileMetaData>,
+    files: &Vec<FileMetaData>,
     smallest_user_key_opt: Option<&[u8]>,
     largest_user_key_opt: Option<&[u8]>,
 ) -> bool {
@@ -145,7 +152,7 @@ fn some_file_overlaps_range<C:api::Comparator>(
     if !disjoint_sorted_files {
         // Need to check against all files
         for i in 0..files.len() {
-            let f = files[i];
+            let f = &files[i];
             if after_file(ucmp, smallest_user_key_opt, f)
                 || before_file(ucmp, largest_user_key_opt, f)
             {
@@ -202,7 +209,7 @@ struct State<C> {
     found: bool,
 }
 
-impl<C:api::Comparator> State<C> {
+impl<C: api::Comparator> State<C> {
     fn fn_match(&self, level: u32, f: FileMetaData) -> bool {
         todo!()
     }
@@ -236,7 +243,37 @@ impl Compaction {
     }
 }
 
-pub(crate) struct VersionSet<C>{
+// Return the smallest index i such that files[i]->largest >= key.
+// Return files.size() if there is no such file.
+// REQUIRES: "files" contains a sorted list of non-overlapping files.
+pub(crate) fn find_file<C: api::Comparator>(
+    icmp: &InternalKeyComparator<C>,
+    files: &Vec<FileMetaData>,
+    key: &[u8],
+) -> usize {
+    let mut left = 0;
+    let mut right = files.len();
+    while left < right {
+        let mid = (left + right) / 2;
+        let f = &files[mid];
+        match icmp.compare(f.largest.encode(), key) {
+            std::cmp::Ordering::Less => {
+                // Key at "mid.largest" is < "target".  Therefore all
+                // files at or before "mid" are uninteresting.
+                left = mid + 1;
+            }
+            _ => {
+                // Key at "mid.largest" is >= "target".  Therefore all files
+                // after "mid" are uninteresting.
+                right = mid;
+            }
+        }
+    }
+    right
+}
+
+
+pub(crate) struct VersionSet<C> {
     last_sequence: u64,
     current_index: i32,
     log_number: u64,
@@ -254,7 +291,7 @@ pub(crate) struct VersionSet<C>{
     versions: Vec<Version>,
 }
 
-impl<C:api::Comparator> VersionSet<C>{
+impl<C: api::Comparator> VersionSet<C> {
     // Returns true iff some level needs a compaction.
     pub(crate) fn needs_compaction(&self) -> bool {
         let v = &self.versions[self.current_index as usize];
@@ -332,15 +369,13 @@ impl<C:api::Comparator> VersionSet<C>{
         // Initialize new descriptor log file if necessary by creating
         // a temporary file that contains a snapshot of the current version.
         let mut new_manifest_file = "".to_string();
-        let mut r= Ok(());
+        let mut r = Ok(());
         if self.descriptor_log.is_none() {
             // No reason to unlock *mu here since we only hit this path in the
             // first call to LogAndApply (when opening the database).
             new_manifest_file =
                 filename::descriptor_file_name(&self.dbname, self.manifest_file_number);
-            let log_file = self
-                .env
-                .new_posix_writable_file(&new_manifest_file)?;
+            let log_file = self.env.new_posix_writable_file(&new_manifest_file)?;
             self.descriptor_log = Some(log::Writer::new(log_file));
             r = self.write_snapshot();
         }
@@ -507,7 +542,7 @@ fn max_bytes_for_level(level: u32) -> f64 {
 struct BySmallestKey<'a, C> {
     internal_comparator: &'a InternalKeyComparator<C>,
 }
-impl<'a, C:api::Comparator> BySmallestKey<'a, C> {
+impl<'a, C: api::Comparator> BySmallestKey<'a, C> {
     fn compare(&self, f1: &FileMetaData, f2: &FileMetaData) -> std::cmp::Ordering {
         super::skiplist::Comparator::compare(self.internal_comparator, &f1.smallest, &f2.smallest)
     }
@@ -527,7 +562,7 @@ struct VersionSetBuilder<'a, C> {
     levels: Vec<LevelState>,
 }
 
-impl<'a, C:api::Comparator> VersionSetBuilder<'a, C> {
+impl<'a, C: api::Comparator> VersionSetBuilder<'a, C> {
     fn new(vset: &'a mut VersionSet<C>, base_index: usize) -> Self {
         let mut levels = Vec::with_capacity(NUM_LEVELS as usize);
         for _ in 0..NUM_LEVELS {
@@ -926,9 +961,9 @@ fn get_internal_key(input: &[u8]) -> api::Result<(InternalKey, usize)> {
 }
 
 mod test {
-    use crate::{InternalKey, ValueType};
+    use crate::{InternalKey, ValueType, db::memtable::InternalKeyComparator, api::ByteswiseComparator};
 
-    use super::VersionEdit;
+    use super::{VersionEdit, find_file, FileMetaData};
 
     const BIG: u64 = 1u64 << 50;
 
@@ -969,4 +1004,36 @@ mod test {
         parsed.encode_to(&mut encoded2);
         assert_eq!(encoded, encoded2);
     }
+
+
+    struct FindFileTest {
+        files:Vec<FileMetaData>,
+    }
+
+    impl FindFileTest {
+        fn add(&mut self, smallest: &str, largest:&str) {
+            let f = FileMetaData::new((self.files.len()+1) as u64, InternalKey::new(smallest.as_bytes(), 100, ValueType::TypeValue),
+        InternalKey::new(largest.as_bytes(), 100, ValueType::TypeValue));
+            self.files.push(f);
+        }
+
+        fn find(&self, key:&str) -> usize {
+            let target= InternalKey::new(key.as_bytes(),100, ValueType::TypeValue );
+            let cmp= InternalKeyComparator::new(&ByteswiseComparator{});
+            find_file(&cmp, &self.files, target.encode())
+        }
+
+        fn overlaps(&self, smallest: &str, largest:&str) -> bool {
+            let cmp= InternalKeyComparator::new(&ByteswiseComparator{});
+
+        }
+    }
+
+    #[test]
+    fn test_find_file_empty() {
+        let test= FindFileTest{files:Vec::new()};
+        assert_eq!(0, test.find("foo"));
+    }
+
+
 }

@@ -175,9 +175,14 @@ impl Block {
         block
     }
 
-    pub fn new_iter<C:Comparator>(self, cmp: &C) -> BlockIterator<C> {
-        let comparator= cmp.clone();
-        BlockIterator::new(self.data, self.num_restarts, self.restart_offset, comparator)
+    pub fn new_iter<C: Comparator>(self, cmp: &C) -> BlockIterator<C> {
+        let comparator = cmp.clone();
+        BlockIterator::new(
+            self.data,
+            self.num_restarts,
+            self.restart_offset,
+            comparator,
+        )
     }
 }
 
@@ -199,13 +204,8 @@ pub struct BlockIterator<C> {
     comparator: C,
 }
 
-impl<C:Comparator> BlockIterator<C> {
-    fn new(
-        data: Vec<u8>,
-        num_restarts: usize,
-        restarts: usize,
-        comparator: C,
-    ) -> Self {
+impl<C: Comparator> BlockIterator<C> {
+    fn new(data: Vec<u8>, num_restarts: usize, restarts: usize, comparator: C) -> Self {
         assert!(num_restarts > 0);
         Self {
             key: Vec::new(),
@@ -337,7 +337,7 @@ impl<C:Comparator> BlockIterator<C> {
     }
 }
 
-impl<C:Comparator> api::Iterator for BlockIterator<C> {
+impl<C: Comparator> api::Iterator for BlockIterator<C> {
     fn next(&mut self) -> Result<()> {
         self.valid()?;
         self.parse_next_key()?;

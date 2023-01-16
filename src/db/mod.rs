@@ -5,9 +5,9 @@ use std::{
 };
 
 use crate::{
-    api::{self, Iterator, Comparator},
+    api::{self, Comparator, Iterator},
     table::table::TableBuilder,
-    util, Options, SequenceNumber, WritableFile, Env,
+    util, Env, Options, SequenceNumber, WritableFile,
 };
 
 use self::{memtable::MemTableIterator, version::FileMetaData};
@@ -86,7 +86,7 @@ impl SnapshotList {
     }
 }
 
-fn build_table<C:Comparator>(
+fn build_table<C: Comparator>(
     env: &Env,
     dbname: &str,
     options: &Options<C>,

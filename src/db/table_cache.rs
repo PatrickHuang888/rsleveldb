@@ -1,12 +1,12 @@
 use crate::{
-    api::{self, ReadOptions, Comparator},
+    api::{self, Comparator, ReadOptions},
     Options,
 };
 
 pub(super) struct TableCache {}
 
 impl TableCache {
-    pub(super) fn new<C:Comparator>(dbname: &str, options: &Options<C>, entries: usize) -> Self {
+    pub(super) fn new<C: Comparator>(dbname: &str, options: &Options<C>, entries: usize) -> Self {
         TableCache {}
     }
 

@@ -1,4 +1,4 @@
-use std::{cell::RefCell, rc::Rc, sync::Arc, fmt};
+use std::{cell::RefCell, fmt, rc::Rc, sync::Arc};
 
 use crc::{Crc, CRC_32_ISCSI};
 use rand::{rngs::ThreadRng, thread_rng, Rng};
@@ -21,11 +21,7 @@ impl WritableFile for Oops {
     }
 }
 
-pub fn write_string_to_file_sync(
-    env: &Env,
-    data: &[u8],
-    fname: &str,
-) -> api::Result<()> {
+pub fn write_string_to_file_sync(env: &Env, data: &[u8], fname: &str) -> api::Result<()> {
     do_write_string_to_file(env, data, fname, true)
 }
 
@@ -183,7 +179,9 @@ pub fn decode_fixed32(src: &[u8]) -> u32 {
 /*
 return data slice and offset position
  */
-pub(crate) fn get_length_prefixed_slice(data: &[u8]) -> std::result::Result<(&[u8], usize), UtilError> {
+pub(crate) fn get_length_prefixed_slice(
+    data: &[u8],
+) -> std::result::Result<(&[u8], usize), UtilError> {
     let (len, off) = get_varint32(data)?;
     let end = off + len as usize;
     Ok((&data[off..end], end))

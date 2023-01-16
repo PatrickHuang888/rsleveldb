@@ -14,11 +14,7 @@ pub fn descriptor_file_name(dbname: &str, number: u64) -> String {
     format!("{}/MANIFEST-{:06}", dbname, number)
 }
 
-pub fn set_current_file(
-    env: &Env,
-    dbname: &str,
-    descriptor_number: u64,
-) -> api::Result<()> {
+pub fn set_current_file(env: &Env, dbname: &str, descriptor_number: u64) -> api::Result<()> {
     // Remove leading "dbname/" and add newline to manifest file name
     let manifest = descriptor_file_name(dbname, descriptor_number);
     let mut contents = manifest.clone();

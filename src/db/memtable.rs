@@ -67,21 +67,20 @@ impl LookupKey {
     }
 }
 
-pub struct MemTable<C:Comparator> {
+pub struct MemTable<C: Comparator> {
     table: Table<C>,
     comparator: KeyComparator<C>,
 }
 
-impl<C:api::Comparator> MemTable<C> {
+impl<C: api::Comparator> MemTable<C> {
     pub fn new(internal_cmp: InternalKeyComparator<C>) -> Self {
         let head_key = vec![0];
-        let key_cmp = KeyComparator { comparator:internal_cmp};
-        let comparator= key_cmp.clone();
+        let key_cmp = KeyComparator {
+            comparator: internal_cmp,
+        };
+        let comparator = key_cmp.clone();
         let table = Table::new(key_cmp, &head_key);
-        MemTable {
-            comparator,
-            table,
-        }
+        MemTable { comparator, table }
     }
 
     // If memtable contains a value for key, store it in value and return true.
@@ -169,12 +168,12 @@ impl<C:api::Comparator> MemTable<C> {
     }
 }
 
-pub(crate) struct MemTableIterator<'l, C:Comparator> {
+pub(crate) struct MemTableIterator<'l, C: Comparator> {
     iter: TableIterator<'l, C>,
     scratch: Vec<u8>,
 }
 
-impl<'l, C:api::Comparator> api::Iterator for MemTableIterator<'l, C> {
+impl<'l, C: api::Comparator> api::Iterator for MemTableIterator<'l, C> {
     fn key(&self) -> api::Result<&[u8]> {
         let (key, _) = util::get_length_prefixed_slice(self.iter.key())
             .map_err(|_| api::Error::Corruption("key".to_string()))?;
@@ -222,13 +221,13 @@ impl<'l, C:api::Comparator> api::Iterator for MemTableIterator<'l, C> {
 }
 
 #[derive(Clone)]
-pub struct InternalKeyComparator<C>{
+pub struct InternalKeyComparator<C> {
     user_comparator: C,
 }
 
-impl<C:api::Comparator> InternalKeyComparator<C>{
+impl<C: api::Comparator> InternalKeyComparator<C> {
     pub fn new(cmp: &C) -> Self {
-        let user_comparator= cmp.clone();
+        let user_comparator = cmp.clone();
         Self { user_comparator }
     }
     pub fn user_comparator(&self) -> &C {
@@ -236,13 +235,13 @@ impl<C:api::Comparator> InternalKeyComparator<C>{
     }
 }
 
-impl<C:api::Comparator> super::skiplist::Comparator<InternalKey> for InternalKeyComparator<C>{
+impl<C: api::Comparator> super::skiplist::Comparator<InternalKey> for InternalKeyComparator<C> {
     fn compare(&self, a: &InternalKey, b: &InternalKey) -> cmp::Ordering {
         api::Comparator::compare(self, &a.rep, &b.rep)
     }
 }
 
-impl<C:api::Comparator> api::Comparator for InternalKeyComparator<C> {
+impl<C: api::Comparator> api::Comparator for InternalKeyComparator<C> {
     fn name(&self) -> &'static str {
         "leveldb.InternalKeyComparator"
     }
@@ -321,11 +320,11 @@ fn encode_key(scratch: &mut Vec<u8>, key: &[u8]) {
 }
 
 #[derive(Clone)]
-struct KeyComparator<C>{
+struct KeyComparator<C> {
     comparator: InternalKeyComparator<C>,
 }
 
-impl<C:api::Comparator> super::skiplist::Comparator<Vec<u8>> for KeyComparator<C> {
+impl<C: api::Comparator> super::skiplist::Comparator<Vec<u8>> for KeyComparator<C> {
     fn compare(&self, key_a: &Vec<u8>, key_b: &Vec<u8>) -> cmp::Ordering {
         // Internal keys are encoded as length-prefixed strings.
         let (a, _) = util::get_length_prefixed_slice(key_a).unwrap();

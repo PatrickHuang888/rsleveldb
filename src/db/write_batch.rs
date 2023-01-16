@@ -5,11 +5,11 @@ use crate::{
 
 use super::memtable::MemTable;
 
-pub(crate) struct MemTableInserter<'a, C:api::Comparator> {
+pub(crate) struct MemTableInserter<'a, C: api::Comparator> {
     sequence: SequenceNumber,
     mem: &'a mut MemTable<C>,
 }
-impl<'a, C:api::Comparator> Handler for MemTableInserter<'a, C> {
+impl<'a, C: api::Comparator> Handler for MemTableInserter<'a, C> {
     fn put(&mut self, key: &[u8], value: &[u8]) {
         self.mem
             .add(self.sequence, ValueType::TypeValue, key, value);

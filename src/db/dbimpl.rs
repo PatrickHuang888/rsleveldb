@@ -7,12 +7,12 @@ use std::thread;
 
 use parking_lot::lock_api::RawMutex;
 
-use crate::api::{self, Error, ReadOptions, WriteOptions, Comparator};
+use crate::api::{self, Comparator, Error, ReadOptions, WriteOptions};
 use crate::config::NUM_LEVELS;
 use crate::db::version::VersionEdit;
 use crate::{
-    config, util, InternalKey, Options, SequenceNumber, WritableFile, WriteBatch, DB,
-    NUM_NON_TABLE_CACHE_FILES, Env, PosixWritableFile,
+    config, util, Env, InternalKey, Options, PosixWritableFile, SequenceNumber, WritableFile,
+    WriteBatch, DB, NUM_NON_TABLE_CACHE_FILES,
 };
 
 use super::build_table;
@@ -30,7 +30,11 @@ fn clip_to_range<V: Ord>(mut v: V, minvalue: V, maxvalue: V) {
     }
 }
 
-fn sanitize_options<C:Comparator>(dbname: &str, internal_comparator: &C, src: &Options<C>) -> Options<C> {
+fn sanitize_options<C: Comparator>(
+    dbname: &str,
+    internal_comparator: &C,
+    src: &Options<C>,
+) -> Options<C> {
     let mut result = src.clone();
     result.comparator = internal_comparator.clone();
     clip_to_range(
@@ -74,11 +78,11 @@ impl<'a> Drop for MutexLock<'a> {
     }
 }
 
-struct DBImpl<C:Comparator + Send + Sync>{
+struct DBImpl<C: Comparator + Send + Sync> {
     internal_comparator: InternalKeyComparator<C>,
     options: Options<C>,
     dbname: String,
-    env:Env,
+    env: Env,
 
     // State below is protected by mutex_
     mutex: parking_lot::RawMutex,
@@ -108,7 +112,7 @@ struct DBImpl<C:Comparator + Send + Sync>{
     bg_error: Option<api::Error>,
 }
 
-impl<C:Comparator + Send + Sync> DBImpl<C>{
+impl<C: Comparator + Send + Sync> DBImpl<C> {
     /* fn background_call(&mut self) {
         let _lock = MutexLock::new(&self.mutex);
 
@@ -238,7 +242,13 @@ impl<C:Comparator + Send + Sync> DBImpl<C>{
 
         unsafe { self.mutex.unlock() };
 
-        build_table(&self.env, self.dbname.as_str(), &self.options, &mut it, &mut meta)?;
+        build_table(
+            &self.env,
+            self.dbname.as_str(),
+            &self.options,
+            &mut it,
+            &mut meta,
+        )?;
 
         self.mutex.lock();
 
@@ -313,12 +323,12 @@ struct ManualCompaction {
     done: bool,
 }
 
-fn table_cache_size<C:Comparator>(sanitized_options: &Options<C>) -> usize {
+fn table_cache_size<C: Comparator>(sanitized_options: &Options<C>) -> usize {
     // Reserve ten files or so for other uses and give the rest to TableCache.
     sanitized_options.max_open_files - NUM_NON_TABLE_CACHE_FILES
 }
 
-impl<C:Comparator + Send + Sync> DB<C> for DBImpl<C>{
+impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
     fn open(options: &Options<C>, dbname: &str) -> api::Result<Self> {
         todo!()
     }

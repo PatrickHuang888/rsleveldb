@@ -11,7 +11,7 @@ mod table;
 mod util;
 
 #[derive(Clone)]
-pub struct Options<C:Comparator> {
+pub struct Options<C: Comparator> {
     // Number of keys between restart points for delta encoding of keys.
     // This parameter can be changed dynamically.  Most clients should
     // leave this parameter alone.
@@ -39,7 +39,6 @@ pub struct Options<C:Comparator> {
     // REQUIRES: The client must ensure that the comparator supplied
     // here has the same name and orders keys *exactly* the same as the
     // comparator provided to previous open calls on the same DB.
-
     comparator: C,
 
     // If true, the implementation will do aggressive checking of the
@@ -140,7 +139,7 @@ impl From<u8> for CompressionType {
 // A file abstraction for sequential writing.  The implementation
 // must provide buffering since callers may append small fragments
 // at a time to the file.
-pub trait WritableFile{
+pub trait WritableFile {
     fn append(&mut self, data: &[u8]) -> api::Result<()>;
     fn close(&mut self) -> api::Result<()>;
     fn flush(&mut self) -> api::Result<()>;
@@ -199,12 +198,12 @@ pub trait Logger {}
 
 // Create a new cache with a fixed size capacity.  This implementation
 // of Cache uses a least-recently-used eviction policy.
-pub trait Cache:Sync + Send {}
+pub trait Cache: Sync + Send {}
 
 // A DB is a persistent ordered map from keys to values.
 // A DB is safe for concurrent access from multiple threads without
 // any external synchronization.
-pub trait DB<C:Comparator>: Sized {
+pub trait DB<C: Comparator>: Sized {
     // Open the database with the specified "name".
     // Stores a pointer to a heap-allocated database in *dbptr and returns
     // OK on success.
@@ -464,9 +463,7 @@ fn extract_user_key(internal_key: &[u8]) -> &[u8] {
     return &internal_key[..internal_key.len() - 8];
 }
 
-pub struct Env {
-
-}
+pub struct Env {}
 impl Env {
     pub fn new_posix_writable_file(&self, filename: &str) -> api::Result<PosixWritableFile> {
         todo!()
@@ -480,9 +477,7 @@ impl Env {
     }
 }
 
-pub struct PosixWritableFile {
-
-}
+pub struct PosixWritableFile {}
 
 impl WritableFile for PosixWritableFile {
     fn append(&mut self, data: &[u8]) -> api::Result<()> {
