@@ -145,16 +145,16 @@ fn some_file_overlaps_range<C: api::Comparator>(
     icmp: &InternalKeyComparator<C>,
     disjoint_sorted_files: bool,
     files: &Vec<FileMetaData>,
-    smallest_user_key_opt: Option<&[u8]>,
-    largest_user_key_opt: Option<&[u8]>,
+    o_smallest_user_key: Option<&[u8]>,
+    o_largest_user_key: Option<&[u8]>,
 ) -> bool {
     let ucmp = icmp.user_comparator();
     if !disjoint_sorted_files {
         // Need to check against all files
         for i in 0..files.len() {
             let f = &files[i];
-            if after_file(ucmp, smallest_user_key_opt, f)
-                || before_file(ucmp, largest_user_key_opt, f)
+            if after_file(ucmp, o_smallest_user_key, f)
+                || before_file(ucmp, o_largest_user_key, f)
             {
                 // No overlap
             } else {
@@ -166,11 +166,10 @@ fn some_file_overlaps_range<C: api::Comparator>(
 
     // Binary search over file list
     let mut index = 0;
-    if let Some(smallest_user_key) = smallest_user_key_opt {
+    if let Some(smallest_user_key) = o_smallest_user_key {
         // Find the earliest possible internal key for smallest_user_key
         let small_key = InternalKey::new(smallest_user_key, MAX_SEQUENCE_NUMBER, TYPE_FOR_SEEK);
-        todo!()
-        //index= find_file(icmp, files, small_key.encode());
+        index= find_file(icmp, files, small_key.encode());
     }
 
     if index >= files.len() {
@@ -178,7 +177,7 @@ fn some_file_overlaps_range<C: api::Comparator>(
         return false;
     }
 
-    !before_file(ucmp, largest_user_key_opt, files[index])
+    !before_file(ucmp, o_largest_user_key, &files[index])
 }
 
 fn after_file(ucmp: &impl api::Comparator, user_key_opt: Option<&[u8]>, f: &FileMetaData) -> bool {
@@ -960,10 +959,28 @@ fn get_internal_key(input: &[u8]) -> api::Result<(InternalKey, usize)> {
     Ok((InternalKey { rep: Vec::from(s) }, s_size))
 }
 
+// Extracts the largest file b1 from |compaction_files| and then searches for a
+// b2 in |level_files| for which user_key(u1) = user_key(l2). If it finds such a
+// file b2 (known as a boundary file) it adds it to |compaction_files| and then
+// searches again using this new upper bound.
+//
+// If there are two blocks, b1=(l1, u1) and b2=(l2, u2) and
+// user_key(u1) = user_key(l2), and if we compact b1 but not b2 then a
+// subsequent get operation will yield an incorrect result because it will
+// return the record from b2 in level i rather than from b1 because it searches
+// level by level for records matching the supplied user key.
+//
+// parameters:
+//   in     level_files:      List of files to search for boundary files.
+//   in/out compaction_files: List of files to extend by adding boundary files.
+fn add_boundary_inputs<C:api::Comparator>(icmp :&InternalKeyComparator<C>, level_files:&Vec<FileMetaData>, compaction_files:&Vec<FileMetaData>) {
+    
+}
+
 mod test {
     use crate::{InternalKey, ValueType, db::memtable::InternalKeyComparator, api::ByteswiseComparator};
 
-    use super::{VersionEdit, find_file, FileMetaData};
+    use super::{VersionEdit, find_file, FileMetaData, some_file_overlaps_range};
 
     const BIG: u64 = 1u64 << 50;
 
@@ -1008,6 +1025,7 @@ mod test {
 
     struct FindFileTest {
         files:Vec<FileMetaData>,
+        disjoint_sorted_files:bool,
     }
 
     impl FindFileTest {
@@ -1025,15 +1043,32 @@ mod test {
 
         fn overlaps(&self, smallest: &str, largest:&str) -> bool {
             let cmp= InternalKeyComparator::new(&ByteswiseComparator{});
-
+            some_file_overlaps_range(&cmp, self.disjoint_sorted_files, &self.files, Some(smallest.as_bytes()), Some(largest.as_bytes()))
         }
     }
 
     #[test]
     fn test_find_file_empty() {
-        let test= FindFileTest{files:Vec::new()};
+        let test= FindFileTest{files:Vec::new(), disjoint_sorted_files:true};
         assert_eq!(0, test.find("foo"));
+        assert!(!test.overlaps("a", "z"));
+        assert!(!test.overlaps("", "z"));
+        assert!(!test.overlaps("a", ""));
+        assert!(!test.overlaps("", ""));
     }
 
+    #[test]
+    fn test_find_file_single() {
+        let mut test= FindFileTest{files:Vec::new(), disjoint_sorted_files:true};
+        test.add("p", "q");
+        assert_eq!(0, test.find("a"));
+        assert_eq!(0, test.find("p"));
+        assert_eq!(0, test.find("p1"));
+        assert_eq!(0, test.find("q"));
+        assert_eq!(1, test.find("q1"));
+        assert_eq!(1, test.find("z"));
 
+        assert!(!test.overlaps("a", "b"));
+        assert!(!test.overlaps("z1", "z2"))
+    }
 }
