@@ -442,6 +442,11 @@ impl InternalKey {
         InternalKey { rep }
     }
 
+    fn new_with_str_key(key: &str, s: SequenceNumber, t: ValueType) -> Self {
+        let user_key = key.as_bytes();
+        Self::new(user_key, s, t)
+    }
+
     fn user_key(&self) -> &[u8] {
         extract_user_key(&self.rep)
     }
