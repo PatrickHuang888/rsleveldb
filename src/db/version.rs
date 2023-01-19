@@ -27,9 +27,15 @@ pub(crate) struct FileMetaData {
 }
 
 impl FileMetaData {
-    fn new(number:u64, smallest:InternalKey, largest:InternalKey) -> Self {
+    fn new(number: u64, smallest: InternalKey, largest: InternalKey) -> Self {
         let allowed_seeks = 1 << 30;
-        FileMetaData{number, file_size:0, smallest, largest, allowed_seeks}
+        FileMetaData {
+            number,
+            file_size: 0,
+            smallest,
+            largest,
+            allowed_seeks,
+        }
     }
 }
 
@@ -153,8 +159,7 @@ fn some_file_overlaps_range<C: api::Comparator>(
         // Need to check against all files
         for i in 0..files.len() {
             let f = &files[i];
-            if after_file(ucmp, o_smallest_user_key, f)
-                || before_file(ucmp, o_largest_user_key, f)
+            if after_file(ucmp, o_smallest_user_key, f) || before_file(ucmp, o_largest_user_key, f)
             {
                 // No overlap
             } else {
@@ -169,7 +174,7 @@ fn some_file_overlaps_range<C: api::Comparator>(
     if let Some(smallest_user_key) = o_smallest_user_key {
         // Find the earliest possible internal key for smallest_user_key
         let small_key = InternalKey::new(smallest_user_key, MAX_SEQUENCE_NUMBER, TYPE_FOR_SEEK);
-        index= find_file(icmp, files, small_key.encode());
+        index = find_file(icmp, files, small_key.encode());
     }
 
     if index >= files.len() {
@@ -270,7 +275,6 @@ pub(crate) fn find_file<C: api::Comparator>(
     }
     right
 }
-
 
 pub(crate) struct VersionSet<C> {
     last_sequence: u64,
@@ -973,24 +977,28 @@ fn get_internal_key(input: &[u8]) -> api::Result<(InternalKey, usize)> {
 // parameters:
 //   in     level_files:      List of files to search for boundary files.
 //   in/out compaction_files: List of files to extend by adding boundary files.
-fn add_boundary_inputs<'a, C:api::Comparator>(icmp :&InternalKeyComparator<C>, level_files:&Vec<&'a FileMetaData>, compaction_files:&mut Vec<&'a FileMetaData>) {
+fn add_boundary_inputs<'a, C: api::Comparator>(
+    icmp: &InternalKeyComparator<C>,
+    level_files: &Vec<&'a FileMetaData>,
+    compaction_files: &mut Vec<&'a FileMetaData>,
+) {
     // Quick return if compaction_files is empty.
     match find_largest_key(icmp, compaction_files) {
         None => {
             return;
-        },
+        }
         Some(largest_key) => {
             let mut continue_searching = true;
-            let mut l= largest_key;
+            let mut l = largest_key;
             while continue_searching {
                 match find_smallest_boundary_file(icmp, level_files, l) {
                     None => {
                         continue_searching = false;
-                    },
+                    }
                     Some(smallest_boundary_file) => {
                         compaction_files.push(smallest_boundary_file);
-                        l= &smallest_boundary_file.largest;
-                    },
+                        l = &smallest_boundary_file.largest;
+                    }
                 }
             }
         }
@@ -999,12 +1007,27 @@ fn add_boundary_inputs<'a, C:api::Comparator>(icmp :&InternalKeyComparator<C>, l
 
 // Finds minimum file b2=(l2, u2) in level file for which l2 > u1 and
 // user_key(l2) = user_key(u1)
-fn find_smallest_boundary_file<'a, C:api::Comparator>(icmp :&InternalKeyComparator<C>, level_files:&Vec<&'a FileMetaData>, largest_key:&InternalKey) -> Option<&'a FileMetaData> {
+fn find_smallest_boundary_file<'a, C: api::Comparator>(
+    icmp: &InternalKeyComparator<C>,
+    level_files: &Vec<&'a FileMetaData>,
+    largest_key: &InternalKey,
+) -> Option<&'a FileMetaData> {
     let user_cmp = icmp.user_comparator();
-    let mut smallest_boundary_file:Option<&FileMetaData>= None;
-    level_files.iter().for_each(|f|{
-        if super::skiplist::Comparator::compare(icmp, &f.smallest, largest_key).is_gt() && user_cmp.compare(f.smallest.user_key(), largest_key.user_key()).is_eq() {
-            if smallest_boundary_file.is_none() || super::skiplist::Comparator::compare(icmp, &f.smallest, &smallest_boundary_file.unwrap().smallest).is_lt() {
+    let mut smallest_boundary_file: Option<&FileMetaData> = None;
+    level_files.iter().for_each(|f| {
+        if super::skiplist::Comparator::compare(icmp, &f.smallest, largest_key).is_gt()
+            && user_cmp
+                .compare(f.smallest.user_key(), largest_key.user_key())
+                .is_eq()
+        {
+            if smallest_boundary_file.is_none()
+                || super::skiplist::Comparator::compare(
+                    icmp,
+                    &f.smallest,
+                    &smallest_boundary_file.unwrap().smallest,
+                )
+                .is_lt()
+            {
                 smallest_boundary_file = Some(*f);
             }
         }
@@ -1013,23 +1036,32 @@ fn find_smallest_boundary_file<'a, C:api::Comparator>(icmp :&InternalKeyComparat
 }
 
 // Finds the largest key in a vector of files. Returns true if files is not empty.
-fn find_largest_key<'a, C:api::Comparator>(icmp: &InternalKeyComparator<C>, files:&Vec<&'a FileMetaData>) -> Option<&'a InternalKey> {
+fn find_largest_key<'a, C: api::Comparator>(
+    icmp: &InternalKeyComparator<C>,
+    files: &Vec<&'a FileMetaData>,
+) -> Option<&'a InternalKey> {
     if files.is_empty() {
-        return None
+        return None;
     }
-    let mut largest_key= &files[0].largest;
-    files.iter().for_each(|f|{
+    let mut largest_key = &files[0].largest;
+    files.iter().for_each(|f| {
         if super::skiplist::Comparator::compare(icmp, &f.largest, &largest_key).is_gt() {
-            largest_key= &f.largest;
+            largest_key = &f.largest;
         }
     });
     Some(largest_key)
 }
 
 mod test {
-    use crate::{InternalKey, ValueType, db::memtable::InternalKeyComparator, api::{ByteswiseComparator, self}};
+    use crate::{
+        api::{self, ByteswiseComparator},
+        db::memtable::InternalKeyComparator,
+        InternalKey, ValueType,
+    };
 
-    use super::{VersionEdit, find_file, FileMetaData, some_file_overlaps_range, add_boundary_inputs};
+    use super::{
+        add_boundary_inputs, find_file, some_file_overlaps_range, FileMetaData, VersionEdit,
+    };
 
     const BIG: u64 = 1u64 << 50;
 
@@ -1071,34 +1103,45 @@ mod test {
         assert_eq!(encoded, encoded2);
     }
 
-
     struct FindFileTest {
-        files:Vec<FileMetaData>,
-        disjoint_sorted_files:bool,
+        files: Vec<FileMetaData>,
+        disjoint_sorted_files: bool,
     }
 
     impl FindFileTest {
-        fn add(&mut self, smallest: &str, largest:&str) {
-            let f = FileMetaData::new((self.files.len()+1) as u64, InternalKey::new(smallest.as_bytes(), 100, ValueType::TypeValue),
-        InternalKey::new(largest.as_bytes(), 100, ValueType::TypeValue));
+        fn add(&mut self, smallest: &str, largest: &str) {
+            let f = FileMetaData::new(
+                (self.files.len() + 1) as u64,
+                InternalKey::new(smallest.as_bytes(), 100, ValueType::TypeValue),
+                InternalKey::new(largest.as_bytes(), 100, ValueType::TypeValue),
+            );
             self.files.push(f);
         }
 
-        fn find(&self, key:&str) -> usize {
-            let target= InternalKey::new(key.as_bytes(),100, ValueType::TypeValue );
-            let cmp= InternalKeyComparator::new(&ByteswiseComparator{});
+        fn find(&self, key: &str) -> usize {
+            let target = InternalKey::new(key.as_bytes(), 100, ValueType::TypeValue);
+            let cmp = InternalKeyComparator::new(&ByteswiseComparator {});
             find_file(&cmp, &self.files, target.encode())
         }
 
-        fn overlaps(&self, smallest: &str, largest:&str) -> bool {
-            let cmp= InternalKeyComparator::new(&ByteswiseComparator{});
-            some_file_overlaps_range(&cmp, self.disjoint_sorted_files, &self.files, Some(smallest.as_bytes()), Some(largest.as_bytes()))
+        fn overlaps(&self, smallest: &str, largest: &str) -> bool {
+            let cmp = InternalKeyComparator::new(&ByteswiseComparator {});
+            some_file_overlaps_range(
+                &cmp,
+                self.disjoint_sorted_files,
+                &self.files,
+                Some(smallest.as_bytes()),
+                Some(largest.as_bytes()),
+            )
         }
     }
 
     #[test]
     fn test_find_file_empty() {
-        let test= FindFileTest{files:Vec::new(), disjoint_sorted_files:true};
+        let test = FindFileTest {
+            files: Vec::new(),
+            disjoint_sorted_files: true,
+        };
         assert_eq!(0, test.find("foo"));
         assert!(!test.overlaps("a", "z"));
         assert!(!test.overlaps("", "z"));
@@ -1108,7 +1151,10 @@ mod test {
 
     #[test]
     fn test_find_file_single() {
-        let mut test= FindFileTest{files:Vec::new(), disjoint_sorted_files:true};
+        let mut test = FindFileTest {
+            files: Vec::new(),
+            disjoint_sorted_files: true,
+        };
         test.add("p", "q");
         assert_eq!(0, test.find("a"));
         assert_eq!(0, test.find("p"));
@@ -1121,29 +1167,26 @@ mod test {
         assert!(!test.overlaps("z1", "z2"))
     }
 
-
     struct AddBoundaryInputsTests<'a> {
-        level_files:Vec<&'a FileMetaData>,
+        level_files: Vec<&'a FileMetaData>,
         compaction_files: Vec<&'a FileMetaData>,
-        all_files:Vec<FileMetaData>,
-        icmp:InternalKeyComparator<ByteswiseComparator>
+        all_files: Vec<FileMetaData>,
+        icmp: InternalKeyComparator<ByteswiseComparator>,
     }
 
     impl<'a> AddBoundaryInputsTests<'a> {
         fn new() -> Self {
-            AddBoundaryInputsTests { level_files: Vec::new(), compaction_files: Vec::new(), all_files: Vec::new(), icmp: InternalKeyComparator::new(&ByteswiseComparator{}) }
+            AddBoundaryInputsTests {
+                level_files: Vec::new(),
+                compaction_files: Vec::new(),
+                all_files: Vec::new(),
+                icmp: InternalKeyComparator::new(&ByteswiseComparator {}),
+            }
         }
 
     }
 
-    fn create_file_meta_data(all_files: &mut Vec<FileMetaData> , number:u64, smallest:InternalKey, largest:InternalKey) -> &FileMetaData {
-        let f  = FileMetaData::new(number, smallest, largest);
-        let index= all_files.len();
-        all_files.push(f);        
-        &all_files[index]
-    }
-
-    #[test]
+         #[test]
     fn test_add_boundary_inputs_empty() {
         let mut test= AddBoundaryInputsTests::new();
         add_boundary_inputs(&test.icmp, &test.level_files, &mut test.compaction_files);
@@ -1154,11 +1197,14 @@ mod test {
     #[test]
     fn test_add_boundary_inputs_empty_level_files() {
         let mut test= AddBoundaryInputsTests::new();
-        let f1= create_file_meta_data(&mut test.all_files, 1, InternalKey::new("100".as_bytes(), 2, ValueType::TypeValue), 
+        let f= FileMetaData::new( 1, InternalKey::new("100".as_bytes(), 2, ValueType::TypeValue),
     InternalKey::new("100".as_bytes(), 1, ValueType::TypeValue));
+    test.all_files.push(f);
+    let f1= &test.all_files[0];
         test.compaction_files.push(f1);
 
         add_boundary_inputs(&test.icmp, &test.level_files, &mut test.compaction_files);
+
         assert_eq!(1, test.compaction_files.len());
         assert_eq!(f1, test.compaction_files[0]);
         assert!(test.level_files.is_empty());
@@ -1167,31 +1213,89 @@ mod test {
     #[test]
     fn test_add_boundary_inputs_empty_compaction_files() {
         let mut test= AddBoundaryInputsTests::new();
-        let f1= create_file_meta_data(&mut test.all_files, 1, InternalKey::new("100".as_bytes(), 2, ValueType::TypeValue), 
+        let f= FileMetaData::new( 1, InternalKey::new("100".as_bytes(), 2, ValueType::TypeValue),
     InternalKey::new("100".as_bytes(), 1, ValueType::TypeValue));
+        test.all_files.push(f);
+        let f1= &test.all_files[0];
         test.level_files.push(f1);
 
         add_boundary_inputs(&test.icmp, &test.level_files, &mut test.compaction_files);
+
         assert!(test.compaction_files.is_empty());
     }
 
     #[test]
     fn test_add_boundary_inputs_no_boundary_files() {
-        let mut test= AddBoundaryInputsTests::new();
-        let f1= create_file_meta_data(&mut test.all_files, 1, InternalKey::new_with_str_key("100", 2, ValueType::TypeValue), 
-    InternalKey::new_with_str_key("100", 1, ValueType::TypeValue));
-    let f2= create_file_meta_data(&mut test.all_files, 1, InternalKey::new_with_str_key("200", 2, ValueType::TypeValue), 
-    InternalKey::new_with_str_key("200", 1, ValueType::TypeValue));
-    let f3= create_file_meta_data(&mut test.all_files, 1, InternalKey::new_with_str_key("300", 2, ValueType::TypeValue), 
-    InternalKey::new_with_str_key("300", 1, ValueType::TypeValue));
-    
-    test.level_files.push(f3);
-    test.level_files.push(f2);
-    test.level_files.push(f1);
-    test.compaction_files.push(f2);
-    test.compaction_files.push(f3);
+        let mut test = AddBoundaryInputsTests::new();
+        let f1 = FileMetaData::new(
+            1,
+            InternalKey::new_with_str_key("100", 2, ValueType::TypeValue),
+            InternalKey::new_with_str_key("100", 1, ValueType::TypeValue),
+        );
+        test.all_files.push(f1);
+        let f2 = FileMetaData::new(
+            1,
+            InternalKey::new_with_str_key("200", 2, ValueType::TypeValue),
+            InternalKey::new_with_str_key("200", 1, ValueType::TypeValue),
+        );
+        test.all_files.push(f2);
+        let f3 = FileMetaData::new(
+            1,
+            InternalKey::new_with_str_key("300", 2, ValueType::TypeValue),
+            InternalKey::new_with_str_key("300", 1, ValueType::TypeValue),
+        );
+        test.all_files.push(f3);
+        let f3 = &test.all_files[2];
+        let f2 = &test.all_files[1];
+        let f1 = &test.all_files[0];
 
-    add_boundary_inputs(&test.icmp, &test.level_files, &mut test.compaction_files);
-        
+        test.level_files.push(f3);
+        test.level_files.push(f2);
+        test.level_files.push(f1);
+        test.compaction_files.push(f2);
+        test.compaction_files.push(f3);
+
+        add_boundary_inputs(&test.icmp, &test.level_files, &mut test.compaction_files);
+
+        assert_eq!(2, test.compaction_files.len())
+    }
+
+
+    #[test]
+    fn test_add_boundary_inputs_one_boundary_files() {
+        let mut test = AddBoundaryInputsTests::new();
+        let f1 = FileMetaData::new(
+            1,
+            InternalKey::new_with_str_key("100", 3, ValueType::TypeValue),
+            InternalKey::new_with_str_key("100", 2, ValueType::TypeValue),
+        );
+        test.all_files.push(f1);
+        let f2 = FileMetaData::new(
+            1,
+            InternalKey::new_with_str_key("100", 1, ValueType::TypeValue),
+            InternalKey::new_with_str_key("200", 3, ValueType::TypeValue),
+        );
+        test.all_files.push(f2);
+        let f3 = FileMetaData::new(
+            1,
+            InternalKey::new_with_str_key("300", 2, ValueType::TypeValue),
+            InternalKey::new_with_str_key("300", 1, ValueType::TypeValue),
+        );
+        test.all_files.push(f3);
+        let f3 = &test.all_files[2];
+        let f2 = &test.all_files[1];
+        let f1 = &test.all_files[0];
+
+
+        test.level_files.push(f3);
+        test.level_files.push(f2);
+        test.level_files.push(f1);
+        test.compaction_files.push(f1);
+
+        add_boundary_inputs(&test.icmp, &test.level_files, &mut test.compaction_files);
+
+        assert_eq!(2, test.compaction_files.len());
+        assert_eq!(f1, test.compaction_files[0]);
+        assert_eq!(f2, test.compaction_files[1]);
     }
 }
