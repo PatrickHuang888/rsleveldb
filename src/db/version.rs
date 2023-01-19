@@ -46,12 +46,12 @@ pub(crate) struct GetStats {
 }
 
 #[derive(PartialEq)]
-pub(crate) struct Version {
-    //vset: &'a VersionSet, // VersionSet to which this Version belongs
+pub(crate) struct Version<C:api::Comparator> {
+    user_cmp: C,
     // List of files per level
-    files: Vec<Vec<Arc<FileMetaData>>>,
+    files: Vec<Vec<FileMetaData>>,
     // Next file to compact based on seek stats.
-    file_to_compact: Option<FileMetaData>,
+    //file_to_compact: Option<&'a FileMetaData>,
     file_to_compact_level: i32,
 
     // Level that should be compacted next and its compaction score.
@@ -65,15 +65,16 @@ pub(crate) struct Version {
     index: i32,
 }
 
-impl Version {
-    fn new() -> Self {
+impl<C:api::Comparator> Version<C> {
+    fn new(user_cmp:C) -> Self {
         let mut files = Vec::with_capacity(NUM_LEVELS as usize);
         for _ in 0..NUM_LEVELS {
             files.push(Vec::new());
         }
         Version {
+            user_cmp,
             files,
-            file_to_compact: None,
+            //file_to_compact: None,
             file_to_compact_level: -1,
             compaction_score: -1.,
             compaction_level: -1,
@@ -138,6 +139,20 @@ impl Version {
         }
         todo!()
         //some_file_overlaps_range(&self.vset.icmp, disjoint, self.files[level], smallest_user_key_opt, largest_user_key_opt)
+    }
+
+    // Store in "*inputs" all files in "level" that overlap [begin,end]
+    fn get_overlapping_inputs(&self, level:u32, o_begin: Option<&InternalKey>, o_end:Option<&InternalKey>, inputs:&mut Vec<&FileMetaData>) {
+        assert!(level < config::NUM_LEVELS);
+        inputs.clear();
+        
+        self.files[level as usize].iter().for_each(|f|{
+            let file_start= f.smallest.user_key();
+            let file_limit= f.largest.user_key();
+             if o_begin.is_some() && self.user_cmp.compare(file_limit, o_begin.unwrap().user_key()).is_lt() {
+                // "f" is completely before specified range; skip it
+            } else if 
+        });
     }
 }
 
@@ -276,7 +291,7 @@ pub(crate) fn find_file<C: api::Comparator>(
     right
 }
 
-pub(crate) struct VersionSet<C> {
+pub(crate) struct VersionSet<C:api::Comparator> {
     last_sequence: u64,
     current_index: i32,
     log_number: u64,
@@ -291,7 +306,8 @@ pub(crate) struct VersionSet<C> {
     manifest_file_number: u64,
     env: Env,
 
-    versions: Vec<Version>,
+    versions: Vec<Version<C>>,
+    options:Option<C>,
 }
 
 impl<C: api::Comparator> VersionSet<C> {
@@ -305,12 +321,12 @@ impl<C: api::Comparator> VersionSet<C> {
         todo!()
     }
 
-    pub(crate) fn current_mut(&self) -> Option<&mut Version> {
+    pub(crate) fn current_mut(&self) -> Option<&mut Version<C>> {
         todo!()
         //&mut self.current
     }
 
-    pub(crate) fn current(&self) -> Option<&Version> {
+    pub(crate) fn current(&self) -> Option<&Version<C>> {
         Some(&self.versions[self.current_index as usize])
     }
 
@@ -361,7 +377,7 @@ impl<C: api::Comparator> VersionSet<C> {
         edit.set_next_file(self.next_file_number);
         edit.set_last_sequence(self.last_sequence);
 
-        let mut v = Version::new();
+        let mut v = Version::new(self.options.clone());
         {
             let mut builder = VersionSetBuilder::new(self, self.current_index as usize);
             builder.apply(edit);
@@ -421,7 +437,7 @@ impl<C: api::Comparator> VersionSet<C> {
         r
     }
 
-    fn append_version(&mut self, mut v: Version) {
+    fn append_version(&mut self, mut v: Version<C>) {
         //let rv= Rc::new(RefCell::new(v));
         // Make "v" current
         //assert!(rv != self.current);
@@ -431,7 +447,7 @@ impl<C: api::Comparator> VersionSet<C> {
         self.versions.push(v);
     }
 
-    fn finalize(&self, v: &mut Version) {
+    fn finalize(&self, v: &mut Version<C>) {
         // Precomputed best level for next compaction
         let mut best_level = -1i32;
         let mut best_score = -1f64;
@@ -624,7 +640,7 @@ impl<'a, C: api::Comparator> VersionSetBuilder<'a, C> {
     }
 
     // Save the current state in *v.
-    fn save_to(&self, v: &mut Version) {
+    fn save_to(&self, v: &mut Version<C>) {
         let cmp = BySmallestKey {
             internal_comparator: &self.vset.icmp,
         };
@@ -676,7 +692,7 @@ impl<'a, C: api::Comparator> VersionSetBuilder<'a, C> {
         }
     }
 
-    fn maybe_add_file(&self, v: &mut Version, level: u32, f: &Arc<FileMetaData>) {
+    fn maybe_add_file(&self, v: &mut Version<C>, level: u32, f: &Arc<FileMetaData>) {
         match self.levels[level as usize]
             .deleted_files
             .iter()
@@ -1183,12 +1199,11 @@ mod test {
                 icmp: InternalKeyComparator::new(&ByteswiseComparator {}),
             }
         }
-
     }
 
-         #[test]
+    #[test]
     fn test_add_boundary_inputs_empty() {
-        let mut test= AddBoundaryInputsTests::new();
+        let mut test = AddBoundaryInputsTests::new();
         add_boundary_inputs(&test.icmp, &test.level_files, &mut test.compaction_files);
         assert!(test.compaction_files.is_empty());
         assert!(test.level_files.is_empty());
@@ -1196,11 +1211,14 @@ mod test {
 
     #[test]
     fn test_add_boundary_inputs_empty_level_files() {
-        let mut test= AddBoundaryInputsTests::new();
-        let f= FileMetaData::new( 1, InternalKey::new("100".as_bytes(), 2, ValueType::TypeValue),
-    InternalKey::new("100".as_bytes(), 1, ValueType::TypeValue));
-    test.all_files.push(f);
-    let f1= &test.all_files[0];
+        let mut test = AddBoundaryInputsTests::new();
+        let f = FileMetaData::new(
+            1,
+            InternalKey::new("100".as_bytes(), 2, ValueType::TypeValue),
+            InternalKey::new("100".as_bytes(), 1, ValueType::TypeValue),
+        );
+        test.all_files.push(f);
+        let f1 = &test.all_files[0];
         test.compaction_files.push(f1);
 
         add_boundary_inputs(&test.icmp, &test.level_files, &mut test.compaction_files);
@@ -1212,11 +1230,14 @@ mod test {
 
     #[test]
     fn test_add_boundary_inputs_empty_compaction_files() {
-        let mut test= AddBoundaryInputsTests::new();
-        let f= FileMetaData::new( 1, InternalKey::new("100".as_bytes(), 2, ValueType::TypeValue),
-    InternalKey::new("100".as_bytes(), 1, ValueType::TypeValue));
+        let mut test = AddBoundaryInputsTests::new();
+        let f = FileMetaData::new(
+            1,
+            InternalKey::new("100".as_bytes(), 2, ValueType::TypeValue),
+            InternalKey::new("100".as_bytes(), 1, ValueType::TypeValue),
+        );
         test.all_files.push(f);
-        let f1= &test.all_files[0];
+        let f1 = &test.all_files[0];
         test.level_files.push(f1);
 
         add_boundary_inputs(&test.icmp, &test.level_files, &mut test.compaction_files);
@@ -1260,7 +1281,6 @@ mod test {
         assert_eq!(2, test.compaction_files.len())
     }
 
-
     #[test]
     fn test_add_boundary_inputs_one_boundary_files() {
         let mut test = AddBoundaryInputsTests::new();
@@ -1285,7 +1305,6 @@ mod test {
         let f3 = &test.all_files[2];
         let f2 = &test.all_files[1];
         let f1 = &test.all_files[0];
-
 
         test.level_files.push(f3);
         test.level_files.push(f2);
