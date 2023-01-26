@@ -360,15 +360,15 @@ impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
                     } else {
                         // todo: imm get
 
-                        let current = self.vset.current_mut().unwrap();
+                        let current = self.vset.current();
                         let stats = current.get(options, &lkey, value)?;
 
                         self.mutex.lock();
 
                         // todo:
                         //if self.vset.current_mut().unwrap().update_stats(stats) {
-                            todo!();
-                            //self.maybe_schedmule_compaction();
+                        todo!();
+                        //self.maybe_schedmule_compaction();
                         //}
                         //return Ok(());
                     }

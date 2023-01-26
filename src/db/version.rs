@@ -62,7 +62,7 @@ pub(crate) struct Version<C: api::Comparator> {
 
     /* next: Option<Rc<RefCell<Version>>>,
     prev: Option<Rc<RefCell<Version>>>, */
-    current_index: i32,
+    index: i32,
 }
 
 impl<C: api::Comparator> Version<C> {
@@ -78,7 +78,7 @@ impl<C: api::Comparator> Version<C> {
             file_to_compact_level: -1,
             compaction_score: -1.,
             compaction_level: -1,
-            current_index: -1,
+            index: -1,
         }
     }
 
@@ -119,7 +119,7 @@ impl<C: api::Comparator> Version<C> {
         &self,
         smallest_user_key: &[u8],
         largest_user_key: &[u8],
-    ) -> u32 {
+    ) -> i32 {
         let mut level = 0;
         todo!()
     }
@@ -143,12 +143,12 @@ impl<C: api::Comparator> Version<C> {
     }
 
     // Store in "*inputs" all files in "level" that overlap [begin,end]
-    fn get_overlapping(
+    fn get_overlapping_inputs(
         &self,
-        level: u32,
-        o_begin: Option<&InternalKey>,
+        level: i32,
+        o_begin: Option<&InternalKey>, // nullptr means before all keys
         o_end: Option<&InternalKey>,
-        inputs:&mut Vec<Rc<FileMetaData>>,
+        inputs: &mut Vec<Rc<FileMetaData>>,
     ) {
         assert!(level < config::NUM_LEVELS);
         inputs.clear();
@@ -286,22 +286,27 @@ struct Saver<C> {
 }
 
 // A Compaction encapsulates information about a compaction.
-pub(crate) struct Compaction<C:api::Comparator> {
-    level: u32,
+pub(crate) struct Compaction<C: api::Comparator> {
+    level: i32,
     // Each compaction reads inputs from "level_" and "level_+1"
     inputs: [Vec<Rc<FileMetaData>>; 2],
     // State used to check for number of overlapping grandparent files
     // (parent == level_ + 1, grandparent == level_ + 2)
     grandparents: Vec<Rc<FileMetaData>>,
-    edit:VersionEdit,
-    input_version:Option<Rc<Version<C>>>,
+    edit: VersionEdit,
+    input_version: Option<Rc<Version<C>>>,
 }
 
-impl<C:api::Comparator> Compaction<C> {
-    fn new(options:Options<C>, level:u32) -> Self {
-        let inputs= [Vec::new(), Vec::new()];
-        Compaction{level, inputs, grandparents:Vec::new(), edit:VersionEdit::new(),
-        input_version:None}
+impl<C: api::Comparator> Compaction<C> {
+    fn new(options: Options<C>, level: i32) -> Self {
+        let inputs = [Vec::new(), Vec::new()];
+        Compaction {
+            level,
+            inputs,
+            grandparents: Vec::new(),
+            edit: VersionEdit::new(),
+            input_version: None,
+        }
     }
 
     // Return the ith input file at "level()+which" ("which" must be 0 or 1).
@@ -343,7 +348,7 @@ pub(crate) fn find_file<C: api::Comparator>(
     right
 }
 
-fn max_file_size_for_level<C: api::Comparator>(options: &Options<C>, level: u32) -> u64 {
+fn max_file_size_for_level<C: api::Comparator>(options: &Options<C>, level: i32) -> u64 {
     // We could vary per level to reduce number of files?
     target_file_size(options) as u64
 }
@@ -378,8 +383,72 @@ impl<C: api::Comparator> VersionSet<C> {
         (v.compaction_score >= 1.0) || v.file_to_compact.is_some()
     }
 
-    pub(crate) fn pick_compaction(&self) -> Option<&Compaction<C>> {
-        todo!()
+    // Pick level and inputs for a new compaction.
+    // Returns nullptr if there is no compaction to be done.
+    // Otherwise returns a pointer to a heap-allocated object that
+    // describes the compaction.  Caller should delete the result.
+    pub(crate) fn pick_compaction(&mut self) -> Option<Compaction<C>> {
+        let mut c: Compaction<C>;
+        let mut level = 0;
+
+        // We prefer compactions triggered by too much data in a level over
+        // the compactions triggered by seeks.
+        let current = self.current();
+        let mut size_compaction = false;
+        if current.compaction_score >= 1.0 {
+            size_compaction = false;
+        }
+        let mut seek_compaction = false;
+        if current.file_to_compact.is_some() {
+            seek_compaction = true;
+        }
+        if size_compaction {
+            let l = current.compaction_level;
+            assert!(l >= 0);
+            assert!(l + 1 < config::NUM_LEVELS as i32);
+            c = Compaction::new(self.options.clone(), l);
+
+            // Pick the first file that comes after compact_pointer_[level]
+            level = l as usize;
+            let mut i = 0;
+            while i < current.files[level].len() {
+                let f = &current.files[level][i];
+                if self.compact_pointer[level].is_empty()
+                    || self
+                        .icmp
+                        .compare(f.largest.encode(), &self.compact_pointer[level])
+                        .is_gt()
+                {
+                    c.inputs[0].push(f.clone());
+                    break;
+                }
+                i += 1;
+            }
+            if c.inputs[0].is_empty() {
+                // Wrap-around to the beginning of the key space
+                c.inputs[0].push((&current.files[level][0]).clone());
+            }
+        } else if seek_compaction {
+            let l = current.file_to_compact_level;
+            c = Compaction::new(self.options.clone(), l);
+            c.inputs[0].push(current.file_to_compact.as_ref().unwrap().clone());
+        } else {
+            return None;
+        }
+
+        c.input_version = Some(current.clone());
+
+        if level == 0 {
+            let (smallest, largest) = self.get_range(&mut c.inputs[0]);
+            // Note that the next call will discard the file we placed in
+            // c->inputs_[0] earlier and replace it with an overlapping set
+            // which will include the picked file.
+            current.get_overlapping_inputs(0, Some(&smallest), Some(&largest), &mut c.inputs[0]);
+            assert!(!c.inputs[0].is_empty());
+        }
+
+        self.setup_other_inputs(&mut c);
+        Some(c)
     }
 
     /* pub(crate) fn current_mut(&self) -> Option<&mut Version<C>> {
@@ -397,13 +466,13 @@ impl<C: api::Comparator> VersionSet<C> {
     // the result.
     pub fn compact_range(
         &mut self,
-        level: u32,
+        level: i32,
         o_begin: Option<&InternalKey>,
         o_end: Option<&InternalKey>,
     ) -> Option<Compaction<C>> {
-        let mut inputs= Vec::new();
+        let mut inputs = Vec::new();
         self.current()
-            .get_overlapping(level, o_begin, o_end, &mut inputs);
+            .get_overlapping_inputs(level, o_begin, o_end, &mut inputs);
         if inputs.is_empty() {
             return None;
         }
@@ -428,20 +497,24 @@ impl<C: api::Comparator> VersionSet<C> {
         }
 
         let mut c = Compaction::new(self.options.clone(), level);
-        c.input_version= Some(self.current().clone());
+        c.input_version = Some(self.current().clone());
         None
     }
 
     fn setup_other_inputs(&mut self, c: &mut Compaction<C>) {
         let level = c.level;
         let current = self.current();
-        
-        add_boundary_inputs(&self.icmp, &current.files[level as usize], &mut c.inputs[0]);
-        let (smallest, largest)= self.get_range(&c.inputs[0]);
 
-        current.get_overlapping(level, Some(&smallest), Some(&largest), &mut c.inputs[1]);
-        add_boundary_inputs(&self.icmp, &current.files[(level+1) as usize], &mut c.inputs[1]);
-        
+        add_boundary_inputs(&self.icmp, &current.files[level as usize], &mut c.inputs[0]);
+        let (smallest, largest) = self.get_range(&c.inputs[0]);
+
+        current.get_overlapping_inputs(level, Some(&smallest), Some(&largest), &mut c.inputs[1]);
+        add_boundary_inputs(
+            &self.icmp,
+            &current.files[(level + 1) as usize],
+            &mut c.inputs[1],
+        );
+
         // Get entire range covered by compaction
         let (all_start, all_limit) = self.get_range2(&c.inputs[0], &c.inputs[1]);
 
@@ -453,25 +526,32 @@ impl<C: api::Comparator> VersionSet<C> {
         // Compute the set of grandparent files that overlap this compaction
         // (parent == level+1; grandparent == level+2)
         if level + 2 < config::NUM_LEVELS {
-            current.get_overlapping(level+2 , Some(&all_start), Some(&all_limit),&mut c.grandparents);
+            current.get_overlapping_inputs(
+                level + 2,
+                Some(&all_start),
+                Some(&all_limit),
+                &mut c.grandparents,
+            );
         }
 
         // Update the place where we will do the next compaction for this level.
         // We update this immediately instead of waiting for the VersionEdit
         // to be applied so that if the compaction fails, we will try a different
         // key range next time.
-        self.compact_pointer[level as usize]= largest.encode().to_vec();
+        self.compact_pointer[level as usize] = largest.encode().to_vec();
         c.edit.set_compact_pointer(level, largest);
     }
 
     // Stores the minimal range that covers all entries in inputs1 and inputs2 in *smallest, *largest.
     // REQUIRES: inputs is not empty
-    fn get_range2(&self, inputs1:&Vec<Rc<FileMetaData>>, inputs2:&Vec<Rc<FileMetaData>> ) ->(InternalKey, InternalKey) {
+    fn get_range2(
+        &self,
+        inputs1: &Vec<Rc<FileMetaData>>,
+        inputs2: &Vec<Rc<FileMetaData>>,
+    ) -> (InternalKey, InternalKey) {
         let mut all = Vec::new();
-        inputs1.iter().for_each(|f|{
-            all.push(f.clone())
-        }); 
-        inputs2.iter().for_each(|f|{
+        inputs1.iter().for_each(|f| all.push(f.clone()));
+        inputs2.iter().for_each(|f| {
             all.push(f.clone());
         });
         self.get_range(&mut all)
@@ -481,16 +561,15 @@ impl<C: api::Comparator> VersionSet<C> {
     // REQUIRES: inputs is not empty
     fn get_range(&self, inputs: &Vec<Rc<FileMetaData>>) -> (InternalKey, InternalKey) {
         assert!(!inputs.is_empty());
-        let mut smallest= inputs[0].smallest.clone();
-        let mut largest= inputs[0].largest.clone();
-        inputs.iter().for_each(|f| {          
-                if super::skiplist::Comparator::compare(&self.icmp, &f.smallest, &smallest).is_lt()
-                {
-                    smallest = f.smallest.clone();
-                }
-                if super::skiplist::Comparator::compare(&self.icmp, &f.largest, &largest).is_gt() {
-                    largest = f.largest.clone();
-                }
+        let mut smallest = inputs[0].smallest.clone();
+        let mut largest = inputs[0].largest.clone();
+        inputs.iter().for_each(|f| {
+            if super::skiplist::Comparator::compare(&self.icmp, &f.smallest, &smallest).is_lt() {
+                smallest = f.smallest.clone();
+            }
+            if super::skiplist::Comparator::compare(&self.icmp, &f.largest, &largest).is_gt() {
+                largest = f.largest.clone();
+            }
         });
         (smallest, largest)
     }
@@ -591,11 +670,13 @@ impl<C: api::Comparator> VersionSet<C> {
         r
     }
 
-    fn append_version(&mut self, v: Version<C>) {
+    fn append_version(&mut self, mut v: Version<C>) {
         //let rv= Rc::new(RefCell::new(v));
         // Make "v" current
-        let current= Rc::new(v);
-        v.current_index = self.versions.len() as i32;
+        let index = self.versions.len();
+        v.index = index as i32;
+        let current = Rc::new(v);
+        self.current_index = index as i32;
         self.versions.push(current);
     }
 
@@ -695,7 +776,7 @@ fn total_file_size(files: &Vec<Rc<FileMetaData>>) -> f64 {
     sum
 }
 
-fn max_bytes_for_level(level: u32) -> f64 {
+fn max_bytes_for_level(level: i32) -> f64 {
     // Note: the result for level zero is not really used since we set
     // the level-0 compaction threshold based on number of files.
 
@@ -777,7 +858,7 @@ impl<'a, C: api::Comparator> VersionSetBuilder<'a, C> {
             // same as the compaction of 40KB of data.  We are a little
             // conservative and allow approximately one seek for every 16KB
             // of data before triggering a compaction.;
-            let rf= Rc::get_mut(&mut f).unwrap(); 
+            let rf = Rc::get_mut(&mut f).unwrap();
             rf.allowed_seeks = (rf.file_size / 16384) as u32;
             if rf.allowed_seeks < 100 {
                 rf.allowed_seeks = 100;
@@ -843,7 +924,7 @@ impl<'a, C: api::Comparator> VersionSetBuilder<'a, C> {
         }
     }
 
-    fn maybe_add_file(&self, v: &mut Version<C>, level: u32, f: &Rc<FileMetaData>) {
+    fn maybe_add_file(&self, v: &mut Version<C>, level: i32, f: &Rc<FileMetaData>) {
         match self.levels[level as usize]
             .deleted_files
             .iter()
@@ -901,9 +982,9 @@ impl From<u32> for Tag {
 
 #[derive(Default)]
 pub(crate) struct VersionEdit {
-    compact_pointers: Vec<(u32, InternalKey)>, // (level, key)
-    deleted_files: Vec<(u32, u64)>,            // (level, file_number)
-    new_files: Vec<(u32, Rc<FileMetaData>)>,
+    compact_pointers: Vec<(i32, InternalKey)>, // (level, key)
+    deleted_files: Vec<(i32, u64)>,            // (level, file_number)
+    new_files: Vec<(i32, Rc<FileMetaData>)>,
 
     comparator_name: Option<String>,
     log_number: Option<u64>,
@@ -914,8 +995,16 @@ pub(crate) struct VersionEdit {
 
 impl VersionEdit {
     fn new() -> Self {
-        VersionEdit { compact_pointers: Vec::new(), deleted_files: Vec::new(), new_files: Vec::new(),
-             comparator_name: None, log_number: None, prev_log_number: None, next_file_number: None, last_sequence: None }
+        VersionEdit {
+            compact_pointers: Vec::new(),
+            deleted_files: Vec::new(),
+            new_files: Vec::new(),
+            comparator_name: None,
+            log_number: None,
+            prev_log_number: None,
+            next_file_number: None,
+            last_sequence: None,
+        }
     }
 
     fn set_comparator_name(&mut self, name: &str) {
@@ -938,7 +1027,7 @@ impl VersionEdit {
         self.last_sequence = Some(seq);
     }
 
-    fn set_compact_pointer(&mut self, level: u32, key: InternalKey) {
+    fn set_compact_pointer(&mut self, level: i32, key: InternalKey) {
         self.compact_pointers.push((level, key));
     }
 
@@ -947,7 +1036,7 @@ impl VersionEdit {
     // REQUIRES: "smallest" and "largest" are smallest and largest keys in file
     pub fn add_file(
         &mut self,
-        level: u32,
+        level: i32,
         number: u64,
         file_size: u64,
         smallest_key: &InternalKey,
@@ -964,7 +1053,7 @@ impl VersionEdit {
     }
 
     // Delete the specified "file" from the specified "level".
-    fn remove_file(&mut self, level: u32, file: u64) {
+    fn remove_file(&mut self, level: i32, file: u64) {
         self.deleted_files.push((level, file));
     }
 
@@ -992,19 +1081,19 @@ impl VersionEdit {
 
         self.compact_pointers.iter().for_each(|(level, key)| {
             util::put_varint32(dst, Tag::CompactPointer as u32);
-            util::put_varint32(dst, *level);
+            util::put_varint32(dst, *level as u32);
             util::put_length_prefixed_slice(dst, &key.rep);
         });
 
         self.deleted_files.iter().for_each(|(level, file_number)| {
             util::put_varint32(dst, Tag::DeletedFile as u32);
-            util::put_varint32(dst, *level);
+            util::put_varint32(dst, *level as u32);
             util::put_varint64(dst, *file_number);
         });
 
         self.new_files.iter().for_each(|(level, f)| {
             util::put_varint32(dst, Tag::NewFile as u32);
-            util::put_varint32(dst, *level);
+            util::put_varint32(dst, *level as u32);
             util::put_varint64(dst, f.number);
             util::put_varint64(dst, f.file_size);
             util::put_length_prefixed_slice(dst, &f.smallest.rep);
@@ -1120,13 +1209,13 @@ impl VersionEdit {
     }
 }
 
-fn get_level(input: &[u8]) -> api::Result<(u32, usize)> {
+fn get_level(input: &[u8]) -> api::Result<(i32, usize)> {
     let (l, l_size) =
         util::get_varint32(input).map_err(|_| api::Error::Corruption("level error".to_string()))?;
-    if l >= config::NUM_LEVELS {
+    if l as i32 >= config::NUM_LEVELS {
         return Err(api::Error::Corruption("over max level".to_string()));
     }
-    Ok((l, l_size))
+    Ok((l as i32, l_size))
 }
 
 fn get_internal_key(input: &[u8]) -> api::Result<(InternalKey, usize)> {
@@ -1253,7 +1342,7 @@ mod test {
             );
             edit.remove_file(4, BIG + 700 + i);
             edit.set_compact_pointer(
-                i as u32,
+                i as i32,
                 InternalKey::new("x".as_bytes(), BIG + 900 + 1, ValueType::TypeValue),
             );
         }
