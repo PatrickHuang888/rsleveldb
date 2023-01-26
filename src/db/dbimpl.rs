@@ -112,7 +112,7 @@ struct DBImpl<C: Comparator + Send + Sync> {
     bg_error: Option<api::Error>,
 }
 
-impl<C: Comparator + Send + Sync> DBImpl<C> {
+impl<C: api::Comparator + Send + Sync> DBImpl<C> {
     /* fn background_call(&mut self) {
         let _lock = MutexLock::new(&self.mutex);
 
@@ -228,7 +228,7 @@ impl<C: Comparator + Send + Sync> DBImpl<C> {
         &mut self,
         mem: &mut MemTable<C>,
         edit: &mut VersionEdit,
-        o_base: Option<&mut Version>,
+        o_base: Option<&mut Version<C>>,
     ) -> api::Result<()> {
         assert!(self.mutex.is_locked());
 
@@ -365,11 +365,12 @@ impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
 
                         self.mutex.lock();
 
-                        if self.vset.current_mut().unwrap().update_stats(stats) {
-                            todo!()
+                        // todo:
+                        //if self.vset.current_mut().unwrap().update_stats(stats) {
+                            todo!();
                             //self.maybe_schedmule_compaction();
-                        }
-                        return Ok(());
+                        //}
+                        //return Ok(());
                     }
                 }
                 _ => {
