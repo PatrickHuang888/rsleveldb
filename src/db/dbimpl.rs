@@ -78,7 +78,7 @@ impl<'a> Drop for MutexLock<'a> {
     }
 }
 
-struct DBImpl<C: Comparator + Send + Sync> {
+struct DBImpl<'a, C: Comparator + Send + Sync> {
     internal_comparator: InternalKeyComparator<C>,
     options: Options<C>,
     dbname: String,
@@ -93,7 +93,7 @@ struct DBImpl<C: Comparator + Send + Sync> {
     // table_cache_ provides its own synchronization
     table_cache: TableCache,
 
-    vset: VersionSet<C>,
+    vset: VersionSet<'a, C>,
 
     mem: MemTable<C>,
     imem: Option<MemTable<C>>,
@@ -112,7 +112,7 @@ struct DBImpl<C: Comparator + Send + Sync> {
     bg_error: Option<api::Error>,
 }
 
-impl<C: api::Comparator + Send + Sync> DBImpl<C> {
+impl<'a, C: api::Comparator + Send + Sync> DBImpl<'a, C> {
     /* fn background_call(&mut self) {
         let _lock = MutexLock::new(&self.mutex);
 
@@ -154,9 +154,9 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
                 self.background_call();
             });
         }
-    }
+    }*/
 
-    fn background_compaction(&self) {
+    fn background_compaction(&mut self) {
         assert!(self.mutex.is_locked());
 
         if self.imem.is_some() {
@@ -164,9 +164,11 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
             return;
         }
 
-        let oc: Option<&Compaction>;
+        let is_manual:bool;
+        let oc: Option<Compaction<C>>;
         if let Some(manual) = &mut self.mannual_compaction {
-            oc = self
+            todo!()
+            /* oc = self
                 .vset
                 .compact_range(manual.level, &manual.begin, &manual.end);
             match oc {
@@ -177,17 +179,37 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
                     let manual_end = &c.input(0, c.num_input_files(0) - 1).largest;
                     // todo: log
                 }
-            }
+            } */
         } else {
             oc = self.vset.pick_compaction();
         }
 
-        match oc {
+        match &mut oc {
             None => {
                 // Nothing to do
+            },
+            Some(c) => {
+                if !is_manual && c.is_trivial_move(&self.options) {
+                    // Move file to next level
+                    assert!(c.num_input_files(0)==1);
+                    let f= c.input(0, 0).as_ref();
+                    let edit= c.edit_mut();
+                    edit.remove_file(c.level(), f.number);
+                    edit.add_file(c.level(), f.number, f.file_size, &f.smallest, &f.largest);
+                    let status= self.vset.log_and_apply(&self.mutex, edit);
+                }else {
+                    let compact= CompactState::new(oc.unwrap());
+                    let status= self.do_compaction_work(&compact);
+                    if !status.is_ok() {
+                        self.record_background_error(status);
+                    }
+                    self.cleanup_compaction(&compact);
+                    self.remove_obsolete_files();
+                }
             }
-            Some(c) => {}
         }
+
+
     }
 
     fn compact_memtable(&mut self) {
@@ -196,8 +218,8 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
 
         // Save the contents of the memtable as a new Table
         let mut edit = VersionEdit::default();
-        let base = self.vset.current_mut();
-        let mut r = self.write_level0_table(self.imem.as_mut().unwrap(), &mut edit, base);
+        let base = self.vset.current();
+        let mut r = self.write_level0_table(true, &mut edit, Some(base));
 
         if r.is_ok() && self.shutting_down.load(atomic::Ordering::Acquire) {
             r = Err(api::Error::IOError(
@@ -222,15 +244,21 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
                 self.record_background_error(e);
             }
         }
-    } */
+    }
 
     fn write_level0_table(
         &mut self,
-        mem: &mut MemTable<C>,
+        write_imem: bool,
+        //mem: &mut MemTable<C>,
         edit: &mut VersionEdit,
-        o_base: Option<&mut Version<C>>,
+        o_base: Option<Rc<Version<C>>>,
     ) -> api::Result<()> {
         assert!(self.mutex.is_locked());
+
+        let mut mem = &mut self.mem;
+        if write_imem {
+            mem = self.imem.as_mut().unwrap();
+        }
 
         let start_micros = util::now_micros();
         let mut meta = FileMetaData::default();

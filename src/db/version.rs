@@ -37,11 +37,31 @@ impl FileMetaData {
             allowed_seeks,
         }
     }
+
+    fn adjust_allowed_seeks(&mut self) {
+        // We arrange to automatically compact this file after
+            // a certain number of seeks.  Let's assume:
+            //   (1) One seek costs 10ms
+            //   (2) Writing or reading 1MB costs 10ms (100MB/s)
+            //   (3) A compaction of 1MB does 25MB of IO:
+            //         1MB read from this level
+            //         10-12MB read from next level (boundaries may be misaligned)
+            //         10-12MB written to next level
+            // This implies that 25 seeks cost the same as the compaction
+            // of 1MB of data.  I.e., one seek costs approximately the
+            // same as the compaction of 40KB of data.  We are a little
+            // conservative and allow approximately one seek for every 16KB
+            // of data before triggering a compaction.;
+            self.allowed_seeks = (self.file_size / 16384) as u32;
+            if self.allowed_seeks < 100 {
+                self.allowed_seeks = 100;
+            }
+    }
 }
 
 #[derive(Default)]
-pub(crate) struct GetStats {
-    seek_file: Option<Rc<FileMetaData>>,
+pub(crate) struct GetStats<'a> {
+    seek_file: Option<&'a FileMetaData>,
     seek_file_level: i32,
 }
 
@@ -96,7 +116,7 @@ impl<C: api::Comparator> Version<C> {
 
     fn for_each_overlapping(&self, user_key: &[u8], internal_key: &[u8]) {}
 
-    /* pub fn update_stats(&mut self, stats: GetStats) -> bool {
+    pub fn update_stats(&mut self, stats: GetStats) -> bool {
         match stats.seek_file {
             None => {
                 return false;
@@ -111,7 +131,7 @@ impl<C: api::Comparator> Version<C> {
                 return true;
             }
         }
-    } */
+    } 
 
     // Return the level at which we should place a new memtable compaction
     // result that covers the range [smallest_user_key,largest_user_key].
@@ -309,14 +329,40 @@ impl<C: api::Comparator> Compaction<C> {
         }
     }
 
+    pub fn edit_mut(&mut self) -> &mut VersionEdit {
+        &mut self.edit
+    }
+
     // Return the ith input file at "level()+which" ("which" must be 0 or 1).
-    pub fn input(&self, which: u32, i: u32) -> &FileMetaData {
+    pub fn input(&self, which: u32, i: u32) -> &Rc<FileMetaData> {
         todo!();
     }
     // "which" must be either 0 or 1
     pub fn num_input_files(&self, which: u32) -> u32 {
         todo!()
     }
+
+    // Return the level that is being compacted.  Inputs from "level"
+    // and "level+1" will be merged to produce a set of "level+1" files.
+    pub fn level(&self) -> i32 {
+        self.level
+    }
+
+    // Is this a trivial compaction that can be implemented by just
+    // moving a single input file to the next level (no merging or splitting)
+    pub fn is_trivial_move(&self, options:&Options<C>) -> bool {
+        // Avoid a move if there is lots of overlapping grandparent data.
+        // Otherwise, the move could create a parent file that will require
+        // a very expensive merge later on.
+        self.num_input_files(0) == 1 && self.num_input_files(1) == 0 &&
+        total_file_size(&self.grandparents) <= max_grand_parent_overlap_bytes(options)
+    }
+}
+
+// Maximum bytes of overlaps in grandparent (i.e., level+2) before we
+// stop building a single file in a level->level+1 compaction.
+fn max_grand_parent_overlap_bytes<C:api::Comparator>(options: &Options<C>) -> i64{
+    (10 * target_file_size(options)) as i64
 }
 
 // Return the smallest index i such that files[i]->largest >= key.
@@ -589,7 +635,7 @@ impl<C: api::Comparator> VersionSet<C> {
     pub fn log_and_apply(
         &mut self,
         mu: &parking_lot::RawMutex,
-        mut edit: VersionEdit,
+        edit: &mut VersionEdit,
     ) -> api::Result<()> {
         match edit.log_number {
             None => {
@@ -768,11 +814,11 @@ impl<C: api::Comparator> VersionSet<C> {
     }
 }
 
-fn total_file_size(files: &Vec<Rc<FileMetaData>>) -> f64 {
-    let mut sum = 0f64;
-    files.iter().for_each(|f| {
-        sum += f.file_size as f64;
-    });
+fn total_file_size(files: &Vec<Rc<FileMetaData>>) -> i64 {
+    let mut sum = 0;
+    for f in files{
+        sum += f.file_size as i64;
+    };
     sum
 }
 
@@ -831,38 +877,20 @@ impl<'a, C: api::Comparator> VersionSetBuilder<'a, C> {
     }
 
     // Apply all of the edits in *edit to the current state.
-    fn apply(&mut self, edit: VersionEdit) {
+    fn apply(&mut self, edit: &VersionEdit) {
         // Update compaction pointers
-        for (level, ikey) in &edit.compact_pointers {
-            self.vset.compact_pointer[*level as usize].clear();
-            self.vset.compact_pointer[*level as usize].extend_from_slice(ikey.encode());
+        for (level, ikey) in edit.compact_pointers {
+            self.vset.compact_pointer[level as usize].clear();
+            self.vset.compact_pointer[level as usize].extend_from_slice(ikey.encode());
         }
 
         // Delete files
-        for (level, number) in &edit.deleted_files {
-            self.levels[*level as usize].deleted_files.push(*number);
+        for (level, number) in edit.deleted_files {
+            self.levels[level as usize].deleted_files.push(number);
         }
 
         // Add new files
         for (level, mut f) in edit.new_files {
-            // We arrange to automatically compact this file after
-            // a certain number of seeks.  Let's assume:
-            //   (1) One seek costs 10ms
-            //   (2) Writing or reading 1MB costs 10ms (100MB/s)
-            //   (3) A compaction of 1MB does 25MB of IO:
-            //         1MB read from this level
-            //         10-12MB read from next level (boundaries may be misaligned)
-            //         10-12MB written to next level
-            // This implies that 25 seeks cost the same as the compaction
-            // of 1MB of data.  I.e., one seek costs approximately the
-            // same as the compaction of 40KB of data.  We are a little
-            // conservative and allow approximately one seek for every 16KB
-            // of data before triggering a compaction.;
-            let rf = Rc::get_mut(&mut f).unwrap();
-            rf.allowed_seeks = (rf.file_size / 16384) as u32;
-            if rf.allowed_seeks < 100 {
-                rf.allowed_seeks = 100;
-            }
 
             let deleted_files = &mut self.levels[level as usize].deleted_files;
             let pos = deleted_files.iter().position(|x| *x == f.number);
@@ -1042,18 +1070,12 @@ impl VersionEdit {
         smallest_key: &InternalKey,
         largest_key: &InternalKey,
     ) {
-        let f = FileMetaData {
-            number,
-            file_size,
-            allowed_seeks: 0,
-            smallest: smallest_key.clone(),
-            largest: largest_key.clone(),
-        };
+        let f = FileMetaData::new(number, smallest_key.clone(), largest_key.clone());
         self.new_files.push((level, Rc::new(f)));
     }
 
     // Delete the specified "file" from the specified "level".
-    fn remove_file(&mut self, level: i32, file: u64) {
+    pub fn remove_file(&mut self, level: i32, file: u64) {
         self.deleted_files.push((level, file));
     }
 
