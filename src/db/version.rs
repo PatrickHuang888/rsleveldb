@@ -60,8 +60,8 @@ impl FileMetaData {
 }
 
 #[derive(Default)]
-pub(crate) struct GetStats<'a> {
-    seek_file: Option<&'a FileMetaData>,
+pub(crate) struct GetStats{
+    seek_file: Option<Arc<FileMetaData>>,
     seek_file_level: i32,
 }
 
@@ -69,9 +69,9 @@ pub(crate) struct GetStats<'a> {
 pub(crate) struct Version<C: api::Comparator> {
     user_cmp: C,
     // List of files per level
-    files: Vec<Vec<Rc<FileMetaData>>>,
+    files: [Vec<Arc<FileMetaData>>; config::NUM_LEVELS as usize],
     // Next file to compact based on seek stats.
-    file_to_compact: Option<Rc<FileMetaData>>,
+    file_to_compact: Option<Arc<FileMetaData>>,
     file_to_compact_level: i32,
 
     // Level that should be compacted next and its compaction score.
@@ -87,13 +87,9 @@ pub(crate) struct Version<C: api::Comparator> {
 
 impl<C: api::Comparator> Version<C> {
     fn new(user_cmp: C) -> Self {
-        let mut files = Vec::with_capacity(NUM_LEVELS as usize);
-        for _ in 0..NUM_LEVELS {
-            files.push(Vec::new());
-        }
         Version {
             user_cmp,
-            files,
+            files: Default::default(),
             file_to_compact: None,
             file_to_compact_level: -1,
             compaction_score: -1.,
@@ -109,11 +105,28 @@ impl<C: api::Comparator> Version<C> {
         &self,
         options: &ReadOptions,
         key: &LookupKey,
-        value: &mut Vec<u8>,
-    ) -> api::Result<GetStats> {
+    ) -> api::Result<(&[u8], Arc<FileMetaData>, i32)> {  //(value, seek_file, level)
+        
+        // Search level-0 in order from newest to oldest.
+        let mut tmp= Vec::with_capacity(self.files[0].len());
+        for f in self.files[0] {
+            if self.user_cmp.compare(key.user_key(), f.smallest.user_key()).is_ge() &&
+            self.user_cmp.compare(key.user_key(), f.largest.user_key()).is_le() {
+                tmp.push(f.clone());
+            }
+        }
+        if !tmp.is_empty() {
+            tmp.sort_by(|a,b|b.number.cmp(&a.number));
+
+        }
         todo!()
     }
 
+    // Call func(arg, level, f) for every file that overlaps user_key in
+  // order from newest to oldest.  If an invocation of func returns
+  // false, makes no more calls.
+  //
+  // REQUIRES: user portion of internal_key == user_key.
     fn for_each_overlapping(&self, user_key: &[u8], internal_key: &[u8]) {}
 
     pub fn update_stats(&mut self, stats: GetStats) -> bool {
@@ -122,8 +135,9 @@ impl<C: api::Comparator> Version<C> {
                 return false;
             }
             Some(mut seek_file) => {
-                let sf= Rc::get_mut(&mut seek_file).unwrap();
-                sf.allowed_seeks -= 1;
+                // todo:
+                //let sf= Rc::get_mut(&mut seek_file).unwrap();
+                //sf.allowed_seeks -= 1;
                 if seek_file.allowed_seeks == 0 && self.file_to_compact == None {
                     self.file_to_compact = Some(seek_file.clone());
                     self.file_to_compact_level = stats.seek_file_level;
@@ -162,16 +176,15 @@ impl<C: api::Comparator> Version<C> {
         //some_file_overlaps_range(&self.vset.icmp, disjoint, self.files[level], smallest_user_key_opt, largest_user_key_opt)
     }
 
-    // Store in "*inputs" all files in "level" that overlap [begin,end]
-    fn get_overlapping_inputs(
+    // return all files in "level" that overlap [begin,end]
+    fn get_overlapping(
         &self,
         level: i32,
-        o_begin: Option<&InternalKey>, // nullptr means before all keys
+        o_begin: Option<&InternalKey>, // None means before all keys
         o_end: Option<&InternalKey>,
-        inputs: &mut Vec<Rc<FileMetaData>>,
-    ) {
+    ) -> Vec<Arc<FileMetaData>> {
         assert!(level < config::NUM_LEVELS);
-        inputs.clear();
+        let mut overlapping= Vec::new();
 
         let mut user_begin: &[u8] = &[];
         let mut user_end: &[u8] = &[];
@@ -192,24 +205,25 @@ impl<C: api::Comparator> Version<C> {
             } else if o_end.is_some() && self.user_cmp.compare(file_start, user_end).is_gt() {
                 // "f" is completely after specified range; skip it
             } else {
-                inputs.push(f.clone());
+                overlapping.push(Arc::clone(f));
                 if level == 0 {
                     // Level-0 files may overlap each other.  So check if the newly
                     // added file has expanded the range.  If so, restart search.
                     if o_begin.is_some() && self.user_cmp.compare(file_start, user_begin).is_lt() {
                         user_begin = file_start;
-                        inputs.clear();
+                        overlapping.clear();
                         i = 0;
                     } else if o_end.is_some() && self.user_cmp.compare(file_limit, user_end).is_gt()
                     {
                         user_end = file_limit;
-                        inputs.clear();
+                        overlapping.clear();
                         i = 0;
                     }
                 }
             }
             i += 1;
         }
+        overlapping
     }
 }
 
@@ -309,12 +323,12 @@ struct Saver<C> {
 pub(crate) struct Compaction<C: api::Comparator> {
     level: i32,
     // Each compaction reads inputs from "level_" and "level_+1"
-    inputs: [Vec<Rc<FileMetaData>>; 2],
+    inputs: [Vec<Arc<FileMetaData>>; 2],
     // State used to check for number of overlapping grandparent files
     // (parent == level_ + 1, grandparent == level_ + 2)
-    grandparents: Vec<Rc<FileMetaData>>,
+    grandparents: Vec<Arc<FileMetaData>>,
     edit: VersionEdit,
-    input_version: Option<Rc<Version<C>>>,
+    input_version: Option<Arc<Version<C>>>,
 }
 
 impl<C: api::Comparator> Compaction<C> {
@@ -418,7 +432,7 @@ pub(crate) struct VersionSet<C: api::Comparator> {
     manifest_file_number: u64,
     env: Env,
 
-    versions: Vec<Rc<Version<C>>>,
+    versions: Vec<Arc<Version<C>>>,
     options: Options<C>,
 }
 
@@ -465,31 +479,33 @@ impl<C: api::Comparator> VersionSet<C> {
                         .compare(f.largest.encode(), &self.compact_pointer[level])
                         .is_gt()
                 {
-                    c.inputs[0].push(f.clone());
+                    c.inputs[0].push(Arc::clone(f));
                     break;
                 }
                 i += 1;
             }
             if c.inputs[0].is_empty() {
                 // Wrap-around to the beginning of the key space
-                c.inputs[0].push((&current.files[level][0]).clone());
+                c.inputs[0].push((current.files[level][0]).clone());
             }
         } else if seek_compaction {
             let l = current.file_to_compact_level;
             c = Compaction::new(self.options.clone(), l);
-            c.inputs[0].push(current.file_to_compact.as_ref().unwrap().clone());
+            c.inputs[0].push(Arc::clone(current.file_to_compact.as_ref().unwrap()));
         } else {
             return None;
         }
 
-        c.input_version = Some(current.clone());
+        c.input_version = Some(Arc::clone(current));
 
         if level == 0 {
-            let (smallest, largest) = self.get_range(&mut c.inputs[0]);
+            let (smallest, largest) = self.get_range(&c.inputs[0]);
             // Note that the next call will discard the file we placed in
             // c->inputs_[0] earlier and replace it with an overlapping set
             // which will include the picked file.
-            current.get_overlapping_inputs(0, Some(&smallest), Some(&largest), &mut c.inputs[0]);
+            let mut overlapping= current.get_overlapping(0, Some(&smallest), Some(&largest));
+            c.inputs[0].clear();
+            c.inputs[0].append(&mut overlapping);
             assert!(!c.inputs[0].is_empty());
         }
 
@@ -502,12 +518,12 @@ impl<C: api::Comparator> VersionSet<C> {
         //&mut self.current
     } */
 
-    pub(crate) fn current(&self) -> Rc<Version<C>> {
-        self.versions[self.current_index as usize].clone()
+    pub(crate) fn current(&self) -> &Arc<Version<C>> {
+        &self.versions[self.current_index as usize]
     }
 
     // Return a compaction object for compacting the range [begin,end] in
-    // the specified level.  Returns nullptr if there is nothing in that
+    // the specified level.  Returns None if there is nothing in that
     // level that overlaps the specified range.  Caller should delete
     // the result.
     pub fn compact_range(
@@ -516,10 +532,9 @@ impl<C: api::Comparator> VersionSet<C> {
         o_begin: Option<&InternalKey>,
         o_end: Option<&InternalKey>,
     ) -> Option<Compaction<C>> {
-        let mut inputs = Vec::new();
-        self.current()
-            .get_overlapping_inputs(level, o_begin, o_end, &mut inputs);
-        if inputs.is_empty() {
+        let mut overlapping= self.current()
+            .get_overlapping(level, o_begin, o_end);
+        if overlapping.is_empty() {
             return None;
         }
 
@@ -531,20 +546,23 @@ impl<C: api::Comparator> VersionSet<C> {
             let limit = max_file_size_for_level(&self.options, level);
             let mut total = 0;
             let mut i = 0;
-            while i < inputs.len() {
-                let s = inputs[i].file_size;
+            while i < overlapping.len() {
+                let s = overlapping[i].file_size;
                 total += s;
                 if total >= limit {
                     // ??
-                    inputs.reserve(1);
+                    overlapping.reserve(1);
                     break;
                 }
+                i+=1;
             }
         }
 
         let mut c = Compaction::new(self.options.clone(), level);
-        c.input_version = Some(self.current().clone());
-        None
+        c.input_version = Some(Arc::clone(self.current()));
+        c.inputs[0].append(&mut overlapping);
+        // todo: setup other inputs
+        Some(c)
     }
 
     fn setup_other_inputs(&mut self, c: &mut Compaction<C>) {
@@ -554,7 +572,9 @@ impl<C: api::Comparator> VersionSet<C> {
         add_boundary_inputs(&self.icmp, &current.files[level as usize], &mut c.inputs[0]);
         let (smallest, largest) = self.get_range(&c.inputs[0]);
 
-        current.get_overlapping_inputs(level, Some(&smallest), Some(&largest), &mut c.inputs[1]);
+        let mut overlapping = current.get_overlapping(level, Some(&smallest), Some(&largest));
+        c.inputs[1].clear();
+        c.inputs[1].append(&mut overlapping);
         add_boundary_inputs(
             &self.icmp,
             &current.files[(level + 1) as usize],
@@ -572,19 +592,18 @@ impl<C: api::Comparator> VersionSet<C> {
         // Compute the set of grandparent files that overlap this compaction
         // (parent == level+1; grandparent == level+2)
         if level + 2 < config::NUM_LEVELS {
-            current.get_overlapping_inputs(
+            let mut grandparents_overlapping= current.get_overlapping(
                 level + 2,
                 Some(&all_start),
-                Some(&all_limit),
-                &mut c.grandparents,
-            );
+                Some(&all_limit));
+            c.grandparents.append(&mut grandparents_overlapping);
         }
 
         // Update the place where we will do the next compaction for this level.
         // We update this immediately instead of waiting for the VersionEdit
         // to be applied so that if the compaction fails, we will try a different
         // key range next time.
-        self.compact_pointer[level as usize] = largest.encode().to_vec();
+        self.compact_pointer[level as usize].extend_from_slice(largest.encode());
         c.edit.set_compact_pointer(level, largest);
     }
 
@@ -592,31 +611,29 @@ impl<C: api::Comparator> VersionSet<C> {
     // REQUIRES: inputs is not empty
     fn get_range2(
         &self,
-        inputs1: &Vec<Rc<FileMetaData>>,
-        inputs2: &Vec<Rc<FileMetaData>>,
+        inputs1: &[Arc<FileMetaData>],
+        inputs2: &[Arc<FileMetaData>],
     ) -> (InternalKey, InternalKey) {
         let mut all = Vec::new();
-        inputs1.iter().for_each(|f| all.push(f.clone()));
-        inputs2.iter().for_each(|f| {
-            all.push(f.clone());
-        });
-        self.get_range(&mut all)
+        all.extend_from_slice(inputs1);
+        all.extend_from_slice(inputs2);
+        self.get_range(&all)
     }
 
     // Stores the minimal range that covers all entries in inputs in *smallest, *largest.
     // REQUIRES: inputs is not empty
-    fn get_range(&self, inputs: &Vec<Rc<FileMetaData>>) -> (InternalKey, InternalKey) {
+    fn get_range(&self, inputs: &[Arc<FileMetaData>]) -> (InternalKey, InternalKey) {
         assert!(!inputs.is_empty());
         let mut smallest = inputs[0].smallest.clone();
         let mut largest = inputs[0].largest.clone();
-        inputs.iter().for_each(|f| {
+        for f in inputs{
             if super::skiplist::Comparator::compare(&self.icmp, &f.smallest, &smallest).is_lt() {
                 smallest = f.smallest.clone();
             }
             if super::skiplist::Comparator::compare(&self.icmp, &f.largest, &largest).is_gt() {
                 largest = f.largest.clone();
             }
-        });
+        };
         (smallest, largest)
     }
 
@@ -721,7 +738,7 @@ impl<C: api::Comparator> VersionSet<C> {
         // Make "v" current
         let index = self.versions.len();
         v.index = index as i32;
-        let current = Rc::new(v);
+        let current = Arc::new(v);
         self.current_index = index as i32;
         self.versions.push(current);
     }
@@ -814,7 +831,7 @@ impl<C: api::Comparator> VersionSet<C> {
     }
 }
 
-fn total_file_size(files: &Vec<Rc<FileMetaData>>) -> i64 {
+fn total_file_size(files: &[Arc<FileMetaData>]) -> i64 {
     let mut sum = 0;
     for f in files{
         sum += f.file_size as i64;
@@ -848,7 +865,7 @@ impl<'a, C: api::Comparator> BySmallestKey<'a, C> {
 
 struct LevelState {
     deleted_files: Vec<u64>,
-    added_files: Vec<Rc<FileMetaData>>,
+    added_files: Vec<Arc<FileMetaData>>,
 }
 
 // A helper class so we can efficiently apply a whole sequence
@@ -879,23 +896,22 @@ impl<'a, C: api::Comparator> VersionSetBuilder<'a, C> {
     // Apply all of the edits in *edit to the current state.
     fn apply(&mut self, edit: &VersionEdit) {
         // Update compaction pointers
-        for (level, ikey) in edit.compact_pointers {
-            self.vset.compact_pointer[level as usize].clear();
-            self.vset.compact_pointer[level as usize].extend_from_slice(ikey.encode());
+        for (level, ikey) in &edit.compact_pointers {
+            self.vset.compact_pointer[*level as usize].clear();
+            self.vset.compact_pointer[*level as usize].extend_from_slice(ikey.encode());
         }
 
         // Delete files
-        for (level, number) in edit.deleted_files {
-            self.levels[level as usize].deleted_files.push(number);
+        for (level, number) in &edit.deleted_files {
+            self.levels[*level as usize].deleted_files.push(*number);
         }
 
         // Add new files
-        for (level, mut f) in edit.new_files {
-
-            let deleted_files = &mut self.levels[level as usize].deleted_files;
+        for (level, f) in &edit.new_files {
+            let deleted_files = &mut self.levels[*level as usize].deleted_files;
             let pos = deleted_files.iter().position(|x| *x == f.number);
             deleted_files.remove(pos.unwrap());
-            self.levels[level as usize].added_files.push(f);
+            self.levels[*level as usize].added_files.push(Arc::clone(f));
         }
     }
 
@@ -952,7 +968,7 @@ impl<'a, C: api::Comparator> VersionSetBuilder<'a, C> {
         }
     }
 
-    fn maybe_add_file(&self, v: &mut Version<C>, level: i32, f: &Rc<FileMetaData>) {
+    fn maybe_add_file(&self, v: &mut Version<C>, level: i32, f: &Arc<FileMetaData>) {
         match self.levels[level as usize]
             .deleted_files
             .iter()
@@ -969,7 +985,7 @@ impl<'a, C: api::Comparator> VersionSetBuilder<'a, C> {
                     )
                     .is_lt());
                 }
-                files.push(f.clone())
+                files.push(Arc::clone(f));
             }
             Some(_) => {
                 // File is deleted: do nothing
@@ -1012,7 +1028,7 @@ impl From<u32> for Tag {
 pub(crate) struct VersionEdit {
     compact_pointers: Vec<(i32, InternalKey)>, // (level, key)
     deleted_files: Vec<(i32, u64)>,            // (level, file_number)
-    new_files: Vec<(i32, Rc<FileMetaData>)>,
+    new_files: Vec<(i32, Arc<FileMetaData>)>,
 
     comparator_name: Option<String>,
     log_number: Option<u64>,
@@ -1071,7 +1087,7 @@ impl VersionEdit {
         largest_key: &InternalKey,
     ) {
         let f = FileMetaData::new(number, smallest_key.clone(), largest_key.clone());
-        self.new_files.push((level, Rc::new(f)));
+        self.new_files.push((level, Arc::new(f)));
     }
 
     // Delete the specified "file" from the specified "level".
@@ -1207,7 +1223,7 @@ impl VersionEdit {
                     offset += s_size;
                     f.largest = largest;
 
-                    new_files.push((level, Rc::new(f)));
+                    new_files.push((level, Arc::new(f)));
                 }
 
                 _ => {
@@ -1262,8 +1278,8 @@ fn get_internal_key(input: &[u8]) -> api::Result<(InternalKey, usize)> {
 //   in/out compaction_files: List of files to extend by adding boundary files.
 fn add_boundary_inputs<C: api::Comparator>(
     icmp: &InternalKeyComparator<C>,
-    level_files: &Vec<Rc<FileMetaData>>,
-    compaction_files: &mut Vec<Rc<FileMetaData>>,
+    level_files: &[Arc<FileMetaData>],
+    compaction_files: &mut Vec<Arc<FileMetaData>>,
 ) {
     // Quick return if compaction_files is empty.
     match find_largest_key(icmp, compaction_files) {
@@ -1280,7 +1296,7 @@ fn add_boundary_inputs<C: api::Comparator>(
                     }
                     Some(smallest_boundary_file) => {
                         l = smallest_boundary_file.largest.clone();
-                        compaction_files.push(smallest_boundary_file);
+                        compaction_files.push(Arc::clone(smallest_boundary_file));
                     }
                 }
             }
@@ -1290,14 +1306,14 @@ fn add_boundary_inputs<C: api::Comparator>(
 
 // Finds minimum file b2=(l2, u2) in level file for which l2 > u1 and
 // user_key(l2) = user_key(u1)
-fn find_smallest_boundary_file<C: api::Comparator>(
+fn find_smallest_boundary_file<'a, C: api::Comparator>(
     icmp: &InternalKeyComparator<C>,
-    level_files: &Vec<Rc<FileMetaData>>,
+    level_files: &'a [Arc<FileMetaData>],
     largest_key: &InternalKey,
-) -> Option<Rc<FileMetaData>> {
+) -> Option<&'a Arc<FileMetaData>> {
     let user_cmp = icmp.user_comparator();
-    let mut smallest_boundary_file: Option<Rc<FileMetaData>> = None;
-    level_files.iter().for_each(|f| {
+    let mut smallest_boundary_file: Option<&Arc<FileMetaData>> = None;
+    for f  in level_files {
         if super::skiplist::Comparator::compare(icmp, &f.smallest, largest_key).is_gt()
             && user_cmp
                 .compare(f.smallest.user_key(), largest_key.user_key())
@@ -1311,17 +1327,17 @@ fn find_smallest_boundary_file<C: api::Comparator>(
                 )
                 .is_lt()
             {
-                smallest_boundary_file = Some(Rc::clone(f));
+                smallest_boundary_file = Some(f);
             }
         }
-    });
+    };
     smallest_boundary_file
 }
 
 // Finds the largest key in a vector of files. Returns true if files is not empty.
 fn find_largest_key<'a, C: api::Comparator>(
     icmp: &InternalKeyComparator<C>,
-    files: &'a Vec<Rc<FileMetaData>>,
+    files: &'a [Arc<FileMetaData>],
 ) -> Option<&'a InternalKey> {
     if files.is_empty() {
         return None;
@@ -1336,7 +1352,7 @@ fn find_largest_key<'a, C: api::Comparator>(
 }
 
 mod test {
-    use std::rc::Rc;
+    use std::{rc::Rc, sync::Arc};
 
     use crate::{
         api::{self, ByteswiseComparator},
@@ -1453,9 +1469,9 @@ mod test {
     }
 
     struct AddBoundaryInputsTests {
-        level_files: Vec<Rc<FileMetaData>>,
-        compaction_files: Vec<Rc<FileMetaData>>,
-        all_files: Vec<Rc<FileMetaData>>,
+        level_files: Vec<Arc<FileMetaData>>,
+        compaction_files: Vec<Arc<FileMetaData>>,
+        all_files: Vec<Arc<FileMetaData>>,
         icmp: InternalKeyComparator<ByteswiseComparator>,
     }
 
@@ -1481,14 +1497,14 @@ mod test {
     #[test]
     fn test_add_boundary_inputs_empty_level_files() {
         let mut test = AddBoundaryInputsTests::new();
-        let f = Rc::new(FileMetaData::new(
+        let f = Arc::new(FileMetaData::new(
             1,
             InternalKey::new("100".as_bytes(), 2, ValueType::TypeValue),
             InternalKey::new("100".as_bytes(), 1, ValueType::TypeValue),
         ));
         test.all_files.push(f);
         let f1 = &test.all_files[0];
-        test.compaction_files.push(Rc::clone(f1));
+        test.compaction_files.push(Arc::clone(f1));
 
         add_boundary_inputs(&test.icmp, &test.level_files, &mut test.compaction_files);
 
@@ -1500,14 +1516,14 @@ mod test {
     #[test]
     fn test_add_boundary_inputs_empty_compaction_files() {
         let mut test = AddBoundaryInputsTests::new();
-        let f = Rc::new(FileMetaData::new(
+        let f = Arc::new(FileMetaData::new(
             1,
             InternalKey::new("100".as_bytes(), 2, ValueType::TypeValue),
             InternalKey::new("100".as_bytes(), 1, ValueType::TypeValue),
         ));
         test.all_files.push(f);
         let f1 = &test.all_files[0];
-        test.level_files.push(Rc::clone(f1));
+        test.level_files.push(Arc::clone(f1));
 
         add_boundary_inputs(&test.icmp, &test.level_files, &mut test.compaction_files);
 
@@ -1517,19 +1533,19 @@ mod test {
     #[test]
     fn test_add_boundary_inputs_no_boundary_files() {
         let mut test = AddBoundaryInputsTests::new();
-        let f1 = Rc::new(FileMetaData::new(
+        let f1 = Arc::new(FileMetaData::new(
             1,
             InternalKey::new_with_str_key("100", 2, ValueType::TypeValue),
             InternalKey::new_with_str_key("100", 1, ValueType::TypeValue),
         ));
         test.all_files.push(f1);
-        let f2 = Rc::new(FileMetaData::new(
+        let f2 = Arc::new(FileMetaData::new(
             1,
             InternalKey::new_with_str_key("200", 2, ValueType::TypeValue),
             InternalKey::new_with_str_key("200", 1, ValueType::TypeValue),
         ));
         test.all_files.push(f2);
-        let f3 = Rc::new(FileMetaData::new(
+        let f3 = Arc::new(FileMetaData::new(
             1,
             InternalKey::new_with_str_key("300", 2, ValueType::TypeValue),
             InternalKey::new_with_str_key("300", 1, ValueType::TypeValue),
@@ -1539,11 +1555,11 @@ mod test {
         let f2 = &test.all_files[1];
         let f1 = &test.all_files[0];
 
-        test.level_files.push(Rc::clone(f3));
-        test.level_files.push(Rc::clone(f2));
-        test.level_files.push(Rc::clone(f1));
-        test.compaction_files.push(Rc::clone(f2));
-        test.compaction_files.push(Rc::clone(f3));
+        test.level_files.push(Arc::clone(f3));
+        test.level_files.push(Arc::clone(f2));
+        test.level_files.push(Arc::clone(f1));
+        test.compaction_files.push(Arc::clone(f2));
+        test.compaction_files.push(Arc::clone(f3));
 
         add_boundary_inputs(&test.icmp, &test.level_files, &mut test.compaction_files);
 
@@ -1553,19 +1569,19 @@ mod test {
     #[test]
     fn test_add_boundary_inputs_one_boundary_files() {
         let mut test = AddBoundaryInputsTests::new();
-        let f1 = Rc::new(FileMetaData::new(
+        let f1 = Arc::new(FileMetaData::new(
             1,
             InternalKey::new_with_str_key("100", 3, ValueType::TypeValue),
             InternalKey::new_with_str_key("100", 2, ValueType::TypeValue),
         ));
         test.all_files.push(f1);
-        let f2 = Rc::new(FileMetaData::new(
+        let f2 = Arc::new(FileMetaData::new(
             1,
             InternalKey::new_with_str_key("100", 1, ValueType::TypeValue),
             InternalKey::new_with_str_key("200", 3, ValueType::TypeValue),
         ));
         test.all_files.push(f2);
-        let f3 = Rc::new(FileMetaData::new(
+        let f3 = Arc::new(FileMetaData::new(
             1,
             InternalKey::new_with_str_key("300", 2, ValueType::TypeValue),
             InternalKey::new_with_str_key("300", 1, ValueType::TypeValue),
@@ -1575,9 +1591,9 @@ mod test {
         let f2 = &test.all_files[1];
         let f1 = &test.all_files[0];
 
-        test.level_files.push(Rc::clone(f3));
-        test.level_files.push(Rc::clone(f2));
-        test.level_files.push(Rc::clone(f1));
+        test.level_files.push(Arc::clone(f3));
+        test.level_files.push(Arc::clone(f2));
+        test.level_files.push(Arc::clone(f1));
         test.compaction_files.push(f1.clone());
 
         add_boundary_inputs(&test.icmp, &test.level_files, &mut test.compaction_files);

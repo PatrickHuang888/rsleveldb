@@ -54,7 +54,7 @@ impl LookupKey {
         LookupKey { kstart, end, space }
     }
 
-    fn user_key(&self) -> &[u8] {
+    pub(crate) fn user_key(&self) -> &[u8] {
         &self.space[self.kstart..self.end - 8]
     }
 
@@ -62,7 +62,7 @@ impl LookupKey {
         &self.space[..self.end]
     }
 
-    fn internal_key(&self) -> &[u8] {
+    pub(crate) fn internal_key(&self) -> &[u8] {
         &self.space[self.kstart..self.end]
     }
 }

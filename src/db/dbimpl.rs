@@ -78,7 +78,7 @@ impl<'a> Drop for MutexLock<'a> {
     }
 }
 
-struct DBImpl<'a, C: Comparator + Send + Sync> {
+struct DBImpl<C: Comparator + Send + Sync> {
     internal_comparator: InternalKeyComparator<C>,
     options: Options<C>,
     dbname: String,
@@ -93,7 +93,7 @@ struct DBImpl<'a, C: Comparator + Send + Sync> {
     // table_cache_ provides its own synchronization
     table_cache: TableCache,
 
-    vset: VersionSet<'a, C>,
+    vset: VersionSet<C>,
 
     mem: MemTable<C>,
     imem: Option<MemTable<C>>,
@@ -112,7 +112,7 @@ struct DBImpl<'a, C: Comparator + Send + Sync> {
     bg_error: Option<api::Error>,
 }
 
-impl<'a, C: api::Comparator + Send + Sync> DBImpl<'a, C> {
+impl<C: api::Comparator + Send + Sync> DBImpl<C> {
     /* fn background_call(&mut self) {
         let _lock = MutexLock::new(&self.mutex);
 
@@ -164,8 +164,8 @@ impl<'a, C: api::Comparator + Send + Sync> DBImpl<'a, C> {
             return;
         }
 
-        let is_manual:bool;
-        let oc: Option<Compaction<C>>;
+        let is_manual= false;
+        let mut oc: Option<Compaction<C>>= None;
         if let Some(manual) = &mut self.mannual_compaction {
             todo!()
             /* oc = self
@@ -189,7 +189,8 @@ impl<'a, C: api::Comparator + Send + Sync> DBImpl<'a, C> {
                 // Nothing to do
             },
             Some(c) => {
-                if !is_manual && c.is_trivial_move(&self.options) {
+                todo!()
+                /* if !is_manual && c.is_trivial_move(&self.options) {
                     // Move file to next level
                     assert!(c.num_input_files(0)==1);
                     let f= c.input(0, 0).as_ref();
@@ -198,14 +199,15 @@ impl<'a, C: api::Comparator + Send + Sync> DBImpl<'a, C> {
                     edit.add_file(c.level(), f.number, f.file_size, &f.smallest, &f.largest);
                     let status= self.vset.log_and_apply(&self.mutex, edit);
                 }else {
-                    let compact= CompactState::new(oc.unwrap());
+                    /* let compact= CompactState::new(oc.unwrap());
                     let status= self.do_compaction_work(&compact);
                     if !status.is_ok() {
                         self.record_background_error(status);
                     }
-                    self.cleanup_compaction(&compact);
+                    self.cleanup_compaction(&compact); */
+                    todo!();
                     self.remove_obsolete_files();
-                }
+                } */
             }
         }
 
@@ -219,9 +221,10 @@ impl<'a, C: api::Comparator + Send + Sync> DBImpl<'a, C> {
         // Save the contents of the memtable as a new Table
         let mut edit = VersionEdit::default();
         let base = self.vset.current();
-        let mut r = self.write_level0_table(true, &mut edit, Some(base));
+        todo!()
+        //let mut r = self.write_level0_table(true, &mut edit, Some(base));
 
-        if r.is_ok() && self.shutting_down.load(atomic::Ordering::Acquire) {
+        /* if r.is_ok() && self.shutting_down.load(atomic::Ordering::Acquire) {
             r = Err(api::Error::IOError(
                 "Deleting DB during memtable compaction".to_string(),
             ));
@@ -243,7 +246,7 @@ impl<'a, C: api::Comparator + Send + Sync> DBImpl<'a, C> {
             Err(e) => {
                 self.record_background_error(e);
             }
-        }
+        } */
     }
 
     fn write_level0_table(
@@ -251,7 +254,7 @@ impl<'a, C: api::Comparator + Send + Sync> DBImpl<'a, C> {
         write_imem: bool,
         //mem: &mut MemTable<C>,
         edit: &mut VersionEdit,
-        o_base: Option<Rc<Version<C>>>,
+        o_base: Option<&Arc<Version<C>>>,
     ) -> api::Result<()> {
         assert!(self.mutex.is_locked());
 
