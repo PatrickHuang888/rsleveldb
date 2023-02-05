@@ -381,20 +381,20 @@ impl Default for BlockHandle {
 // A Table is a sorted map from strings to strings.  Tables are
 // immutable and persistent.  A Table may be safely accessed from
 // multiple threads without external synchronization.
-pub struct Table<C: Comparator> {
+pub(crate) struct Table<C: Comparator,> {
     options: Options<C>,
     status: Option<String>,
 
-    file: Rc<dyn RandomAccessFile>,
+    file: Box<dyn RandomAccessFile>,
 
     meta_index_handle: BlockHandle,
     index_iter: BlockIterator<C>,
 }
 
 impl<C: Comparator> Table<C> {
-    pub fn open(
+    pub(crate) fn open(
         opts: &Options<C>,
-        file: Rc<dyn RandomAccessFile>,
+        file: Box<dyn RandomAccessFile>,
         size: usize,
     ) -> api::Result<Self> {
         if size < FOOTER_LEN {
@@ -413,7 +413,7 @@ impl<C: Comparator> Table<C> {
         if opts.paranoid_checks {
             opt.verify_checksums = true;
         }
-        let index_contents = read_block_content(&file, &opt, &mut footer.index_handle)?;
+        let index_contents = read_block_content(file.as_ref(), &opt, &mut footer.index_handle)?;
         let index_block = Block::new(index_contents);
         let r = Table {
             options: opts.clone(),
@@ -431,7 +431,7 @@ impl<C: Comparator> Table<C> {
         Ok(())
     }
 
-    pub fn iter(&self, option: ReadOptions) -> TableIterator<C> {
+    pub(crate) fn iter(&self, option: ReadOptions) -> TableIterator<C> {
         //let index_iter = self.index_block.iter(self.options.comparator.clone());
         TableIterator::new(
             option,
@@ -439,6 +439,10 @@ impl<C: Comparator> Table<C> {
             self.file.clone(),
             self.options.comparator.clone(),
         )
+    }
+
+    pub(crate) fn internal_get(&self, options: &ReadOptions, key:&[u8], ) -> api::Result<()> {
+        self.index_iter
     }
 }
 
@@ -468,7 +472,7 @@ pub struct ReadOptions {
 }
 
 fn read_block_content(
-    file: &Rc<dyn RandomAccessFile>,
+    file: &dyn RandomAccessFile,
     opts: &ReadOptions,
     handle: &mut BlockHandle,
 ) -> api::Result<Vec<u8>> {

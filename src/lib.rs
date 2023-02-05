@@ -480,6 +480,10 @@ impl Env {
     fn rename_file(&self, s: &str, t: &str) -> api::Result<()> {
         todo!()
     }
+
+    pub fn new_random_access_file(&self, filename:&str) -> api::Result<Box<dyn RandomAccessFile>> {
+        todo!()
+    }
 }
 
 pub struct PosixWritableFile {}

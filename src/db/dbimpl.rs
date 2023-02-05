@@ -91,7 +91,7 @@ struct DBImpl<C: Comparator + Send + Sync> {
     log: log::Writer<PosixWritableFile>,
     //log_file: Arc<RefCell<W>>,
     // table_cache_ provides its own synchronization
-    table_cache: TableCache,
+    table_cache: TableCache<C>,
 
     vset: VersionSet<C>,
 
@@ -391,8 +391,8 @@ impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
                     } else {
                         // todo: imm get
 
-                        let current = self.vset.current();
-                        let stats = current.get(options, &lkey, value)?;
+                        /* let current = self.vset.current();
+                        let stats = current.get(options, &lkey, value)?; */
 
                         self.mutex.lock();
 
