@@ -40,27 +40,27 @@ impl FileMetaData {
 
     fn adjust_allowed_seeks(&mut self) {
         // We arrange to automatically compact this file after
-            // a certain number of seeks.  Let's assume:
-            //   (1) One seek costs 10ms
-            //   (2) Writing or reading 1MB costs 10ms (100MB/s)
-            //   (3) A compaction of 1MB does 25MB of IO:
-            //         1MB read from this level
-            //         10-12MB read from next level (boundaries may be misaligned)
-            //         10-12MB written to next level
-            // This implies that 25 seeks cost the same as the compaction
-            // of 1MB of data.  I.e., one seek costs approximately the
-            // same as the compaction of 40KB of data.  We are a little
-            // conservative and allow approximately one seek for every 16KB
-            // of data before triggering a compaction.;
-            self.allowed_seeks = (self.file_size / 16384) as u32;
-            if self.allowed_seeks < 100 {
-                self.allowed_seeks = 100;
-            }
+        // a certain number of seeks.  Let's assume:
+        //   (1) One seek costs 10ms
+        //   (2) Writing or reading 1MB costs 10ms (100MB/s)
+        //   (3) A compaction of 1MB does 25MB of IO:
+        //         1MB read from this level
+        //         10-12MB read from next level (boundaries may be misaligned)
+        //         10-12MB written to next level
+        // This implies that 25 seeks cost the same as the compaction
+        // of 1MB of data.  I.e., one seek costs approximately the
+        // same as the compaction of 40KB of data.  We are a little
+        // conservative and allow approximately one seek for every 16KB
+        // of data before triggering a compaction.;
+        self.allowed_seeks = (self.file_size / 16384) as u32;
+        if self.allowed_seeks < 100 {
+            self.allowed_seeks = 100;
+        }
     }
 }
 
 #[derive(Default)]
-pub(crate) struct GetStats{
+pub(crate) struct GetStats {
     seek_file: Option<Arc<FileMetaData>>,
     seek_file_level: i32,
 }
@@ -105,28 +105,35 @@ impl<C: api::Comparator> Version<C> {
         &self,
         options: &ReadOptions,
         key: &LookupKey,
-    ) -> api::Result<(&[u8], Arc<FileMetaData>, i32)> {  //(value, seek_file, level)
-        
+    ) -> api::Result<(&[u8], Arc<FileMetaData>, i32)> {
+        //(value, seek_file, level)
+
         // Search level-0 in order from newest to oldest.
-        let mut tmp= Vec::with_capacity(self.files[0].len());
-        for f in self.files[0] {
-            if self.user_cmp.compare(key.user_key(), f.smallest.user_key()).is_ge() &&
-            self.user_cmp.compare(key.user_key(), f.largest.user_key()).is_le() {
+        let mut tmp = Vec::with_capacity(self.files[0].len());
+        for f in &self.files[0] {
+            if self
+                .user_cmp
+                .compare(key.user_key(), f.smallest.user_key())
+                .is_ge()
+                && self
+                    .user_cmp
+                    .compare(key.user_key(), f.largest.user_key())
+                    .is_le()
+            {
                 tmp.push(f.clone());
             }
         }
         if !tmp.is_empty() {
-            tmp.sort_by(|a,b|b.number.cmp(&a.number));
-
+            tmp.sort_by(|a, b| b.number.cmp(&a.number));
         }
         todo!()
     }
 
     // Call func(arg, level, f) for every file that overlaps user_key in
-  // order from newest to oldest.  If an invocation of func returns
-  // false, makes no more calls.
-  //
-  // REQUIRES: user portion of internal_key == user_key.
+    // order from newest to oldest.  If an invocation of func returns
+    // false, makes no more calls.
+    //
+    // REQUIRES: user portion of internal_key == user_key.
     fn for_each_overlapping(&self, user_key: &[u8], internal_key: &[u8]) {}
 
     pub fn update_stats(&mut self, stats: GetStats) -> bool {
@@ -145,7 +152,7 @@ impl<C: api::Comparator> Version<C> {
                 return true;
             }
         }
-    } 
+    }
 
     // Return the level at which we should place a new memtable compaction
     // result that covers the range [smallest_user_key,largest_user_key].
@@ -184,7 +191,7 @@ impl<C: api::Comparator> Version<C> {
         o_end: Option<&InternalKey>,
     ) -> Vec<Arc<FileMetaData>> {
         assert!(level < config::NUM_LEVELS);
-        let mut overlapping= Vec::new();
+        let mut overlapping = Vec::new();
 
         let mut user_begin: &[u8] = &[];
         let mut user_end: &[u8] = &[];
@@ -364,18 +371,19 @@ impl<C: api::Comparator> Compaction<C> {
 
     // Is this a trivial compaction that can be implemented by just
     // moving a single input file to the next level (no merging or splitting)
-    pub fn is_trivial_move(&self, options:&Options<C>) -> bool {
+    pub fn is_trivial_move(&self, options: &Options<C>) -> bool {
         // Avoid a move if there is lots of overlapping grandparent data.
         // Otherwise, the move could create a parent file that will require
         // a very expensive merge later on.
-        self.num_input_files(0) == 1 && self.num_input_files(1) == 0 &&
-        total_file_size(&self.grandparents) <= max_grand_parent_overlap_bytes(options)
+        self.num_input_files(0) == 1
+            && self.num_input_files(1) == 0
+            && total_file_size(&self.grandparents) <= max_grand_parent_overlap_bytes(options)
     }
 }
 
 // Maximum bytes of overlaps in grandparent (i.e., level+2) before we
 // stop building a single file in a level->level+1 compaction.
-fn max_grand_parent_overlap_bytes<C:api::Comparator>(options: &Options<C>) -> i64{
+fn max_grand_parent_overlap_bytes<C: api::Comparator>(options: &Options<C>) -> i64 {
     (10 * target_file_size(options)) as i64
 }
 
@@ -503,7 +511,7 @@ impl<C: api::Comparator> VersionSet<C> {
             // Note that the next call will discard the file we placed in
             // c->inputs_[0] earlier and replace it with an overlapping set
             // which will include the picked file.
-            let mut overlapping= current.get_overlapping(0, Some(&smallest), Some(&largest));
+            let mut overlapping = current.get_overlapping(0, Some(&smallest), Some(&largest));
             c.inputs[0].clear();
             c.inputs[0].append(&mut overlapping);
             assert!(!c.inputs[0].is_empty());
@@ -532,8 +540,7 @@ impl<C: api::Comparator> VersionSet<C> {
         o_begin: Option<&InternalKey>,
         o_end: Option<&InternalKey>,
     ) -> Option<Compaction<C>> {
-        let mut overlapping= self.current()
-            .get_overlapping(level, o_begin, o_end);
+        let mut overlapping = self.current().get_overlapping(level, o_begin, o_end);
         if overlapping.is_empty() {
             return None;
         }
@@ -554,7 +561,7 @@ impl<C: api::Comparator> VersionSet<C> {
                     overlapping.reserve(1);
                     break;
                 }
-                i+=1;
+                i += 1;
             }
         }
 
@@ -592,10 +599,8 @@ impl<C: api::Comparator> VersionSet<C> {
         // Compute the set of grandparent files that overlap this compaction
         // (parent == level+1; grandparent == level+2)
         if level + 2 < config::NUM_LEVELS {
-            let mut grandparents_overlapping= current.get_overlapping(
-                level + 2,
-                Some(&all_start),
-                Some(&all_limit));
+            let mut grandparents_overlapping =
+                current.get_overlapping(level + 2, Some(&all_start), Some(&all_limit));
             c.grandparents.append(&mut grandparents_overlapping);
         }
 
@@ -626,14 +631,14 @@ impl<C: api::Comparator> VersionSet<C> {
         assert!(!inputs.is_empty());
         let mut smallest = inputs[0].smallest.clone();
         let mut largest = inputs[0].largest.clone();
-        for f in inputs{
+        for f in inputs {
             if super::skiplist::Comparator::compare(&self.icmp, &f.smallest, &smallest).is_lt() {
                 smallest = f.smallest.clone();
             }
             if super::skiplist::Comparator::compare(&self.icmp, &f.largest, &largest).is_gt() {
                 largest = f.largest.clone();
             }
-        };
+        }
         (smallest, largest)
     }
 
@@ -833,9 +838,9 @@ impl<C: api::Comparator> VersionSet<C> {
 
 fn total_file_size(files: &[Arc<FileMetaData>]) -> i64 {
     let mut sum = 0;
-    for f in files{
+    for f in files {
         sum += f.file_size as i64;
-    };
+    }
     sum
 }
 
@@ -1313,7 +1318,7 @@ fn find_smallest_boundary_file<'a, C: api::Comparator>(
 ) -> Option<&'a Arc<FileMetaData>> {
     let user_cmp = icmp.user_comparator();
     let mut smallest_boundary_file: Option<&Arc<FileMetaData>> = None;
-    for f  in level_files {
+    for f in level_files {
         if super::skiplist::Comparator::compare(icmp, &f.smallest, largest_key).is_gt()
             && user_cmp
                 .compare(f.smallest.user_key(), largest_key.user_key())
@@ -1330,7 +1335,7 @@ fn find_smallest_boundary_file<'a, C: api::Comparator>(
                 smallest_boundary_file = Some(f);
             }
         }
-    };
+    }
     smallest_boundary_file
 }
 

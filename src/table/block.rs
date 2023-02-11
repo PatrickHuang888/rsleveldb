@@ -1,7 +1,6 @@
+use std::cmp::Ordering;
 use std::io::Write;
 use std::mem::size_of;
-use std::rc::Rc;
-use std::{cmp::Ordering, sync::Arc};
 
 use byteorder::{ByteOrder, LittleEndian, WriteBytesExt};
 
@@ -143,10 +142,11 @@ fn put_uvarint(buf: &mut Vec<u8>, v: u64) {
     }
     buf.push(x as u8);
 }
+
+#[derive(Clone)]
 pub struct Block {
     data: Vec<u8>,
-    num_restarts: usize,
-    restart_offset: usize, // Offset in data_ of restart array
+    restart_offset: u32, // Offset in data_ of restart array
 }
 
 impl Block {
@@ -154,106 +154,113 @@ impl Block {
     pub fn new(data: Vec<u8>) -> Self {
         let mut block = Block {
             data,
-            num_restarts: 0,
             restart_offset: 0,
         };
         if block.data.len() < size_of::<u32>() {
             block.data = vec![];
         } else {
             let max_restarts_allowed = (block.data.len() - size_of::<u32>()) / size_of::<u32>();
-            let num_restarts =
-                util::decode_fixed32(&block.data[block.data.len() - size_of::<u32>()..]) as usize;
-            if num_restarts > max_restarts_allowed {
+            if num_restarts(&block.data) > max_restarts_allowed as u32 {
                 // The size is too small for NumRestarts()
                 block.data = vec![];
             } else {
-                block.num_restarts = num_restarts;
-                block.restart_offset =
-                    block.data.len() - ((num_restarts + 1) * size_of::<u32>()) as usize;
+                block.restart_offset = block.data.len() as u32
+                    - ((num_restarts(&block.data) + 1) * size_of::<u32>() as u32);
             }
         }
         block
     }
 
-    pub fn new_iter<C: Comparator>(self, cmp: &C) -> BlockIterator<C> {
-        let comparator = cmp.clone();
-        BlockIterator::new(
-            self.data,
-            self.num_restarts,
-            self.restart_offset,
-            comparator,
-        )
+    pub(crate) fn new_iterator<C: Comparator>(self, comparator: C) -> Box<dyn api::Iterator> {
+        let num_restarts = num_restarts(&self.data);
+        let mut it = BlockIterator::new(self.data, num_restarts, self.restart_offset, comparator);  // move block data to iterator
+        if it.data.len() < size_of::<u32>() {
+            it.status = Some(Error::Corruption("bad block contents".to_string()));
+        } else if num_restarts == 0 {
+            it.status = Some(Error::Corruption("num restarts should >  0".to_string()));
+        }
+        Box::new(it)
     }
 }
 
+#[inline]
+fn num_restarts(data: &[u8]) -> u32 {
+    util::decode_fixed32(&data[data.len() - size_of::<u32>()..])
+}
+
 #[derive(Clone)]
-pub struct BlockIterator<C> {
+pub(crate) struct BlockIterator<C> {
     key: Vec<u8>,
     value: Vec<u8>,
 
-    restarts: usize,     // Offset of trailer restart array (list of fixed32)
-    current: usize,      // current_ is offset in data_ of current entry.  >= restarts_ if !Valid]
-    value_offset: usize, // value offset of a entry
+    restarts: u32,     // Offset of trailer restart array (list of fixed32)
+    num_restarts: u32, // Number of uint32_t entries in restart array
 
-    restart_index: usize, // Index of restart block in which current_ falls
-    num_restarts: usize,  // Number of uint32_t entries in restart array
+    current: u32, // current_ is offset in data_ of current entry.  >= restarts_ if !Valid]
+    value_offset: u32, // value offset of a entry
+
+    restart_index: u32, // Index of restart block in which current_ falls
     status: Option<Error>,
 
-    data: Vec<u8>, // underlying block contents
+    data: Vec<u8>,
 
     comparator: C,
 }
 
 impl<C: Comparator> BlockIterator<C> {
-    fn new(data: Vec<u8>, num_restarts: usize, restarts: usize, comparator: C) -> Self {
+    fn new(data: Vec<u8>, num_restarts: u32, restarts: u32, comparator: C) -> Self {
         assert!(num_restarts > 0);
         Self {
             key: Vec::new(),
             value: Vec::new(),
+            num_restarts,
             restarts,
-            current: restarts,
+            current: num_restarts,
             value_offset: 0,
             restart_index: 0,
-            num_restarts,
             status: None,
-            data,
             comparator,
+            data,
         }
     }
 
     // return key offset
     fn decode_entry(
         &mut self,
-        entry: usize,
-        limit: usize,
-        shared: &mut usize,
-        non_shared: &mut usize,
-        value_length: &mut usize,
+        entry: u32,
+        limit: u32,
+        shared: &mut u32,
+        non_shared: &mut u32,
+        value_length: &mut u32,
     ) -> Result<usize> {
         if limit - entry < 3 {
             return Err(api::Error::Corruption("error entry length".to_string()));
         }
 
         // no consideration of 32 bit usize
-        let (s, n) = super::get_uvarint(&self.data[entry..limit]).map_err(|s| {
+        let mut start = entry as usize;
+        let end = limit as usize;
+        let (s, n) = util::get_varint32(&self.data[start..end]).map_err(|s| {
             println!("{}", s);
             self.corrupted()
         })?;
-        *shared = s as usize;
+        *shared = s;
 
-        let (ns, nn) = super::get_uvarint(&self.data[entry + n..limit]).map_err(|s| {
+        start = entry as usize + n;
+        let (ns, nn) = util::get_varint32(&self.data[start..end]).map_err(|s| {
             println!("{}", s);
             self.corrupted()
         })?;
-        *non_shared = ns as usize;
+        *non_shared = ns;
 
-        let (vl, nnl) = super::get_uvarint(&self.data[entry + n + nn..limit]).map_err(|s| {
+        start = entry as usize + n + nn;
+        let (vl, nnl) = util::get_varint32(&self.data[start..end]).map_err(|s| {
             println!("{}", s);
             self.corrupted()
         })?;
-        *value_length = vl as usize;
+        *value_length = vl;
 
-        Ok(entry + n + nn + nnl)
+        Ok(start + nnl)
     }
 
     fn parse_next_key(&mut self) -> Result<bool> {
@@ -277,19 +284,19 @@ impl<C: Comparator> BlockIterator<C> {
             &mut non_shared,
             &mut value_length,
         )?;
-        if self.key.len() < shared {
+        if (self.key.len() as u32) < shared {
             return Err(self.corrupted().into());
         }
-        self.key.truncate(shared);
+        self.key.truncate(shared as usize);
         let _ = self
             .key
-            .write_all(&self.data[key_offset..key_offset + non_shared]);
+            .write_all(&self.data[key_offset..key_offset + non_shared as usize]);
 
-        self.value_offset = key_offset + non_shared;
+        self.value_offset = key_offset as u32 + non_shared;
         self.value.clear();
-        let _ = self
-            .value
-            .write_all(&self.data[self.value_offset..self.value_offset + value_length]);
+        let _ = self.value.write_all(
+            &self.data[self.value_offset as usize..(self.value_offset + value_length) as usize],
+        );
 
         // entry end
         while self.restart_index + 1 < self.num_restarts
@@ -300,11 +307,11 @@ impl<C: Comparator> BlockIterator<C> {
         Ok(true)
     }
 
-    fn next_entry_offset(&self) -> usize {
-        self.value_offset + self.value.len()
+    fn next_entry_offset(&self) -> u32 {
+        self.value_offset + self.value.len() as u32
     }
 
-    fn seek_to_restart_point(&mut self, index: usize) {
+    fn seek_to_restart_point(&mut self, index: u32) {
         self.key.clear();
         self.value.clear();
         self.restart_index = index;
@@ -314,9 +321,9 @@ impl<C: Comparator> BlockIterator<C> {
     }
 
     // Return the offset in data_ just past the end of the current entry.
-    fn get_restart_point(&self, index: usize) -> usize {
+    fn get_restart_point(&self, index: u32) -> u32 {
         assert!(index < self.num_restarts);
-        LittleEndian::read_u32(&self.data[self.restarts + index * 4..]) as usize
+        LittleEndian::read_u32(&self.data[(self.restarts + index * 4) as usize..])
     }
 
     fn corrupted(&mut self) -> api::Error {
@@ -407,8 +414,8 @@ impl<C: Comparator> api::Iterator for BlockIterator<C> {
             if shared != 0 {
                 return Err(self.corrupted().into());
             }
-            let mut mid_key: Vec<u8> = Vec::with_capacity(non_shared);
-            let _ = mid_key.write_all(&self.data[key_offset..key_offset + non_shared]);
+            let mut mid_key: Vec<u8> = Vec::with_capacity(non_shared as usize);
+            let _ = mid_key.write_all(&self.data[key_offset..key_offset + non_shared as usize]);
 
             if self.comparator.compare(&mid_key, target).is_lt() {
                 left = mid;

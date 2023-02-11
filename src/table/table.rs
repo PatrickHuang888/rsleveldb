@@ -1,7 +1,7 @@
 use crate::{
     api::{self, Error},
     table::{BLOCK_TRAILER_SIZE, FOOTER_LEN, MAGIC},
-    util, RandomAccessFile, WritableFile,
+    util, PosixReadableFile, RandomAccessFile, WritableFile,
 };
 use std::{
     io::{Read, Write},
@@ -12,7 +12,7 @@ use std::{
 
 use byteorder::{ByteOrder, LittleEndian, WriteBytesExt};
 
-use crate::{api::Comparator, api::Iterator, table::MAX_VARINT_LEN64, CompressionType, Options};
+use crate::{api::Comparator, api::Iterator, util::MAX_VARINT_LEN64, CompressionType, Options};
 
 use super::block::{Block, BlockBuilder, BlockIterator};
 
@@ -38,8 +38,8 @@ pub(crate) struct TableBuilder<'a, W: WritableFile, C: Comparator> {
     compressed_output: Vec<u8>,
     last_key: Vec<u8>,
 
-    num_entries: usize,
-    offset: usize,
+    num_entries: i64,
+    offset: u64,
     closed: bool,
 
     status: Option<Error>,
@@ -239,8 +239,8 @@ impl<'a, W: WritableFile, C: Comparator> TableBuilder<'a, W, C> {
         }
     }
 
-    pub(crate) fn num_entries(&self) -> usize {
-        self.num_entries
+    pub(crate) fn num_entries(&self) -> u64 {
+        self.num_entries as u64
     }
 
     pub(crate) fn file_size(&self) -> u64 {
@@ -253,13 +253,13 @@ pub(crate) fn write_block<W: WritableFile>(
     block: &mut BlockBuilder,
     compression: CompressionType,
     compressed: &mut Vec<u8>,
-) -> api::Result<usize> {
+) -> api::Result<u64> {
     let raw = block.finish();
     // File format contains a sequence of blocks where each block has:
     //    block_data: uint8[n]
     //    type: uint8
     //    crc: uint32
-    let n: usize;
+    let n: u64;
     match compression {
         CompressionType::SnappyCompression => {
             let mut w = snap::write::FrameEncoder::new(compressed);
@@ -281,12 +281,12 @@ fn write_raw_block<W: WritableFile>(
     writer: &mut W,
     contents: &[u8],
     compression: CompressionType,
-) -> api::Result<usize> {
-    let n = contents.len();
+) -> api::Result<u64> {
+    let n = contents.len() as u64;
 
     writer.append(contents)?;
 
-    let mut trailer: [u8; BLOCK_TRAILER_SIZE] = [0; BLOCK_TRAILER_SIZE];
+    let mut trailer: [u8; BLOCK_TRAILER_SIZE as usize] = [0; BLOCK_TRAILER_SIZE as usize];
     trailer[0] = compression as u8;
 
     let cs = [contents, &trailer[0..1]];
@@ -317,11 +317,11 @@ impl Footer {
         self.index_handle.encode_to(&mut v);
         v.resize(2 * MAX_VARINT_LEN64, 0); // Padding
         let _ = v.write_u64::<LittleEndian>(MAGIC); // make sure is littlen endian
-        assert_eq!(v.len(), FOOTER_LEN);
+        assert_eq!(v.len() as u64, FOOTER_LEN);
         v
     }
     fn decode_from(input: &[u8]) -> api::Result<Self> {
-        let magic = LittleEndian::read_u64(&input[FOOTER_LEN - 8..]);
+        let magic = LittleEndian::read_u64(&input[FOOTER_LEN as usize - 8..]);
         if magic != MAGIC {
             return Err(Error::Corruption(String::from(
                 "not an sstable (bad magic number)",
@@ -342,8 +342,8 @@ impl Footer {
 // a pointer to the extent of a file that stores a data
 // block or a meta block.
 pub(crate) struct BlockHandle {
-    offset: usize,
-    size: usize,
+    offset: u64,
+    size: u64,
 }
 
 impl BlockHandle {
@@ -356,14 +356,14 @@ impl BlockHandle {
     }
 
     fn decode_from(buf: &[u8], handle: &mut BlockHandle) -> api::Result<usize> {
-        let (offset, num_offset) = super::get_uvarint(buf)
+        let (offset, num_offset) = util::get_varint64(buf)
             .map_err(|s| Error::Other(format!("bad block handle, {}", s)))?;
 
-        let (size, num_size) = super::get_uvarint(&buf[num_offset..])
+        let (size, num_size) = util::get_varint64(&buf[num_offset..])
             .map_err(|s| Error::Other(format!("bad block handle, {}", s)))?;
 
-        handle.offset = offset as usize;
-        handle.size = size as usize;
+        handle.offset = offset;
+        handle.size = size;
 
         Ok(num_offset + num_size)
     }
@@ -381,21 +381,34 @@ impl Default for BlockHandle {
 // A Table is a sorted map from strings to strings.  Tables are
 // immutable and persistent.  A Table may be safely accessed from
 // multiple threads without external synchronization.
-pub(crate) struct Table<C: Comparator,> {
+pub(crate) struct Table<C: Comparator> {
     options: Options<C>,
     status: Option<String>,
 
     file: Box<dyn RandomAccessFile>,
 
     meta_index_handle: BlockHandle,
-    index_iter: BlockIterator<C>,
+    //index_iter: BlockIterator<C>,
+    index_block: Block,
 }
 
 impl<C: Comparator> Table<C> {
+    // Attempt to open the table that is stored in bytes [0..file_size)
+    // of "file", and read the metadata entries necessary to allow
+    // retrieving data from the table.
+    //
+    // If successful, returns ok and sets "*table" to the newly opened
+    // table.  The client should delete "*table" when no longer needed.
+    // If there was an error while initializing the table, sets "*table"
+    // to nullptr and returns a non-ok status.  Does not take ownership of
+    // "*source", but the client must ensure that "source" remains live
+    // for the duration of the returned table's lifetime.
+    //
+    // *file must remain live while this Table is in use.
     pub(crate) fn open(
         opts: &Options<C>,
         file: Box<dyn RandomAccessFile>,
-        size: usize,
+        size: u64,
     ) -> api::Result<Self> {
         if size < FOOTER_LEN {
             return Err(Error::Corruption(String::from(
@@ -404,7 +417,7 @@ impl<C: Comparator> Table<C> {
         }
 
         //let footer_space: [u8;FOOTER_LEN]= [0;FOOTER_LEN];
-        let mut footer_input = Vec::with_capacity(FOOTER_LEN);
+        let mut footer_input = Vec::with_capacity(FOOTER_LEN as usize);
         file.read(size - FOOTER_LEN, FOOTER_LEN, &mut footer_input)?;
         let mut footer = Footer::decode_from(&footer_input)?;
 
@@ -419,7 +432,7 @@ impl<C: Comparator> Table<C> {
             options: opts.clone(),
             status: None,
             file,
-            index_iter: index_block.new_iter(&opts.comparator),
+            index_block,
             meta_index_handle: footer.metaindex_handle,
         };
         r.read_meta()?;
@@ -431,23 +444,24 @@ impl<C: Comparator> Table<C> {
         Ok(())
     }
 
-    pub(crate) fn iter(&self, option: ReadOptions) -> TableIterator<C> {
-        //let index_iter = self.index_block.iter(self.options.comparator.clone());
+    pub(crate) fn new_iterator(&self, options: ReadOptions) -> TableIterator<C> {
+        let index_block = self.index_block.clone();
+        let index_iter = index_block.new_iterator(self.options.comparator.clone());
         TableIterator::new(
-            option,
-            self.index_iter.clone(),
-            self.file.clone(),
+            options,
+            index_iter,
+            self.file.as_ref(),
             self.options.comparator.clone(),
         )
     }
 
-    pub(crate) fn internal_get(&self, options: &ReadOptions, key:&[u8], ) -> api::Result<()> {
+    /* pub(crate) fn internal_get(&self, options: &ReadOptions, key:&[u8], ) -> api::Result<()> {
         self.index_iter
-    }
+    } */
 }
 
 fn block_reader(
-    file: &Rc<dyn RandomAccessFile>,
+    file: &dyn RandomAccessFile,
     opts: &ReadOptions,
     index_value: &[u8],
 ) -> api::Result<Block> {
@@ -477,10 +491,10 @@ fn read_block_content(
     handle: &mut BlockHandle,
 ) -> api::Result<Vec<u8>> {
     // Read the block contents as well as the type/crc footer.
-    let n = handle.size;
-    let mut buf = Vec::with_capacity(n + BLOCK_TRAILER_SIZE);
-    file.read(handle.offset, n + BLOCK_TRAILER_SIZE, &mut buf)?;
-    if buf.len() != n + BLOCK_TRAILER_SIZE {
+    let n = handle.size as usize;
+    let mut buf = Vec::with_capacity(n + BLOCK_TRAILER_SIZE as usize);
+    file.read(handle.offset, n as u64 + BLOCK_TRAILER_SIZE, &mut buf)?;
+    if buf.len() != n + BLOCK_TRAILER_SIZE as usize {
         return Err(Error::Corruption(String::from("truncated block read")));
     }
 
@@ -520,24 +534,24 @@ fn read_block_content(
 //
 // Uses a supplied function to convert an index_iter value into
 // an iterator over the contents of the corresponding block.
-pub struct TableIterator<C> {
-    option: ReadOptions,
+pub struct TableIterator<'f, C: api::Comparator> {
+    options: ReadOptions,
     index_iter: BlockIterator<C>,
     data_iter: Option<BlockIterator<C>>,
     data_block_handle: Vec<u8>,
-    file: Rc<dyn RandomAccessFile>,
     comparator: C,
+    file: &'f dyn RandomAccessFile,
 }
 
-impl<C: Comparator> TableIterator<C> {
+impl<'f, C: Comparator> TableIterator<'f, C> {
     fn new(
-        option: ReadOptions,
+        options: ReadOptions,
         index_iter: BlockIterator<C>,
-        file: Rc<dyn RandomAccessFile>,
+        file: &'f dyn RandomAccessFile,
         comparator: C,
     ) -> Self {
         TableIterator {
-            option,
+            options,
             index_iter,
             data_iter: None,
             data_block_handle: vec![],
@@ -556,10 +570,10 @@ impl<C: Comparator> TableIterator<C> {
                 // data_iter_ is already constructed with this iterator, so
                 // no need to change anything
             } else {
-                let block = block_reader(&self.file, &self.option, handle)?;
+                let block = block_reader(self.file, &self.options, handle)?;
                 self.data_block_handle.clear();
                 self.data_block_handle.extend_from_slice(handle);
-                self.data_iter = Some(block.new_iter(&self.comparator));
+                self.data_iter = Some(block.new_iterator(self.comparator.clone()));
             }
         }
         Ok(())
@@ -598,7 +612,7 @@ impl<C: Comparator> TableIterator<C> {
     }
 }
 
-impl<C: Comparator> api::Iterator for TableIterator<C> {
+impl<'f, C: Comparator> api::Iterator for TableIterator<'f, C> {
     fn next(&mut self) -> api::Result<()> {
         assert!(self.valid()?);
         self.data_iter.as_mut().unwrap().next()?;
@@ -644,12 +658,12 @@ impl<C: Comparator> api::Iterator for TableIterator<C> {
     }
 
     fn key(&self) -> api::Result<&[u8]> {
-        assert!(matches!(self.valid(), Ok(true)));
+        assert!(self.valid()?);
         self.data_iter.as_ref().unwrap().key()
     }
 
     fn value(&self) -> api::Result<&[u8]> {
-        assert!(matches!(self.valid(), Ok(true)));
+        assert!(self.valid()?);
         self.data_iter.as_ref().unwrap().value()
     }
 

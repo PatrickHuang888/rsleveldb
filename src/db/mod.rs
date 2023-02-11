@@ -97,7 +97,7 @@ fn build_table<C: Comparator>(
     iter.seek_to_first()?;
 
     let fname = filename::table_file_name(dbname, meta.number);
-    let mut file = env.new_posix_writable_file(fname.as_str())?;
+    let mut file = env.new_posix_writable_file(fname)?;
 
     {
         let mut builder = TableBuilder::new(&mut file, options);

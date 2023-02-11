@@ -164,8 +164,8 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
             return;
         }
 
-        let is_manual= false;
-        let mut oc: Option<Compaction<C>>= None;
+        let is_manual = false;
+        let mut oc: Option<Compaction<C>> = None;
         if let Some(manual) = &mut self.mannual_compaction {
             todo!()
             /* oc = self
@@ -187,7 +187,7 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
         match &mut oc {
             None => {
                 // Nothing to do
-            },
+            }
             Some(c) => {
                 todo!()
                 /* if !is_manual && c.is_trivial_move(&self.options) {
@@ -210,8 +210,6 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
                 } */
             }
         }
-
-
     }
 
     fn compact_memtable(&mut self) {

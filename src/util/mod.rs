@@ -79,11 +79,11 @@ pub fn put_varint32(dst: &mut Vec<u8>, v: u32) {
 
 #[derive(Debug)]
 pub(crate) struct UtilError {
-    reason: String,
+    reason: &'static str,
 }
 
 impl UtilError {
-    pub(crate) fn new(reason: String) -> Self {
+    pub(crate) fn new(reason: &'static str) -> Self {
         Self { reason }
     }
 }
@@ -111,7 +111,7 @@ pub(crate) fn get_varint32(src: &[u8]) -> std::result::Result<(u32, usize), Util
             break;
         }
     }
-    Err(UtilError::new("get_varint32 error".to_string()))
+    Err(UtilError::new("get_varint32 error"))
 }
 
 const VAR64_LIMIT: usize = 63;
@@ -131,7 +131,7 @@ pub(crate) fn get_varint64(src: &[u8]) -> std::result::Result<(u64, usize), Util
             break;
         }
     }
-    Err(UtilError::new("get_varint64 error".to_string()))
+    Err(UtilError::new("get_varint64 error"))
 }
 
 pub fn put_fixed64(dst: &mut Vec<u8>, v: u64) {
@@ -263,3 +263,55 @@ impl Random {
 pub fn now_micros() -> u64 {
     todo!()
 }
+
+pub(crate) struct EmptyIterator {
+    status: Option<api::Error>,
+}
+
+impl api::Iterator for EmptyIterator {
+    fn key(&self) -> api::Result<&[u8]> {
+        self.check()?;
+        Ok(&[])
+    }
+    fn next(&mut self) -> api::Result<()> {
+        self.check()
+    }
+    fn prev(&mut self) -> api::Result<()> {
+        self.check()
+    }
+    fn seek(&mut self, key: &[u8]) -> api::Result<()> {
+        self.check()
+    }
+    fn seek_to_first(&mut self) -> api::Result<()> {
+        self.check()
+    }
+    fn seek_to_last(&mut self) -> api::Result<()> {
+        self.check()
+    }
+    fn valid(&self) -> api::Result<bool> {
+        self.check()?;
+        Ok(false)
+    }
+    fn value(&self) -> api::Result<&[u8]> {
+        self.check()?;
+        Ok(&[])
+    }
+}
+
+impl EmptyIterator {
+    pub(crate) fn new_empty_iterator() -> Box<dyn api::Iterator> {
+        Box::new(EmptyIterator { status: None })
+    }
+    pub(crate) fn new_error_iterator(err: api::Error) -> Box<dyn api::Iterator> {
+        Box::new(EmptyIterator { status: Some(err) })
+    }
+
+    fn check(&self) -> api::Result<()> {
+        match &self.status {
+            None => Ok(()),
+            Some(err) => Err(err.clone()),
+        }
+    }
+}
+
+pub const MAX_VARINT_LEN64: usize = 10 + 10;

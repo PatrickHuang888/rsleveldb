@@ -165,7 +165,7 @@ pub trait RandomAccessFile {
     // status.
     //
     // Safe for concurrent use by multiple threads.
-    fn read(&self, offset: usize, n: usize, dst: &mut Vec<u8>) -> api::Result<usize>;
+    fn read(&self, offset: u64, n: u64, dst: &mut Vec<u8>) -> api::Result<u64>;
 }
 
 pub trait SequentialFile {
@@ -481,11 +481,21 @@ impl Env {
         todo!()
     }
 
-    pub fn new_random_access_file(&self, filename:&str) -> api::Result<Box<dyn RandomAccessFile>> {
-        todo!()
+    pub fn new_posix_random_access_file(
+        &self,
+        filename: &str,
+    ) -> api::Result<Box<dyn RandomAccessFile>> {
+        Ok(Box::new(PosixReadableFile {}))
     }
 }
 
+pub struct PosixReadableFile {}
+
+impl RandomAccessFile for PosixReadableFile {
+    fn read(&self, offset: u64, n: u64, dst: &mut Vec<u8>) -> api::Result<u64> {
+        todo!()
+    }
+}
 pub struct PosixWritableFile {}
 
 impl WritableFile for PosixWritableFile {
