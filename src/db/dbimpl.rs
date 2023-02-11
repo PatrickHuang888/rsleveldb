@@ -265,7 +265,7 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
         let mut meta = FileMetaData::default();
         meta.number = self.vset.new_file_number();
         self.pending_outputs.push(meta.number);
-        let mut it = mem.new_iter();
+        let mut it = mem.new_iterator();
 
         // todo: log
 

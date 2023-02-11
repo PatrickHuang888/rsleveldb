@@ -171,15 +171,15 @@ impl Block {
         block
     }
 
-    pub(crate) fn new_iterator<C: Comparator>(self, comparator: C) -> Box<dyn api::Iterator> {
+    pub(crate) fn new_iterator<C: Comparator>(self, comparator: C) -> BlockIterator<C> {
         let num_restarts = num_restarts(&self.data);
-        let mut it = BlockIterator::new(self.data, num_restarts, self.restart_offset, comparator);  // move block data to iterator
+        let mut it = BlockIterator::new(self.data, num_restarts, self.restart_offset, comparator); // move block data to iterator
         if it.data.len() < size_of::<u32>() {
             it.status = Some(Error::Corruption("bad block contents".to_string()));
         } else if num_restarts == 0 {
             it.status = Some(Error::Corruption("num restarts should >  0".to_string()));
         }
-        Box::new(it)
+        it
     }
 }
 
@@ -215,9 +215,9 @@ impl<C: Comparator> BlockIterator<C> {
             value: Vec::new(),
             num_restarts,
             restarts,
-            current: num_restarts,
+            current: restarts,
             value_offset: 0,
-            restart_index: 0,
+            restart_index: num_restarts,
             status: None,
             comparator,
             data,

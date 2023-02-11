@@ -173,48 +173,77 @@ const MAGIC: u64 = 0xdb4775248b80fb57_u64;
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap};
+    use std::{collections::HashMap, default};
 
     use rand::{rngs::ThreadRng, thread_rng, Rng};
 
     use crate::{
         api::{self, ByteswiseComparator, Iterator},
-        db::memtable::{self, InternalKeyComparator, MemTable, MemTableIterator},
+        db::memtable::{InternalKeyComparator, MemTable, MemTableIterator},
         pack_sequence_and_type, parse_internal_key,
         table::table::{ReadOptions, Table},
         util, Options, RandomAccessFile, ValueType, WritableFile, MAX_SEQUENCE_NUMBER,
     };
 
     use super::{
-        block::{Block, BlockBuilder, BlockIterator},
+        block::{Block, BlockBuilder},
         table::TableBuilder,
     };
 
     type KVMap = HashMap<Vec<u8>, Vec<u8>>;
     struct Constructor {
+        case: TestCase,
         options: Options<ByteswiseComparator>,
         data: KVMap,
-        iter:Box<dyn api::Iterator>,
+        table: Option<Table<ByteswiseComparator>>,
+        memtable: Option<MemTable<ByteswiseComparator>>,
+        block: Option<Block>,
     }
 
+    impl Constructor {
+        fn new(options: Options<ByteswiseComparator>, case: TestCase) -> Self {
+            Constructor {
+                case,
+                options,
+                data: KVMap::new(),
+                table: None,
+                memtable: None,
+                block: None,
+            }
+        }
 
-    impl Constructor{
-        fn construct_table(
-            &mut self,
-            options: &Options<ByteswiseComparator>,
-            keys: &Vec<Vec<u8>>,
-            kvmap: &KVMap,
-        ) -> api::Result<()> {
+        fn add(&mut self, key: &[u8], value: &[u8]) {
+            self.data.insert(Vec::from(key), Vec::from(value));
+        }
+
+        fn finish(&mut self) -> api::Result<(Vec<Vec<u8>>, KVMap)> {
+            let mut keys: Vec<Vec<u8>> = self.data.keys().cloned().collect();
+            keys.sort();
+            match self.case {
+                TestCase::Table => {
+                    self.new_table(&keys)?;
+                }
+                TestCase::Block => {
+                    self.new_block(&keys)?;
+                }
+                TestCase::MemTable => {
+                    self.new_memtable(&keys)?;
+                }
+            }
+            Ok((keys, self.data.clone()))
+        }
+
+        fn new_table(&mut self, keys: &[Vec<u8>]) -> api::Result<()> {
             let mut sink = StringSink {
                 contents: Vec::new(),
             };
             let file_size: u64;
 
             {
-                let mut builder = TableBuilder::new(&mut sink, &options);
+                let mut builder = TableBuilder::new(&mut sink, &self.options);
 
                 for k in keys {
-                    builder.add(k, kvmap.get(k).unwrap())?;
+                    builder.add(k, self.data.get(k).unwrap())?;
                 }
                 builder.finish()?;
                 file_size = builder.file_size();
@@ -226,114 +255,98 @@ mod tests {
                 contents: sink.contents,
             });
 
-            let table = Table::open(options, source, file_size)?;
-            self.iter= table.new_iterator(ReadOptions::default());
-
+            let table = Table::open(&self.options, source, file_size)?;
+            self.table = Some(table);
             Ok(())
         }
 
-    }
-
-    struct BlockCons {
-        block_iter: Option<BlockIterator<ByteswiseComparator>>,
-    }
-
-    impl ConstructorTrait for BlockCons {
-        fn finish(
-            &mut self,
-            options: &Options<ByteswiseComparator>,
-            keys: &Vec<Vec<u8>>,
-            kvmap: &KVMap,
-        ) -> api::Result<()> {
+        fn new_block(&mut self, keys: &[Vec<u8>]) -> api::Result<()> {
             let mut contents = Vec::new();
-            let mut builder = BlockBuilder::new(options.block_restart_interval);
+            let mut builder = BlockBuilder::new(self.options.block_restart_interval);
             for k in keys {
-                builder.add(k, kvmap.get(k).unwrap());
+                builder.add(k, self.data.get(k).unwrap());
             }
             contents.extend_from_slice(builder.finish());
-
-            let block = Block::new(contents);
-            self.block_iter = Some(block.new_iterator(options.comparator.clone()));
+            self.block = Some(Block::new(contents));
             Ok(())
         }
 
-        fn iter(&mut self) -> Box<dyn api::Iterator + '_> {
-            let iter = self.block_iter.as_ref().unwrap().clone();
-            Box::new(iter)
-        }
-    }
-
-    struct MemTableCons {
-        table: Option<MemTable<ByteswiseComparator>>,
-    }
-
-    impl ConstructorTrait for MemTableCons {
-        fn finish(
-            &mut self,
-            options: &Options<ByteswiseComparator>,
-            keys: &Vec<Vec<u8>>,
-            kvmap: &KVMap,
-        ) -> api::Result<()> {
-            let internal_comparator = InternalKeyComparator::new(&options.comparator);
+        fn new_memtable(&mut self, keys: &[Vec<u8>]) -> api::Result<()> {
+            let internal_comparator = InternalKeyComparator::new(&self.options.comparator);
             let mut memtable = MemTable::new(internal_comparator);
             let mut seq = 1;
             for k in keys {
-                let v = kvmap.get(k).unwrap();
+                let v = self.data.get(k).unwrap();
                 memtable.add(seq, ValueType::TypeValue, k, v);
                 seq += 1;
             }
-            self.table = Some(memtable);
+            self.memtable = Some(memtable);
             Ok(())
         }
 
-        fn iter(&mut self) -> Box<dyn api::Iterator + '_> {
-            // A helper class that converts internal format keys into user keys
-            struct KeyConvertingIterator<'a, C: api::Comparator> {
-                iter: MemTableIterator<'a, C>,
-            }
-            impl<'a, C: api::Comparator> api::Iterator for KeyConvertingIterator<'a, C> {
-                fn key(&self) -> api::Result<&[u8]> {
-                    assert!(self.valid().unwrap());
-                    match parse_internal_key(self.iter.key().unwrap()) {
-                        Ok(pared_key) => {
-                            return Ok(pared_key.0);
+        fn new_iterator(&mut self) -> Box<dyn api::Iterator + '_> {
+            match self.case {
+                TestCase::Table => Box::new(
+                    self.table
+                        .as_ref()
+                        .unwrap()
+                        .new_iterator(ReadOptions::default()),
+                ),
+                TestCase::Block => {
+                    let block = self.block.as_ref().unwrap().clone();
+                    Box::new(block.new_iterator(self.options.comparator.clone()))
+                }
+                TestCase::MemTable => {
+                    // A helper class that converts internal format keys into user keys
+                    struct KeyConvertingIterator<'a, C: api::Comparator> {
+                        iter: MemTableIterator<'a, C>,
+                    }
+                    impl<'a, C: api::Comparator> api::Iterator for KeyConvertingIterator<'a, C> {
+                        fn key(&self) -> api::Result<&[u8]> {
+                            assert!(self.valid().unwrap());
+                            match parse_internal_key(self.iter.key().unwrap()) {
+                                Ok(pared_key) => {
+                                    return Ok(pared_key.0);
+                                }
+                                Err(e) => {
+                                    return Err(api::Error::Other(e.to_string()));
+                                }
+                            }
                         }
-                        Err(e) => {
-                            return Err(api::Error::Other(e.to_string()));
+                        fn next(&mut self) -> api::Result<()> {
+                            self.iter.next()
+                        }
+                        fn prev(&mut self) -> api::Result<()> {
+                            self.iter.prev()
+                        }
+                        fn seek(&mut self, key: &[u8]) -> api::Result<()> {
+                            let mut internal_key = key.to_vec();
+                            util::put_fixed64(
+                                &mut internal_key,
+                                pack_sequence_and_type(MAX_SEQUENCE_NUMBER, ValueType::TypeValue),
+                            );
+                            self.iter.seek(&internal_key)
+                        }
+                        fn seek_to_first(&mut self) -> api::Result<()> {
+                            self.iter.seek_to_first()
+                        }
+                        fn seek_to_last(&mut self) -> api::Result<()> {
+                            self.iter.seek_to_last()
+                        }
+                        fn valid(&self) -> api::Result<bool> {
+                            self.iter.valid()
+                        }
+                        fn value(&self) -> api::Result<&[u8]> {
+                            self.iter.value()
                         }
                     }
-                }
-                fn next(&mut self) -> api::Result<()> {
-                    self.iter.next()
-                }
-                fn prev(&mut self) -> api::Result<()> {
-                    self.iter.prev()
-                }
-                fn seek(&mut self, key: &[u8]) -> api::Result<()> {
-                    let mut internal_key = key.to_vec();
-                    util::put_fixed64(
-                        &mut internal_key,
-                        pack_sequence_and_type(MAX_SEQUENCE_NUMBER, ValueType::TypeValue),
-                    );
-                    self.iter.seek(&internal_key)
-                }
-                fn seek_to_first(&mut self) -> api::Result<()> {
-                    self.iter.seek_to_first()
-                }
-                fn seek_to_last(&mut self) -> api::Result<()> {
-                    self.iter.seek_to_last()
-                }
-                fn valid(&self) -> api::Result<bool> {
-                    self.iter.valid()
-                }
-                fn value(&self) -> api::Result<&[u8]> {
-                    self.iter.value()
+
+                    let memtable = self.memtable.as_mut().unwrap();
+                    Box::new(KeyConvertingIterator {
+                        iter: memtable.new_iterator(),
+                    })
                 }
             }
-
-            Box::new(KeyConvertingIterator {
-                iter: self.table.as_mut().unwrap().new_iter(),
-            })
         }
     }
 
@@ -378,71 +391,21 @@ mod tests {
         }
     }
 
-    // Helper class for tests to unify the interface between
-    // BlockBuilder/TableBuilder and Block/Table.
-    impl Constructor {
-        fn new(arg: (TestCase, usize)) -> Self {
-            let mut options = Options::default();
-            options.block_restart_interval = arg.1;
-
-            match arg.0 {
-                TestCase::Table => {
-                    return Constructor {
-                        options,
-                        data: HashMap::new(),
-                        cons_impl: Box::new(TableCons { table: None }),
-                    }
-                }
-                TestCase::Block => {
-                    return Constructor {
-                        options,
-                        data: HashMap::new(),
-                        cons_impl: Box::new(BlockCons { block_iter: None }),
-                    };
-                }
-                TestCase::MemTable => {
-                    return Constructor {
-                        options,
-                        data: HashMap::new(),
-                        cons_impl: Box::new(MemTableCons { table: None }),
-                    };
-                }
-            }
-        }
-
-        fn add(&mut self, key: &[u8], value: &[u8]) {
-            self.data.insert(Vec::from(key), Vec::from(value));
-        }
-
-        // Finish constructing the data structure with all the keys that have
-        // been added so far.  Returns the keys in sorted order in "*keys"
-        // and stores the key/value pairs in "*kvmap"
-        fn finish(&mut self) -> (Vec<Vec<u8>>, KVMap) {
-            let mut keys: Vec<Vec<u8>> = self.data.keys().cloned().collect();
-            keys.sort();
-
-            let s = self.cons_impl.finish(&self.options, &keys, &self.data);
-            assert!(s.is_ok(), "{:?}", s);
-
-            (keys, self.data.clone())
-        }
-    }
-
     enum TestCase {
         Table,
         Block,
         MemTable,
     }
 
-    fn init() -> [(TestCase, usize); 1] {
+    fn init() -> [(TestCase, usize); 6] {
         [
-            //(TestCase::Table, 16),
-            //(TestCase::Table, 1024),
-            //(TestCase::Block, 1),
+            (TestCase::Table, 16),
+            (TestCase::Table, 1024),
+            (TestCase::Block, 1),
             (TestCase::Block, 16),
-            //(TestCase::Block, 1024),
+            (TestCase::Block, 1024),
             // Restart interval does not matter for memtables
-            //(TestCase::MemTable, 1),
+            (TestCase::MemTable, 1),
             // Do not bother with restart interval variations for DB
         ]
     }
@@ -451,8 +414,7 @@ mod tests {
     fn test_empty() {
         let test_args = init();
         for arg in test_args {
-            let mut cons = Constructor::new(arg);
-
+            let mut cons = Constructor::new(Options::default(), arg.0);
             test(&mut cons);
         }
     }
@@ -461,7 +423,7 @@ mod tests {
     fn test_simple_single() {
         let test_args = init();
         for arg in test_args {
-            let mut cons = Constructor::new(arg);
+            let mut cons = Constructor::new(Options::default(), arg.0);
             cons.add("abc".as_bytes(), "v".as_bytes());
 
             test(&mut cons);
@@ -472,7 +434,7 @@ mod tests {
     fn test_simple_specical_key() {
         let test_args = init();
         for arg in test_args {
-            let mut cons = Constructor::new(arg);
+            let mut cons = Constructor::new(Options::default(), arg.0);
             let key = vec![0xff, 0xff];
             cons.add(&key, "v3".as_bytes());
 
@@ -484,7 +446,7 @@ mod tests {
     fn test_simple_multi() {
         let test_args = init();
         for arg in test_args {
-            let mut cons = Constructor::new(arg);
+            let mut cons = Constructor::new(Options::default(), arg.0);
             cons.add("abc".as_bytes(), "v".as_bytes());
             cons.add("abcd".as_bytes(), "v".as_bytes());
             cons.add("ac".as_bytes(), "v2".as_bytes());
@@ -497,7 +459,7 @@ mod tests {
     fn test_randomized() {
         let test_args = init();
         for arg in test_args {
-            let mut cons = Constructor::new(arg);
+            let mut cons = Constructor::new(Options::default(), arg.0);
             let mut rng = thread_rng();
             let mut rnd = util::Random::new(rng.gen::<u32>() + 5);
             let mut num_entries = 0;
@@ -523,22 +485,25 @@ mod tests {
     }
 
     fn test(constructor: &mut Constructor) {
-        let (keys, kvmap) = constructor.finish();
+        let (keys, kvmap) = constructor.finish().unwrap();
+
         {
-            let mut it = constructor.cons_impl.iter();
-            test_forward_scan(&mut it, &keys, &kvmap);
+            let mut it = constructor.new_iterator();
+            test_forward_scan(it.as_mut(), &keys, &kvmap);
         }
+
         {
-            let mut it = constructor.cons_impl.iter();
-            test_backward_scan(&mut it, &keys, &kvmap);
+            let mut it = constructor.new_iterator();
+            test_backward_scan(it.as_mut(), &keys, &kvmap);
         }
+
         {
-            let it = constructor.cons_impl.iter();
-            test_random_access(it, &keys, &kvmap);
+            let mut it = constructor.new_iterator();
+            test_random_access(it.as_mut(), &keys, &kvmap);
         }
     }
 
-    fn test_forward_scan(it: &mut Box<dyn Iterator + '_>, keys: &Vec<Vec<u8>>, kvmap: &KVMap) {
+    fn test_forward_scan(it: &mut dyn Iterator, keys: &[Vec<u8>], kvmap: &KVMap) {
         assert!(!it.valid().unwrap());
         let r = it.seek_to_first();
         assert!(r.is_ok(), "{:?}", r.unwrap_err());
@@ -551,7 +516,7 @@ mod tests {
         assert!(!it.valid().unwrap());
     }
 
-    fn test_backward_scan(mut it: &mut Box<dyn Iterator + '_>, keys: &Vec<Vec<u8>>, kvmap: &KVMap) {
+    fn test_backward_scan(it: &mut dyn api::Iterator, keys: &[Vec<u8>], kvmap: &KVMap) {
         assert!(!it.valid().unwrap());
         let r = it.seek_to_last();
         assert!(r.is_ok(), "{:?}", r.unwrap_err());
@@ -563,7 +528,7 @@ mod tests {
         }
     }
 
-    fn test_random_access(mut it: Box<dyn Iterator + '_>, keys: &Vec<Vec<u8>>, kvmap: &KVMap) {
+    fn test_random_access(it: &mut dyn Iterator, keys: &[Vec<u8>], kvmap: &KVMap) {
         let mut rng = thread_rng();
 
         let verbose = true;

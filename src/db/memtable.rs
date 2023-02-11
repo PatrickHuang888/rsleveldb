@@ -160,7 +160,7 @@ impl<C: api::Comparator> MemTable<C> {
         self.table.insert(&buf);
     }
 
-    pub(crate) fn new_iter<'l>(&'l mut self) -> MemTableIterator<'l, C> {
+    pub(crate) fn new_iterator<'l>(&'l mut self) -> MemTableIterator<'l, C> {
         MemTableIterator {
             scratch: Vec::new(),
             iter: self.table.new_iterator(),
