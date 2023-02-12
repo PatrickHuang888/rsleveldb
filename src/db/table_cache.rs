@@ -24,10 +24,11 @@ impl<C: api::Comparator> TableCache<C> {
         options: &ReadOptions,
         file_number: u64,
         file_size: u64,
-        k: &[u8],
+        key: &[u8],
     ) -> api::Result<()> {
         let table = self.find_table(file_number, file_size)?;
-        todo!()
+        table.internal_get(options, key, handle_result)?;
+        Ok(())
     }
 
     pub(crate) fn find_table(&self, file_number: u64, file_size: u64) -> api::Result<Table<C>> {

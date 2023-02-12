@@ -422,7 +422,7 @@ impl<C: Comparator> Table<C> {
         let mut footer = Footer::decode_from(&footer_input)?;
 
         // Read index block
-        let mut opt = ReadOptions::default();
+        let mut opt = api::ReadOptions::default();
         if opts.paranoid_checks {
             opt.verify_checksums = true;
         }
@@ -444,7 +444,7 @@ impl<C: Comparator> Table<C> {
         Ok(())
     }
 
-    pub(crate) fn new_iterator(&self, options: ReadOptions) -> TableIterator<C> {
+    pub(crate) fn new_iterator(&self, options: api::ReadOptions) -> TableIterator<C> {
         let index_block = self.index_block.clone();
         let index_iter = index_block.new_iterator(self.options.comparator.clone());
         TableIterator::new(
@@ -455,14 +455,30 @@ impl<C: Comparator> Table<C> {
         )
     }
 
-    /* pub(crate) fn internal_get(&self, options: &ReadOptions, key:&[u8], ) -> api::Result<()> {
-        self.index_iter
-    } */
+    pub(crate) fn internal_get(&self, options: &api::ReadOptions, key:&[u8], handle_result:fn(&[u8], &[u8])) -> api::Result<()> {
+        let index_block= self.index_block.clone();
+        let mut iiter= index_block.new_iterator(self.options.comparator.clone());
+        iiter.seek(key)?;
+        if iiter.valid()? {
+            let handle_value= iiter.value().unwrap();
+            // todo: filter
+            let mut handle= BlockHandle::default();
+            let l = BlockHandle::decode_from(handle_value, &mut handle)?;
+            let data_block= block_reader(self.file.as_ref(), options, iiter.value().unwrap())?;
+            let mut block_iter= data_block.new_iterator(self.options.comparator.clone());
+            block_iter.seek(key)?;
+            if block_iter.valid()? {
+                handle_result(block_iter.key().unwrap(), block_iter.value().unwrap());
+            }
+        }
+        Ok(())
+    }
+
 }
 
 fn block_reader(
     file: &dyn RandomAccessFile,
-    opts: &ReadOptions,
+    opts: &api::ReadOptions,
     index_value: &[u8],
 ) -> api::Result<Block> {
     let mut handle = BlockHandle::default();
@@ -478,16 +494,9 @@ fn block_reader(
     Ok(block)
 }
 
-#[derive(Default, Clone)]
-pub struct ReadOptions {
-    // If true, all data read from underlying storage will be
-    // verified against corresponding checksums.
-    verify_checksums: bool,
-}
-
 fn read_block_content(
     file: &dyn RandomAccessFile,
-    opts: &ReadOptions,
+    opts: &api::ReadOptions,
     handle: &mut BlockHandle,
 ) -> api::Result<Vec<u8>> {
     // Read the block contents as well as the type/crc footer.
@@ -535,7 +544,7 @@ fn read_block_content(
 // Uses a supplied function to convert an index_iter value into
 // an iterator over the contents of the corresponding block.
 pub struct TableIterator<'f, C: api::Comparator> {
-    options: ReadOptions,
+    options: api::ReadOptions,
     index_iter: BlockIterator<C>,
     data_iter: Option<BlockIterator<C>>,
     data_block_handle: Vec<u8>,
@@ -545,7 +554,7 @@ pub struct TableIterator<'f, C: api::Comparator> {
 
 impl<'f, C: Comparator> TableIterator<'f, C> {
     fn new(
-        options: ReadOptions,
+        options: api::ReadOptions,
         index_iter: BlockIterator<C>,
         file: &'f dyn RandomAccessFile,
         comparator: C,
