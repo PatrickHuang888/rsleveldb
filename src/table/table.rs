@@ -455,7 +455,7 @@ impl<C: Comparator> Table<C> {
         )
     }
 
-    pub(crate) fn internal_get(&self, options: &api::ReadOptions, key:&[u8], handle_result:fn(&[u8], &[u8])) -> api::Result<()> {
+    pub(crate) fn internal_get(&self, options: &api::ReadOptions, key:&[u8]) -> api::Result<Vec<u8>> {
         let index_block= self.index_block.clone();
         let mut iiter= index_block.new_iterator(self.options.comparator.clone());
         iiter.seek(key)?;
@@ -463,15 +463,15 @@ impl<C: Comparator> Table<C> {
             let handle_value= iiter.value().unwrap();
             // todo: filter
             let mut handle= BlockHandle::default();
-            let l = BlockHandle::decode_from(handle_value, &mut handle)?;
+            let _ = BlockHandle::decode_from(handle_value, &mut handle)?;
             let data_block= block_reader(self.file.as_ref(), options, iiter.value().unwrap())?;
             let mut block_iter= data_block.new_iterator(self.options.comparator.clone());
             block_iter.seek(key)?;
             if block_iter.valid()? {
-                handle_result(block_iter.key().unwrap(), block_iter.value().unwrap());
+                return Ok(block_iter.value().unwrap().to_vec());
             }
         }
-        Ok(())
+        Ok(vec![])
     }
 
 }

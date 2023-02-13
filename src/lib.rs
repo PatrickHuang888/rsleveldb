@@ -379,7 +379,6 @@ type SequenceNumber = u64;
 pub enum ValueType {
     TypeDeletion = 0x0,
     TypeValue = 0x1,
-    Unknown,
 }
 
 // kValueTypeForSeek defines the ValueType that should be passed when
@@ -395,7 +394,7 @@ impl From<u8> for ValueType {
         match v {
             0x0 => Self::TypeDeletion,
             0x1 => Self::TypeValue,
-            _ => Self::Unknown,
+            _ => unreachable!(),
         }
     }
 }

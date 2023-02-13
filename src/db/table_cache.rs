@@ -1,34 +1,51 @@
+use std::{sync::Arc, fs::FileType};
+
 use crate::{
     api::{self, Comparator, ReadOptions},
     table::table::Table,
-    Env, Options, RandomAccessFile,
+    Env, Options, RandomAccessFile, db::version::{GetStats, FileMetaData}, parse_internal_key, ValueType,
 };
 
-use super::filename::table_file_name;
+use super::{filename::table_file_name, memtable::InternalKeyComparator};
 
-pub(super) struct TableCache<C: api::Comparator> {
+pub(crate) struct TableCache<C: api::Comparator> {
     dbname: &'static str,
     env: Env,
     options: Options<C>,
+    icmp:InternalKeyComparator<C>,
 }
 
 impl<C: api::Comparator> TableCache<C> {
-    pub(super) fn new(dbname: &str, options: &Options<C>, entries: usize) -> Self {
+    pub(crate) fn new(dbname: &str, options: &Options<C>, entries: usize) -> Self {
         todo!()
     }
 
     // If a seek to internal key "k" in specified file finds an entry,
     // call (*handle_result)(arg, found_key, found_value).
-    fn get(
+    pub(crate) fn get(
         &self,
         options: &ReadOptions,
         file_number: u64,
         file_size: u64,
-        key: &[u8],
-    ) -> api::Result<()> {
+        ikey: &[u8],
+        user_key:&[u8]
+    ) -> api::Result<Vec<u8>> {
+        //todo:cache
+
         let table = self.find_table(file_number, file_size)?;
-        table.internal_get(options, key, handle_result)?;
-        Ok(())
+        let value= table.internal_get(options, ikey)?;
+        let (parsed_user_key, _, value_type) = parse_internal_key(ikey)?;  // todo: exception transforming
+        if self.icmp.user_comparator().compare(parsed_user_key, user_key).is_eq() {
+            match value_type {
+                ValueType::TypeValue => {
+                    return Ok(value)
+                },
+                ValueType::TypeDeletion => {
+                    return Err(api::Error::NotFound)
+                },
+            }
+        }
+        Err(api::Error::Corruption("user_key != parsed user key".to_string()))
     }
 
     pub(crate) fn find_table(&self, file_number: u64, file_size: u64) -> api::Result<Table<C>> {

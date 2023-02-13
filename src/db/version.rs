@@ -13,7 +13,7 @@ use crate::{
 use super::{
     filename::{self, set_current_file},
     log::{self, Writer},
-    memtable::{InternalKeyComparator, LookupKey},
+    memtable::{InternalKeyComparator, LookupKey}, table_cache::TableCache,
 };
 
 #[derive(Default, PartialEq, Clone, Debug)]
@@ -108,24 +108,12 @@ impl<C: api::Comparator> Version<C> {
     ) -> api::Result<(&[u8], Arc<FileMetaData>, i32)> {
         //(value, seek_file, level)
 
-        // Search level-0 in order from newest to oldest.
-        let mut tmp = Vec::with_capacity(self.files[0].len());
-        for f in &self.files[0] {
-            if self
-                .user_cmp
-                .compare(key.user_key(), f.smallest.user_key())
-                .is_ge()
-                && self
-                    .user_cmp
-                    .compare(key.user_key(), f.largest.user_key())
-                    .is_le()
-            {
-                tmp.push(f.clone());
-            }
+        // return true keep searching in other files
+        fn version_match<C:api::Comparator>(table_cache:&TableCache<C>, level:i32, f: &Arc<FileMetaData>) -> api::Result<bool>{
+            table_cache.get(options, file_number, file_size, ikey, user_key)?;
+            Ok(true)
         }
-        if !tmp.is_empty() {
-            tmp.sort_by(|a, b| b.number.cmp(&a.number));
-        }
+
         todo!()
     }
 
@@ -134,7 +122,54 @@ impl<C: api::Comparator> Version<C> {
     // false, makes no more calls.
     //
     // REQUIRES: user portion of internal_key == user_key.
-    fn for_each_overlapping(&self, user_key: &[u8], internal_key: &[u8]) {}
+    fn for_each_overlapping(&self, user_key: &[u8], internal_key: &[u8], match_fn:fn(i32, &Arc<FileMetaData>)->bool) {
+        
+        // Search level-0 in order from newest to oldest.
+        let mut tmp = Vec::with_capacity(self.files[0].len());
+        for f in &self.files[0] {
+            if self
+                .user_cmp
+                .compare(user_key, f.smallest.user_key())
+                .is_ge()
+                && self
+                    .user_cmp
+                    .compare(user_key, f.largest.user_key())
+                    .is_le()
+            {
+                tmp.push(f.clone());
+            }
+        }
+        if !tmp.is_empty() {
+            tmp.sort_by(|a, b| b.number.cmp(&a.number));
+            for f in &tmp {
+                if !match_fn(0, f) {
+                    return
+                }
+            }
+        }
+
+        // Search other levels.
+        for level in 1..NUM_LEVELS {
+            let num_files= self.files[level as usize].len();
+            if num_files == 0{
+                continue;
+            }
+            
+            // Binary search to find earliest index whose largest key >= internal_key.
+            let icmp = InternalKeyComparator::new(self.user_cmp.clone());
+            let index= find_file(&icmp, &self.files[level as usize], internal_key);
+            if index < num_files {
+                let f = &self.files[level as usize][index];
+                if self.user_cmp.compare(user_key, f.smallest.user_key()).is_lt() {
+                    // All of "f" is past any data for user_key
+                }else {
+                    if ! match_fn(level, f) {
+                        return;
+                    }
+                }
+            }
+        }
+    }
 
     pub fn update_stats(&mut self, stats: GetStats) -> bool {
         match stats.seek_file {
@@ -234,6 +269,17 @@ impl<C: api::Comparator> Version<C> {
     }
 }
 
+struct GetState<'o, 'k> {
+    stats:GetStats,
+    options:&'o ReadOptions,
+    ikey:&'k[u8],
+    last_file_read:Arc<FileMetaData>,
+    last_file_read_level:i32,
+    fount:bool,
+}
+
+
+
 // Returns true iff some file in "files" overlaps the user key range
 // [*smallest,*largest].
 // smallest==nullptr represents a key smaller than all keys in the DB.
@@ -243,7 +289,7 @@ impl<C: api::Comparator> Version<C> {
 fn some_file_overlaps_range<C: api::Comparator>(
     icmp: &InternalKeyComparator<C>,
     disjoint_sorted_files: bool,
-    files: &Vec<FileMetaData>,
+    files: &[Arc<FileMetaData>],
     o_smallest_user_key: Option<&[u8]>,
     o_largest_user_key: Option<&[u8]>,
 ) -> bool {
@@ -392,7 +438,7 @@ fn max_grand_parent_overlap_bytes<C: api::Comparator>(options: &Options<C>) -> i
 // REQUIRES: "files" contains a sorted list of non-overlapping files.
 pub(crate) fn find_file<C: api::Comparator>(
     icmp: &InternalKeyComparator<C>,
-    files: &Vec<FileMetaData>,
+    files: &[Arc<FileMetaData>],
     key: &[u8],
 ) -> usize {
     let mut left = 0;
@@ -1410,28 +1456,28 @@ mod test {
     }
 
     struct FindFileTest {
-        files: Vec<FileMetaData>,
+        files: Vec<Arc<FileMetaData>>,
         disjoint_sorted_files: bool,
     }
 
     impl FindFileTest {
         fn add(&mut self, smallest: &str, largest: &str) {
-            let f = FileMetaData::new(
+            let f = Arc::new(FileMetaData::new(
                 (self.files.len() + 1) as u64,
                 InternalKey::new(smallest.as_bytes(), 100, ValueType::TypeValue),
                 InternalKey::new(largest.as_bytes(), 100, ValueType::TypeValue),
-            );
+            ));
             self.files.push(f);
         }
 
         fn find(&self, key: &str) -> usize {
             let target = InternalKey::new(key.as_bytes(), 100, ValueType::TypeValue);
-            let cmp = InternalKeyComparator::new(&ByteswiseComparator {});
+            let cmp = InternalKeyComparator::new(ByteswiseComparator {});
             find_file(&cmp, &self.files, target.encode())
         }
 
         fn overlaps(&self, smallest: &str, largest: &str) -> bool {
-            let cmp = InternalKeyComparator::new(&ByteswiseComparator {});
+            let cmp = InternalKeyComparator::new(ByteswiseComparator {});
             some_file_overlaps_range(
                 &cmp,
                 self.disjoint_sorted_files,
@@ -1486,7 +1532,7 @@ mod test {
                 level_files: Vec::new(),
                 compaction_files: Vec::new(),
                 all_files: Vec::new(),
-                icmp: InternalKeyComparator::new(&ByteswiseComparator {}),
+                icmp: InternalKeyComparator::new(ByteswiseComparator {}),
             }
         }
     }

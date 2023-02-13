@@ -226,8 +226,7 @@ pub struct InternalKeyComparator<C> {
 }
 
 impl<C: api::Comparator> InternalKeyComparator<C> {
-    pub fn new(cmp: &C) -> Self {
-        let user_comparator = cmp.clone();
+    pub fn new(user_comparator: C) -> Self {
         Self { user_comparator }
     }
     pub fn user_comparator(&self) -> &C {
