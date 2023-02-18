@@ -65,7 +65,6 @@ pub(crate) struct GetStats {
     seek_file_level: i32,
 }
 
-#[derive(PartialEq)]
 pub(crate) struct Version<C: api::Comparator> {
     user_cmp: C,
     // List of files per level
@@ -83,11 +82,12 @@ pub(crate) struct Version<C: api::Comparator> {
     /* next: Option<Rc<RefCell<Version>>>,
     prev: Option<Rc<RefCell<Version>>>, */
     index: i32,
+    table_cache:Arc<TableCache<C>>,
 }
 
 impl<C: api::Comparator> Version<C> {
     fn new(user_cmp: C) -> Self {
-        Version {
+        /* Version {
             user_cmp,
             files: Default::default(),
             file_to_compact: None,
@@ -95,7 +95,8 @@ impl<C: api::Comparator> Version<C> {
             compaction_score: -1.,
             compaction_level: -1,
             index: -1,
-        }
+        } */
+        todo!()
     }
 
     // Lookup the value for key.  If found, store it in *val and
@@ -105,14 +106,14 @@ impl<C: api::Comparator> Version<C> {
         &self,
         options: &ReadOptions,
         key: &LookupKey,
-    ) -> api::Result<(&[u8], Arc<FileMetaData>, i32)> {
-        //(value, seek_file, level)
+    ) -> api::Result<(&[u8], Arc<FileMetaData>, i32)> { //(value, seek_file, level)
+        
 
         // return true keep searching in other files
-        fn version_match<C:api::Comparator>(table_cache:&TableCache<C>, level:i32, f: &Arc<FileMetaData>) -> api::Result<bool>{
-            table_cache.get(options, file_number, file_size, ikey, user_key)?;
-            Ok(true)
-        }
+        let version_match= |options, level, f|{
+            self.table_cache.get(options, f.file_number, f.file_size, ikey, user_key)?;
+            true
+        };
 
         todo!()
     }
@@ -122,7 +123,7 @@ impl<C: api::Comparator> Version<C> {
     // false, makes no more calls.
     //
     // REQUIRES: user portion of internal_key == user_key.
-    fn for_each_overlapping(&self, user_key: &[u8], internal_key: &[u8], match_fn:fn(i32, &Arc<FileMetaData>)->bool) {
+    fn for_each_overlapping<F:Fn(i32, &Arc<FileMetaData>)->bool>(&self, user_key: &[u8], internal_key: &[u8], match_fn:F) {
         
         // Search level-0 in order from newest to oldest.
         let mut tmp = Vec::with_capacity(self.files[0].len());

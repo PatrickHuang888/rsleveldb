@@ -193,7 +193,7 @@ pub struct WriteOptions {
     pub sync: bool,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ReadOptions {
     // If true, all data read from underlying storage will be
     // verified against corresponding checksums.

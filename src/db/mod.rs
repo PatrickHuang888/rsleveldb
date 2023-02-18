@@ -26,7 +26,7 @@ pub mod write_batch;
 // Abstract handle to particular state of a DB.
 // A Snapshot is an immutable object and can therefore be safely
 // accessed from multiple threads without any external synchronization.
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone)]
 pub struct Snapshot {
     sequence_number: SequenceNumber,
     index: usize,

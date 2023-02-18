@@ -48,7 +48,13 @@ impl<C: api::Comparator> TableCache<C> {
         Err(api::Error::Corruption("user_key != parsed user key".to_string()))
     }
 
-    pub(crate) fn find_table(&self, file_number: u64, file_size: u64) -> api::Result<Table<C>> {
+    pub(crate) fn new_iterator(&self, options:&ReadOptions, file_number: u64, file_size: u64) -> api::Result<Box<dyn api::Iterator>> {
+        let table= self.find_table(file_number, file_size)?;
+        let iter= table.new_iterator(options.clone());
+        Ok(Box::new(iter))
+    }
+
+    fn find_table(&self, file_number: u64, file_size: u64) -> api::Result<Table<C>> {
         // todo: cache lookup
         let filename = table_file_name(self.dbname, file_number);
         let file = self.env.new_posix_random_access_file(filename)?;
