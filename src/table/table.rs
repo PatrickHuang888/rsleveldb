@@ -455,7 +455,7 @@ impl<C: Comparator> Table<C> {
         )
     }
 
-    pub(crate) fn internal_get(&self, options: &api::ReadOptions, key:&[u8]) -> api::Result<Vec<u8>> {
+    pub(crate) fn internal_get(&self, options: &api::ReadOptions, key:&[u8], value:&mut Vec<u8>) -> api::Result<()> {
         let index_block= self.index_block.clone();
         let mut iiter= index_block.new_iterator(self.options.comparator.clone());
         iiter.seek(key)?;
@@ -468,10 +468,10 @@ impl<C: Comparator> Table<C> {
             let mut block_iter= data_block.new_iterator(self.options.comparator.clone());
             block_iter.seek(key)?;
             if block_iter.valid()? {
-                return Ok(block_iter.value().unwrap().to_vec());
+                return Ok(value.extend_from_slice(block_iter.value().unwrap()));
             }
         }
-        Ok(vec![])
+        Ok(())
     }
 
 }

@@ -65,7 +65,7 @@ pub(crate) struct GetStats {
     seek_file_level: i32,
 }
 
-pub(crate) struct Version<C: api::Comparator> {
+pub(crate) struct Version<C: api::Comparator+'static> {
     user_cmp: C,
     // List of files per level
     files: [Vec<Arc<FileMetaData>>; config::NUM_LEVELS as usize],
@@ -105,17 +105,48 @@ impl<C: api::Comparator> Version<C> {
     pub fn get(
         &self,
         options: &ReadOptions,
-        key: &LookupKey,
-    ) -> api::Result<(&[u8], Arc<FileMetaData>, i32)> { //(value, seek_file, level)
+        key: &LookupKey, value:&mut Vec<u8>
+    ) -> api::Result<(Arc<FileMetaData>, i32)> { //(seek_file, level)
         
+        let user_key= key.user_key();
+        let ikey= key.internal_key();
+        let mut error= None;
+        let mut level= -1;
+        let mut seek_file= None;
 
         // return true keep searching in other files
-        let version_match= |options, level, f|{
-            self.table_cache.get(options, f.file_number, f.file_size, ikey, user_key)?;
-            true
+        let match_fn= |l:i32, f:&Arc<FileMetaData>|{
+            let mut go_on=false;
+            if let Err(e) = self.table_cache.get(options, f.number, f.file_size, ikey, user_key, value) {
+                    match e {
+                        api::Error::NotFound => {
+                            go_on= true;
+                        },
+                        _ => {}
+                    }
+                    error= Some(e);
+            }
+            if !go_on {
+                level= l;
+                seek_file= Some(f.clone());
+            }
+            go_on
         };
 
-        todo!()
+        self.for_each_overlapping(user_key, ikey, match_fn);
+
+        if let Some(e) = error {
+            return Err(e);
+        }
+
+        match seek_file {
+            None => {
+                Err(api::Error::NotFound)
+            },
+            Some(f) => {
+                Ok((f, level))
+            }
+        }
     }
 
     // Call func(arg, level, f) for every file that overlaps user_key in
@@ -123,7 +154,7 @@ impl<C: api::Comparator> Version<C> {
     // false, makes no more calls.
     //
     // REQUIRES: user portion of internal_key == user_key.
-    fn for_each_overlapping<F:Fn(i32, &Arc<FileMetaData>)->bool>(&self, user_key: &[u8], internal_key: &[u8], match_fn:F) {
+    fn for_each_overlapping<F:FnMut(i32, &Arc<FileMetaData>)->bool>(&self, user_key: &[u8], internal_key: &[u8], mut match_fn:F) {
         
         // Search level-0 in order from newest to oldest.
         let mut tmp = Vec::with_capacity(self.files[0].len());
@@ -279,7 +310,10 @@ struct GetState<'o, 'k> {
     fount:bool,
 }
 
-
+struct MatchStateSaver {
+    value:Vec<u8>,
+    status:Option<api::Error>,
+}
 
 // Returns true iff some file in "files" overlaps the user key range
 // [*smallest,*largest].
@@ -374,7 +408,7 @@ struct Saver<C> {
 }
 
 // A Compaction encapsulates information about a compaction.
-pub(crate) struct Compaction<C: api::Comparator> {
+pub(crate) struct Compaction<C: api::Comparator+'static> {
     level: i32,
     // Each compaction reads inputs from "level_" and "level_+1"
     inputs: [Vec<Arc<FileMetaData>>; 2],
@@ -472,7 +506,7 @@ fn target_file_size<C: api::Comparator>(options: &Options<C>) -> usize {
     options.max_file_size
 }
 
-pub(crate) struct VersionSet<C: api::Comparator> {
+pub(crate) struct VersionSet<C: api::Comparator+'static> {
     last_sequence: u64,
     current_index: i32,
     log_number: u64,
@@ -923,7 +957,7 @@ struct LevelState {
 // A helper class so we can efficiently apply a whole sequence
 // of edits to a particular state without creating intermediate
 // Versions that contain full copies of the intermediate state.
-struct VersionSetBuilder<'a, C: api::Comparator> {
+struct VersionSetBuilder<'a, C: api::Comparator+'static> {
     vset: &'a mut VersionSet<C>,
     base_index: usize,
     levels: Vec<LevelState>,
@@ -1404,10 +1438,10 @@ fn find_largest_key<'a, C: api::Comparator>(
 }
 
 mod test {
-    use std::{rc::Rc, sync::Arc};
+    use std::{sync::Arc};
 
     use crate::{
-        api::{self, ByteswiseComparator},
+        api::{ByteswiseComparator},
         db::memtable::InternalKeyComparator,
         InternalKey, ValueType,
     };

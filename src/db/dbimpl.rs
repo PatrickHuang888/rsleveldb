@@ -78,7 +78,7 @@ impl<'a> Drop for MutexLock<'a> {
     }
 }
 
-struct DBImpl<C: Comparator + Send + Sync> {
+struct DBImpl<C: Comparator + Send + Sync+ 'static> {
     internal_comparator: InternalKeyComparator<C>,
     options: Options<C>,
     dbname: String,

@@ -1,21 +1,22 @@
-use std::{sync::Arc, fs::FileType};
-
 use crate::{
-    api::{self, Comparator, ReadOptions},
+    api::{self, ReadOptions},
     table::table::Table,
     Env, Options, RandomAccessFile, db::version::{GetStats, FileMetaData}, parse_internal_key, ValueType,
 };
 
 use super::{filename::table_file_name, memtable::InternalKeyComparator};
 
-pub(crate) struct TableCache<C: api::Comparator> {
+pub(crate) struct TableCache<C: api::Comparator+'static> {
     dbname: &'static str,
     env: Env,
     options: Options<C>,
     icmp:InternalKeyComparator<C>,
+    
+    // todo:cache
+    table:Option<Table<C>>,
 }
 
-impl<C: api::Comparator> TableCache<C> {
+impl<C: api::Comparator+'static> TableCache<C> {
     pub(crate) fn new(dbname: &str, options: &Options<C>, entries: usize) -> Self {
         todo!()
     }
@@ -28,17 +29,17 @@ impl<C: api::Comparator> TableCache<C> {
         file_number: u64,
         file_size: u64,
         ikey: &[u8],
-        user_key:&[u8]
-    ) -> api::Result<Vec<u8>> {
+        user_key:&[u8],
+        value:&mut Vec<u8>,
+    ) -> api::Result<()> {
         //todo:cache
-
         let table = self.find_table(file_number, file_size)?;
-        let value= table.internal_get(options, ikey)?;
+        table.internal_get(options, ikey, value)?;
         let (parsed_user_key, _, value_type) = parse_internal_key(ikey)?;  // todo: exception transforming
         if self.icmp.user_comparator().compare(parsed_user_key, user_key).is_eq() {
             match value_type {
                 ValueType::TypeValue => {
-                    return Ok(value)
+                    return Ok(())
                 },
                 ValueType::TypeDeletion => {
                     return Err(api::Error::NotFound)
@@ -48,9 +49,10 @@ impl<C: api::Comparator> TableCache<C> {
         Err(api::Error::Corruption("user_key != parsed user key".to_string()))
     }
 
-    pub(crate) fn new_iterator(&self, options:&ReadOptions, file_number: u64, file_size: u64) -> api::Result<Box<dyn api::Iterator>> {
+    pub(crate) fn new_iterator(&mut self, options:&ReadOptions, file_number: u64, file_size: u64) -> api::Result<Box<dyn api::Iterator+'_>> {
         let table= self.find_table(file_number, file_size)?;
-        let iter= table.new_iterator(options.clone());
+        self.table= Some(table);
+        let iter= self.table.as_ref().unwrap().new_iterator(options.clone());
         Ok(Box::new(iter))
     }
 
