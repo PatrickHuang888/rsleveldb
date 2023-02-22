@@ -5,12 +5,12 @@ use std::{
 };
 
 use crate::{
-    api::{self, Comparator, Iterator},
+    api::{self, Comparator, Iterator, ReadOptions},
     table::table::TableBuilder,
     util, Env, Options, SequenceNumber, WritableFile,
 };
 
-use self::{memtable::MemTableIterator, version::FileMetaData};
+use self::{memtable::MemTableIterator, table_cache::TableCache, version::FileMetaData};
 
 mod dbimpl;
 mod filename;
@@ -86,43 +86,47 @@ impl SnapshotList {
     }
 }
 
+// Build a Table file from the contents of *iter.  The generated file
+// will be named according to meta->number.  On success, the rest of
+// *meta will be filled with metadata about the generated table.
+// If no data is present in *iter, meta->file_size will be set to
+// zero, and no Table file will be produced.
 fn build_table<C: Comparator>(
     env: &Env,
     dbname: &str,
     options: &Options<C>,
     iter: &mut MemTableIterator<C>,
     meta: &mut FileMetaData,
+    table_cache: &mut TableCache<C>,
 ) -> api::Result<()> {
     meta.file_size = 0;
     iter.seek_to_first()?;
 
     let fname = filename::table_file_name(dbname, meta.number);
-    let mut file = env.new_posix_writable_file(fname)?;
+    let file = env.new_posix_writable_file(fname)?;
 
-    {
-        let mut builder = TableBuilder::new(&mut file, options);
-        meta.smallest.decode_from(iter.key().unwrap());
-        let mut key = Vec::new();
-        while iter.valid().unwrap() {
-            key.clear();
-            key.extend_from_slice(iter.key().unwrap());
-            builder.add(&key, iter.value().unwrap())?;
-            iter.next()?;
-        }
-        if !key.is_empty() {
-            meta.largest.decode_from(&key);
-        }
-
-        builder.finish()?;
-        meta.file_size = builder.file_size();
-        assert!(meta.file_size > 0);
+    let mut builder = TableBuilder::new(file, options);
+    meta.smallest.decode_from(iter.key().unwrap());
+    let mut key = Vec::new();
+    while iter.valid().unwrap() {
+        key.clear();
+        key.extend_from_slice(iter.key().unwrap());
+        builder.add(&key, iter.value().unwrap())?;
+        iter.next()?;
+    }
+    if !key.is_empty() {
+        meta.largest.decode_from(&key);
     }
 
-    file.sync()?;
-    file.close()?;
+    builder.finish()?;
+    meta.file_size = builder.file_size();
+    assert!(meta.file_size > 0);
+
+    builder.writer.sync()?;
+    builder.writer.close()?;
 
     // Verify that the table is usable
-    // todo: table_cache
+    let _ = table_cache.new_iterator(&ReadOptions::default(), meta.number, meta.file_size)?;
 
     Ok(())
 }

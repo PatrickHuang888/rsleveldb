@@ -1,4 +1,4 @@
-use std::{rc::Rc, sync::Arc};
+use std::sync::Arc;
 
 use api::{ByteswiseComparator, Comparator, Error, ReadOptions, WriteOptions};
 
@@ -486,6 +486,11 @@ impl Env {
     ) -> api::Result<Box<dyn RandomAccessFile>> {
         Ok(Box::new(PosixReadableFile {}))
     }
+
+    pub fn now_micros(&self) -> u64 {
+        todo!()
+    }
+    
 }
 
 pub struct PosixReadableFile {}

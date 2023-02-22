@@ -260,10 +260,6 @@ impl Random {
     }
 }
 
-pub fn now_micros() -> u64 {
-    todo!()
-}
-
 pub(crate) struct EmptyIterator {
     status: Option<api::Error>,
 }

@@ -78,7 +78,7 @@ impl<'a> Drop for MutexLock<'a> {
     }
 }
 
-struct DBImpl<C: Comparator + Send + Sync+ 'static> {
+struct DBImpl<C: Comparator + Send + Sync + 'static> {
     internal_comparator: InternalKeyComparator<C>,
     options: Options<C>,
     dbname: String,
@@ -218,9 +218,8 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
 
         // Save the contents of the memtable as a new Table
         let mut edit = VersionEdit::default();
-        let base = self.vset.current();
-        todo!()
-        //let mut r = self.write_level0_table(true, &mut edit, Some(base));
+        let base = self.vset.current().clone();
+        let mut r = self.write_level0_table(true, &mut edit, Some(base));
 
         /* if r.is_ok() && self.shutting_down.load(atomic::Ordering::Acquire) {
             r = Err(api::Error::IOError(
@@ -252,7 +251,7 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
         write_imem: bool,
         //mem: &mut MemTable<C>,
         edit: &mut VersionEdit,
-        o_base: Option<&Arc<Version<C>>>,
+        base: Option<Arc<Version<C>>>,
     ) -> api::Result<()> {
         assert!(self.mutex.is_locked());
 
@@ -261,7 +260,7 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
             mem = self.imem.as_mut().unwrap();
         }
 
-        let start_micros = util::now_micros();
+        let start_micros = self.env.now_micros();
         let mut meta = FileMetaData::default();
         meta.number = self.vset.new_file_number();
         self.pending_outputs.push(meta.number);
@@ -277,6 +276,7 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
             &self.options,
             &mut it,
             &mut meta,
+            &mut self.table_cache,
         )?;
 
         self.mutex.lock();
@@ -296,7 +296,7 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
         if meta.file_size > 0 {
             let min_user_key = meta.smallest.user_key();
             let max_user_key = meta.largest.user_key();
-            if let Some(base) = o_base {
+            if let Some(base) = base {
                 level = base.pick_level_for_memtable_output(min_user_key, max_user_key);
             }
             edit.add_file(
@@ -309,7 +309,7 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
         }
 
         let mut stats = CompactionStats::default();
-        stats.micros = util::now_micros() - start_micros;
+        stats.micros = self.env.now_micros() - start_micros;
         stats.bytes_written = meta.file_size;
         self.stats[level as usize].add(&stats);
         Ok(())

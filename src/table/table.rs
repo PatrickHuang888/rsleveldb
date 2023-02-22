@@ -16,8 +16,8 @@ use crate::{api::Comparator, api::Iterator, util::MAX_VARINT_LEN64, CompressionT
 
 use super::block::{Block, BlockBuilder, BlockIterator};
 
-pub(crate) struct TableBuilder<'a, W: WritableFile, C: Comparator> {
-    writer: &'a mut W,
+pub(crate) struct TableBuilder<W: WritableFile, C: api::Comparator> {
+    pub(crate) writer: W,
 
     data_block: BlockBuilder,
     index_block: BlockBuilder,
@@ -50,8 +50,8 @@ pub(crate) struct TableBuilder<'a, W: WritableFile, C: Comparator> {
     //filter_block: Option<FilterBlock<'c>>,
 }
 
-impl<'a, W: WritableFile, C: Comparator> TableBuilder<'a, W, C> {
-    pub(crate) fn new(w: &'a mut W, opts: &Options<C>) -> Self {
+impl<W: WritableFile, C: Comparator> TableBuilder<W, C> {
+    pub(crate) fn new(w: W, opts: &Options<C>) -> Self {
         let options = opts.clone();
         TableBuilder {
             writer: w,
@@ -125,7 +125,7 @@ impl<'a, W: WritableFile, C: Comparator> TableBuilder<'a, W, C> {
         assert!(!self.pending_index_entry);
 
         let l = write_block(
-            self.writer,
+            &mut self.writer,
             &mut self.data_block,
             self.options.compression,
             &mut self.compressed_output,
@@ -178,7 +178,7 @@ impl<'a, W: WritableFile, C: Comparator> TableBuilder<'a, W, C> {
             }
         } */
         let l = write_block(
-            self.writer,
+            &mut self.writer,
             &mut meta_index_block,
             self.options.compression,
             &mut self.compressed_output,
@@ -206,7 +206,7 @@ impl<'a, W: WritableFile, C: Comparator> TableBuilder<'a, W, C> {
             self.pending_index_entry = false;
         }
         let l = write_block(
-            self.writer,
+            &mut self.writer,
             &mut self.index_block,
             self.options.compression,
             &mut self.compressed_output,
@@ -248,8 +248,8 @@ impl<'a, W: WritableFile, C: Comparator> TableBuilder<'a, W, C> {
     }
 }
 
-pub(crate) fn write_block<W: WritableFile>(
-    writer: &mut W,
+pub(crate) fn write_block(
+    writer: &mut dyn WritableFile,
     block: &mut BlockBuilder,
     compression: CompressionType,
     compressed: &mut Vec<u8>,
@@ -277,8 +277,8 @@ pub(crate) fn write_block<W: WritableFile>(
     Ok(n)
 }
 
-fn write_raw_block<W: WritableFile>(
-    writer: &mut W,
+fn write_raw_block(
+    writer: &mut dyn WritableFile,
     contents: &[u8],
     compression: CompressionType,
 ) -> api::Result<u64> {
@@ -298,7 +298,7 @@ fn write_raw_block<W: WritableFile>(
     Ok(n + BLOCK_TRAILER_SIZE)
 }
 
-impl<'a, W: WritableFile, C: Comparator> Drop for TableBuilder<'a, W, C> {
+impl<W: WritableFile, C: Comparator> Drop for TableBuilder<W, C> {
     fn drop(&mut self) {
         assert!(self.closed) // Catch errors where caller forgot to call Finish()
     }
@@ -455,17 +455,22 @@ impl<C: Comparator> Table<C> {
         )
     }
 
-    pub(crate) fn internal_get(&self, options: &api::ReadOptions, key:&[u8], value:&mut Vec<u8>) -> api::Result<()> {
-        let index_block= self.index_block.clone();
-        let mut iiter= index_block.new_iterator(self.options.comparator.clone());
+    pub(crate) fn internal_get(
+        &self,
+        options: &api::ReadOptions,
+        key: &[u8],
+        value: &mut Vec<u8>,
+    ) -> api::Result<()> {
+        let index_block = self.index_block.clone();
+        let mut iiter = index_block.new_iterator(self.options.comparator.clone());
         iiter.seek(key)?;
         if iiter.valid()? {
-            let handle_value= iiter.value().unwrap();
+            let handle_value = iiter.value().unwrap();
             // todo: filter
-            let mut handle= BlockHandle::default();
+            let mut handle = BlockHandle::default();
             let _ = BlockHandle::decode_from(handle_value, &mut handle)?;
-            let data_block= block_reader(self.file.as_ref(), options, iiter.value().unwrap())?;
-            let mut block_iter= data_block.new_iterator(self.options.comparator.clone());
+            let data_block = block_reader(self.file.as_ref(), options, iiter.value().unwrap())?;
+            let mut block_iter = data_block.new_iterator(self.options.comparator.clone());
             block_iter.seek(key)?;
             if block_iter.valid()? {
                 return Ok(value.extend_from_slice(block_iter.value().unwrap()));
@@ -473,7 +478,6 @@ impl<C: Comparator> Table<C> {
         }
         Ok(())
     }
-
 }
 
 fn block_reader(
