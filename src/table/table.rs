@@ -16,7 +16,7 @@ use crate::{api::Comparator, api::Iterator, util::MAX_VARINT_LEN64, CompressionT
 
 use super::block::{Block, BlockBuilder, BlockIterator};
 
-pub(crate) struct TableBuilder<W: WritableFile, C: api::Comparator> {
+pub(crate) struct TableBuilder<W: WritableFile, C: api::Comparator+'static> {
     pub(crate) writer: W,
 
     data_block: BlockBuilder,
@@ -381,7 +381,7 @@ impl Default for BlockHandle {
 // A Table is a sorted map from strings to strings.  Tables are
 // immutable and persistent.  A Table may be safely accessed from
 // multiple threads without external synchronization.
-pub(crate) struct Table<C: Comparator> {
+pub(crate) struct Table<C: Comparator+'static> {
     options: Options<C>,
     status: Option<String>,
 

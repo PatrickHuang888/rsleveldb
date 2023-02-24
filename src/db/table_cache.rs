@@ -8,9 +8,10 @@ use crate::{
 
 use super::{filename::table_file_name, memtable::InternalKeyComparator};
 
-pub(crate) struct TableCache<C: api::Comparator + 'static> {
+pub(crate) struct TableCache<C: api::Comparator+'static> {
     dbname: &'static str,
     env: Env,
+    
     options: Options<C>,
     icmp: InternalKeyComparator<C>,
 
@@ -18,7 +19,7 @@ pub(crate) struct TableCache<C: api::Comparator + 'static> {
     table: Option<Table<C>>,
 }
 
-impl<C: api::Comparator + 'static> TableCache<C> {
+impl<C: api::Comparator> TableCache<C> {
     pub(crate) fn new(dbname: &str, options: &Options<C>, entries: usize) -> Self {
         todo!()
     }

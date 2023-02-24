@@ -11,7 +11,7 @@ mod table;
 mod util;
 
 #[derive(Clone)]
-pub struct Options<C: Comparator> {
+pub struct Options<C: Comparator+'static> {
     // Number of keys between restart points for delta encoding of keys.
     // This parameter can be changed dynamically.  Most clients should
     // leave this parameter alone.
@@ -39,7 +39,7 @@ pub struct Options<C: Comparator> {
     // REQUIRES: The client must ensure that the comparator supplied
     // here has the same name and orders keys *exactly* the same as the
     // comparator provided to previous open calls on the same DB.
-    comparator: C,
+    comparator: &'static C,
 
     // If true, the implementation will do aggressive checking of the
     // data it is processing and will stop early if it detects any
@@ -103,7 +103,7 @@ impl Options<ByteswiseComparator> {
             block_restart_interval: 16,
             block_size: 4 * 1024,
             compression: CompressionType::SnappyCompression,
-            comparator: ByteswiseComparator {},
+            comparator: &ByteswiseComparator {},
             paranoid_checks: false,
             max_open_files: 1000,
             write_buffer_size: 4 * 1024 * 1024,

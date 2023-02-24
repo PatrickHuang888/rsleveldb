@@ -30,13 +30,14 @@ fn clip_to_range<V: Ord>(mut v: V, minvalue: V, maxvalue: V) {
     }
 }
 
-fn sanitize_options<C: Comparator>(
+fn sanitize_options<C: Comparator+'static>(
     dbname: &str,
-    internal_comparator: &C,
+    internal_comparator: &InternalKeyComparator<C>,
     src: &Options<C>,
 ) -> Options<C> {
     let mut result = src.clone();
-    result.comparator = internal_comparator.clone();
+    // todo: should be internal comparator?
+    //result.comparator = internal_comparator;
     clip_to_range(
         result.max_open_files,
         64 + NUM_NON_TABLE_CACHE_FILES,

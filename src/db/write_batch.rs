@@ -5,7 +5,7 @@ use crate::{
 
 use super::memtable::MemTable;
 
-pub(crate) struct MemTableInserter<'a, C: api::Comparator> {
+pub(crate) struct MemTableInserter<'a, C: api::Comparator+'static> {
     sequence: SequenceNumber,
     mem: &'a mut MemTable<C>,
 }

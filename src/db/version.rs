@@ -1,5 +1,4 @@
-use core::num;
-use std::{cell::RefCell, fs::File, rc::Rc, sync::Arc};
+use std::{sync::Arc};
 
 use parking_lot::lock_api::RawMutex;
 
@@ -66,8 +65,10 @@ pub(crate) struct GetStats {
     seek_file_level: i32,
 }
 
-pub(crate) struct Version<C: api::Comparator + 'static> {
-    user_cmp: C,
+pub(crate) struct Version<C: api::Comparator+'static> {
+    options:Options<C>,
+    icmp: InternalKeyComparator<C>,
+
     // List of files per level
     files: [Vec<Arc<FileMetaData>>; config::NUM_LEVELS as usize],
     // Next file to compact based on seek stats.
@@ -86,8 +87,8 @@ pub(crate) struct Version<C: api::Comparator + 'static> {
     table_cache: Arc<TableCache<C>>,
 }
 
-impl<C: api::Comparator> Version<C> {
-    fn new(user_cmp: C) -> Self {
+impl<C: api::Comparator+'static> Version<C> {
+    fn new(icmp: InternalKeyComparator<C>) -> Self {
         /* Version {
             user_cmp,
             files: Default::default(),
@@ -162,16 +163,14 @@ impl<C: api::Comparator> Version<C> {
         internal_key: &[u8],
         mut match_fn: F,
     ) {
+        let ucmp= self.icmp.user_comparator();
+
         // Search level-0 in order from newest to oldest.
         let mut tmp = Vec::with_capacity(self.files[0].len());
         for f in &self.files[0] {
-            if self
-                .user_cmp
-                .compare(user_key, f.smallest.user_key())
+            if ucmp.compare(user_key, f.smallest.user_key())
                 .is_ge()
-                && self
-                    .user_cmp
-                    .compare(user_key, f.largest.user_key())
+                && ucmp.compare(user_key, f.largest.user_key())
                     .is_le()
             {
                 tmp.push(f.clone());
@@ -194,13 +193,10 @@ impl<C: api::Comparator> Version<C> {
             }
 
             // Binary search to find earliest index whose largest key >= internal_key.
-            let icmp = InternalKeyComparator::new(self.user_cmp.clone());
-            let index = find_file(&icmp, &self.files[level as usize], internal_key);
+            let index = find_file(&self.icmp, &self.files[level as usize], internal_key);
             if index < num_files {
                 let f = &self.files[level as usize][index];
-                if self
-                    .user_cmp
-                    .compare(user_key, f.smallest.user_key())
+                if ucmp.compare(user_key, f.smallest.user_key())
                     .is_lt()
                 {
                     // All of "f" is past any data for user_key
@@ -253,7 +249,7 @@ impl<C: api::Comparator> Version<C> {
                     // Check that file does not overlap too many grandparent bytes.
                     self.get_overlapping_inputs(level+2, Some(&start), Some(&limit), &mut overlaps);
                     let sum= total_file_size(&overlaps);
-                    if sum > max_grand_parent_overlap_bytes(self.options) {
+                    if sum > max_grand_parent_overlap_bytes(&self.options) {
                         break;
                     }
                 }
@@ -278,7 +274,7 @@ impl<C: api::Comparator> Version<C> {
         }else {
             false
         };
-        some_file_overlaps_range(&self.user_cmp, disjoint, &self.files[level as usize], smallest_user_key, largest_user_key)
+        some_file_overlaps_range(&self.icmp, disjoint, &self.files[level as usize], smallest_user_key, largest_user_key)
     }
 
     // Store in "*inputs" all files in "level" that overlap [begin,end]
@@ -307,20 +303,20 @@ impl<C: api::Comparator> Version<C> {
             let f = &fs[i];
             let file_start = f.smallest.user_key();
             let file_limit = f.largest.user_key();
-            if begin.is_some() && self.user_cmp.compare(file_limit, user_begin).is_lt() {
+            if begin.is_some() && self.options.comparator.compare(file_limit, user_begin).is_lt() {
                 // "f" is completely before specified range; skip it
-            } else if end.is_some() && self.user_cmp.compare(file_start, user_end).is_gt() {
+            } else if end.is_some() && self.options.comparator.compare(file_start, user_end).is_gt() {
                 // "f" is completely after specified range; skip it
             } else {
                 inputs.push(Arc::clone(f));
                 if level == 0 {
                     // Level-0 files may overlap each other.  So check if the newly
                     // added file has expanded the range.  If so, restart search.
-                    if begin.is_some() && self.user_cmp.compare(file_start, user_begin).is_lt() {
+                    if begin.is_some() && self.options.comparator.compare(file_start, user_begin).is_lt() {
                         user_begin = file_start;
                         inputs.clear();
                         i = 0;
-                    } else if end.is_some() && self.user_cmp.compare(file_limit, user_end).is_gt()
+                    } else if end.is_some() && self.options.comparator.compare(file_limit, user_end).is_gt()
                     {
                         user_end = file_limit;
                         inputs.clear();
@@ -353,13 +349,14 @@ struct MatchStateSaver {
 // largest==nullptr represents a key largest than all keys in the DB.
 // REQUIRES: If disjoint_sorted_files, files[] contains disjoint ranges
 //           in sorted order.
-fn some_file_overlaps_range(
-    ucmp: &impl api::Comparator,
+fn some_file_overlaps_range<C:api::Comparator+'static>(
+    icmp: &InternalKeyComparator<C>,
     disjoint_sorted_files: bool,
     files: &[Arc<FileMetaData>],
     smallest_user_key: Option<&[u8]>,
     largest_user_key: Option<&[u8]>,
 ) -> bool {
+    let ucmp= icmp.user_comparator();
     if !disjoint_sorted_files {
         // Need to check against all files
         for i in 0..files.len() {
@@ -379,8 +376,7 @@ fn some_file_overlaps_range(
     if let Some(smallest_user_key) = smallest_user_key {
         // Find the earliest possible internal key for smallest_user_key
         let small_key = InternalKey::new(smallest_user_key, MAX_SEQUENCE_NUMBER, TYPE_FOR_SEEK);
-        let icmp= InternalKeyComparator::new(ucmp.clone());
-        index = find_file(&icmp, files, small_key.encode());
+        index = find_file(icmp, files, small_key.encode());
     }
 
     if index >= files.len() {
@@ -412,7 +408,7 @@ struct State<C> {
     stats: GetStats,
     options: ReadOptions,
     ikey: Vec<u8>,
-    last_file_read: Rc<FileMetaData>,
+    last_file_read: Arc<FileMetaData>,
     last_file_read_level: u32,
 
     //vset: VersionSet,
@@ -440,7 +436,7 @@ struct Saver<C> {
 }
 
 // A Compaction encapsulates information about a compaction.
-pub(crate) struct Compaction<C: api::Comparator + 'static> {
+pub(crate) struct Compaction<C: api::Comparator+'static> {
     level: i32,
     // Each compaction reads inputs from "level_" and "level_+1"
     inputs: [Vec<Arc<FileMetaData>>; 2],
@@ -451,8 +447,8 @@ pub(crate) struct Compaction<C: api::Comparator + 'static> {
     input_version: Option<Arc<Version<C>>>,
 }
 
-impl<C: api::Comparator> Compaction<C> {
-    fn new(options: Options<C>, level: i32) -> Self {
+impl<C: api::Comparator+'static> Compaction<C> {
+    fn new(level: i32) -> Self {
         let inputs = [Vec::new(), Vec::new()];
         Compaction {
             level,
@@ -468,7 +464,7 @@ impl<C: api::Comparator> Compaction<C> {
     }
 
     // Return the ith input file at "level()+which" ("which" must be 0 or 1).
-    pub fn input(&self, which: u32, i: u32) -> &Rc<FileMetaData> {
+    pub fn input(&self, which: u32, i: u32) -> &Arc<FileMetaData> {
         todo!();
     }
     // "which" must be either 0 or 1
@@ -503,7 +499,7 @@ fn max_grand_parent_overlap_bytes<C: api::Comparator>(options: &Options<C>) -> i
 // Return the smallest index i such that files[i]->largest >= key.
 // Return files.size() if there is no such file.
 // REQUIRES: "files" contains a sorted list of non-overlapping files.
-pub(crate) fn find_file<C: api::Comparator>(
+pub(crate) fn find_file<C: api::Comparator+'static>(
     icmp: &InternalKeyComparator<C>,
     files: &[Arc<FileMetaData>],
     key: &[u8],
@@ -538,13 +534,13 @@ fn target_file_size<C: api::Comparator>(options: &Options<C>) -> usize {
     options.max_file_size
 }
 
-pub(crate) struct VersionSet<C: api::Comparator + 'static> {
+pub(crate) struct VersionSet<C: api::Comparator+'static> {
     last_sequence: u64,
     current_index: i32,
     log_number: u64,
     next_file_number: u64,
     prev_log_number: u64, // 0 or backing store for memtable being compacted
-    icmp: InternalKeyComparator<C>,
+    
     // Per-level key at which the next compaction at that level should start.
     // Either an empty string, or a valid InternalKey.
     compact_pointer: [Vec<u8>; config::NUM_LEVELS as usize],
@@ -554,10 +550,12 @@ pub(crate) struct VersionSet<C: api::Comparator + 'static> {
     env: Env,
 
     versions: Vec<Arc<Version<C>>>,
+
     options: Options<C>,
+    icmp: InternalKeyComparator<C>,
 }
 
-impl<C: api::Comparator> VersionSet<C> {
+impl<C: api::Comparator+'static> VersionSet<C> {
     // Returns true iff some level needs a compaction.
     pub(crate) fn needs_compaction(&self) -> bool {
         let v = &self.versions[self.current_index as usize];
@@ -565,9 +563,6 @@ impl<C: api::Comparator> VersionSet<C> {
     }
 
     // Pick level and inputs for a new compaction.
-    // Returns nullptr if there is no compaction to be done.
-    // Otherwise returns a pointer to a heap-allocated object that
-    // describes the compaction.  Caller should delete the result.
     pub(crate) fn pick_compaction(&mut self) -> Option<Compaction<C>> {
         let mut c: Compaction<C>;
         let mut level = 0;
@@ -575,19 +570,21 @@ impl<C: api::Comparator> VersionSet<C> {
         // We prefer compactions triggered by too much data in a level over
         // the compactions triggered by seeks.
         let current = self.current();
-        let mut size_compaction = false;
-        if current.compaction_score >= 1.0 {
-            size_compaction = false;
-        }
-        let mut seek_compaction = false;
-        if current.file_to_compact.is_some() {
-            seek_compaction = true;
-        }
+        let size_compaction= if current.compaction_score >= 1.0 {
+            true
+        }else {
+            false
+        };
+        let seek_compaction = if current.file_to_compact.is_some() {
+            true
+        }else {
+            false
+        };
         if size_compaction {
             let l = current.compaction_level;
             assert!(l >= 0);
-            assert!(l + 1 < config::NUM_LEVELS as i32);
-            c = Compaction::new(self.options.clone(), l);
+            assert!(l + 1 < config::NUM_LEVELS);
+            c = Compaction::new(l);
 
             // Pick the first file that comes after compact_pointer_[level]
             level = l as usize;
@@ -611,7 +608,7 @@ impl<C: api::Comparator> VersionSet<C> {
             }
         } else if seek_compaction {
             let l = current.file_to_compact_level;
-            c = Compaction::new(self.options.clone(), l);
+            c = Compaction::new(l);
             c.inputs[0].push(Arc::clone(current.file_to_compact.as_ref().unwrap()));
         } else {
             return None;
@@ -677,7 +674,7 @@ impl<C: api::Comparator> VersionSet<C> {
             }
         }
 
-        let mut c = Compaction::new(self.options.clone(), level);
+        let mut c = Compaction::new(level);
         c.input_version = Some(Arc::clone(self.current()));
         c.inputs[0].append(&mut inputs);
         // todo: setup other inputs
@@ -784,7 +781,7 @@ impl<C: api::Comparator> VersionSet<C> {
         edit.next_file_number = Some(self.next_file_number);
         edit.last_sequence = Some(self.last_sequence);
 
-        let mut v = Version::new(self.options.comparator.clone());
+        let mut v = Version::new(self.icmp.clone());
         {
             let mut builder = VersionSetBuilder::new(self, self.current_index as usize);
             builder.apply(edit);
@@ -968,7 +965,7 @@ fn max_bytes_for_level(level: i32) -> f64 {
 }
 
 // Helper to sort by v->files_[file_number].smallest
-struct BySmallestKey<'a, C> {
+struct BySmallestKey<'a, C:api::Comparator+'static> {
     internal_comparator: &'a InternalKeyComparator<C>,
 }
 impl<'a, C: api::Comparator> BySmallestKey<'a, C> {
@@ -1513,12 +1510,12 @@ mod test {
 
         fn find(&self, key: &str) -> usize {
             let target = InternalKey::new(key.as_bytes(), 100, ValueType::TypeValue);
-            let cmp = InternalKeyComparator::new(ByteswiseComparator {});
+            let cmp = InternalKeyComparator::new(&ByteswiseComparator {});
             find_file(&cmp, &self.files, target.encode())
         }
 
         fn overlaps(&self, smallest: &str, largest: &str) -> bool {
-            let cmp = InternalKeyComparator::new(ByteswiseComparator {});
+            let cmp = InternalKeyComparator::new(&ByteswiseComparator {});
             some_file_overlaps_range(
                 &cmp,
                 self.disjoint_sorted_files,
@@ -1573,7 +1570,7 @@ mod test {
                 level_files: Vec::new(),
                 compaction_files: Vec::new(),
                 all_files: Vec::new(),
-                icmp: InternalKeyComparator::new(ByteswiseComparator {}),
+                icmp: InternalKeyComparator::new(&ByteswiseComparator {}),
             }
         }
     }
