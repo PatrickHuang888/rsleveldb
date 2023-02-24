@@ -178,10 +178,10 @@ mod tests {
     use rand::{rngs::ThreadRng, thread_rng, Rng};
 
     use crate::{
-        api::{self, ByteswiseComparator, Iterator},
+        api::{self, ByteswiseComparator, Iterator, ReadOptions},
         db::memtable::{InternalKeyComparator, MemTable, MemTableIterator},
         pack_sequence_and_type, parse_internal_key,
-        table::table::{ReadOptions, Table},
+        table::table::Table,
         util, Options, RandomAccessFile, ValueType, WritableFile, MAX_SEQUENCE_NUMBER,
     };
 
@@ -190,12 +190,53 @@ mod tests {
         table::TableBuilder,
     };
 
+    struct StringSink<'a> {
+        contents: &'a mut Vec<u8>,
+    }
+    impl<'a> WritableFile for StringSink<'a> {
+        fn append(&mut self, data: &[u8]) -> api::Result<()> {
+            self.contents.extend_from_slice(data);
+            Ok(())
+        }
+        fn close(&mut self) -> api::Result<()> {
+            Ok(())
+        }
+        fn flush(&mut self) -> api::Result<()> {
+            Ok(())
+        }
+        fn sync(&mut self) -> api::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct StringSource {
+        contents: Vec<u8>,
+    }
+
+    impl RandomAccessFile for StringSource {
+        fn read(&self, offset: u64, n: u64, dst: &mut Vec<u8>) -> api::Result<u64> {
+            let mut nn = n;
+            if offset >= self.contents.len() as u64 {
+                return Err(api::Error::InvalidArgument(format!(
+                    "invalid read offset {}, contents {}",
+                    offset,
+                    self.contents.len()
+                )));
+            }
+            if offset + n > self.contents.len() as u64 {
+                nn = self.contents.len() as u64 - offset;
+            }
+            dst.extend_from_slice(&self.contents[offset as usize..(offset + n) as usize]);
+            Ok(nn)
+        }
+    }
+
     type KVMap = HashMap<Vec<u8>, Vec<u8>>;
     struct Constructor {
         case: TestCase,
         options: Options<ByteswiseComparator>,
         data: KVMap,
-        table: Option<Table<ByteswiseComparator>>,
+        table: Option<Table<StringSource, ByteswiseComparator>>,
         memtable: Option<MemTable<ByteswiseComparator>>,
         block: Option<Block>,
     }
@@ -234,13 +275,12 @@ mod tests {
         }
 
         fn new_table(&mut self, keys: &[Vec<u8>]) -> api::Result<()> {
-            let mut sink = StringSink {
-                contents: Vec::new(),
-            };
+            let mut buf = vec![];
+            let sink = StringSink { contents: &mut buf };
             let file_size: u64;
 
             {
-                let mut builder = TableBuilder::new(&mut sink, &self.options);
+                let mut builder = TableBuilder::new(sink, self.options.clone());
 
                 for k in keys {
                     builder.add(k, self.data.get(k).unwrap())?;
@@ -249,11 +289,9 @@ mod tests {
                 file_size = builder.file_size();
             }
 
-            assert_eq!(sink.contents.len(), file_size as usize);
+            assert_eq!(buf.len(), file_size as usize);
 
-            let source = Box::new(StringSource {
-                contents: sink.contents,
-            });
+            let source = StringSource { contents: buf };
 
             let table = Table::open(&self.options, source, file_size)?;
             self.table = Some(table);
@@ -272,7 +310,7 @@ mod tests {
         }
 
         fn new_memtable(&mut self, keys: &[Vec<u8>]) -> api::Result<()> {
-            let internal_comparator = InternalKeyComparator::new(&self.options.comparator);
+            let internal_comparator = InternalKeyComparator::new(self.options.comparator);
             let mut memtable = MemTable::new(internal_comparator);
             let mut seq = 1;
             for k in keys {
@@ -298,7 +336,7 @@ mod tests {
                 }
                 TestCase::MemTable => {
                     // A helper class that converts internal format keys into user keys
-                    struct KeyConvertingIterator<'a, C: api::Comparator> {
+                    struct KeyConvertingIterator<'a, C: api::Comparator + 'static> {
                         iter: MemTableIterator<'a, C>,
                     }
                     impl<'a, C: api::Comparator> api::Iterator for KeyConvertingIterator<'a, C> {
@@ -347,47 +385,6 @@ mod tests {
                     })
                 }
             }
-        }
-    }
-
-    struct StringSink {
-        contents: Vec<u8>,
-    }
-    impl WritableFile for StringSink {
-        fn append(&mut self, data: &[u8]) -> api::Result<()> {
-            self.contents.extend_from_slice(data);
-            Ok(())
-        }
-        fn close(&mut self) -> api::Result<()> {
-            Ok(())
-        }
-        fn flush(&mut self) -> api::Result<()> {
-            Ok(())
-        }
-        fn sync(&mut self) -> api::Result<()> {
-            Ok(())
-        }
-    }
-
-    struct StringSource {
-        contents: Vec<u8>,
-    }
-
-    impl RandomAccessFile for StringSource {
-        fn read(&self, offset: u64, n: u64, dst: &mut Vec<u8>) -> api::Result<u64> {
-            let mut nn = n;
-            if offset >= self.contents.len() as u64 {
-                return Err(api::Error::InvalidArgument(format!(
-                    "invalid read offset {}, contents {}",
-                    offset,
-                    self.contents.len()
-                )));
-            }
-            if offset + n > self.contents.len() as u64 {
-                nn = self.contents.len() as u64 - offset;
-            }
-            dst.extend_from_slice(&self.contents[offset as usize..(offset + n) as usize]);
-            Ok(nn)
         }
     }
 

@@ -16,7 +16,7 @@ use crate::{api::Comparator, api::Iterator, util::MAX_VARINT_LEN64, CompressionT
 
 use super::block::{Block, BlockBuilder, BlockIterator};
 
-pub(crate) struct TableBuilder<W: WritableFile, C: api::Comparator+'static> {
+pub(crate) struct TableBuilder<W: WritableFile, C: api::Comparator + 'static> {
     pub(crate) writer: W,
 
     data_block: BlockBuilder,
@@ -50,9 +50,8 @@ pub(crate) struct TableBuilder<W: WritableFile, C: api::Comparator+'static> {
     //filter_block: Option<FilterBlock<'c>>,
 }
 
-impl<W: WritableFile, C: Comparator> TableBuilder<W, C> {
-    pub(crate) fn new(w: W, opts: &Options<C>) -> Self {
-        let options = opts.clone();
+impl<W: WritableFile, C: Comparator + 'static> TableBuilder<W, C> {
+    pub(crate) fn new(w: W, options: Options<C>) -> Self {
         TableBuilder {
             writer: w,
 
@@ -381,18 +380,17 @@ impl Default for BlockHandle {
 // A Table is a sorted map from strings to strings.  Tables are
 // immutable and persistent.  A Table may be safely accessed from
 // multiple threads without external synchronization.
-pub(crate) struct Table<C: Comparator+'static> {
+pub(crate) struct Table<R: RandomAccessFile, C: Comparator + 'static> {
     options: Options<C>,
     status: Option<String>,
 
-    file: Box<dyn RandomAccessFile>,
+    file: R,
 
     meta_index_handle: BlockHandle,
-    //index_iter: BlockIterator<C>,
     index_block: Block,
 }
 
-impl<C: Comparator> Table<C> {
+impl<R: RandomAccessFile, C: Comparator + 'static> Table<R, C> {
     // Attempt to open the table that is stored in bytes [0..file_size)
     // of "file", and read the metadata entries necessary to allow
     // retrieving data from the table.
@@ -405,11 +403,7 @@ impl<C: Comparator> Table<C> {
     // for the duration of the returned table's lifetime.
     //
     // *file must remain live while this Table is in use.
-    pub(crate) fn open(
-        opts: &Options<C>,
-        file: Box<dyn RandomAccessFile>,
-        size: u64,
-    ) -> api::Result<Self> {
+    pub(crate) fn open(opts: &Options<C>, file: R, size: u64) -> api::Result<Self> {
         if size < FOOTER_LEN {
             return Err(Error::Corruption(String::from(
                 "file is too short to be an sstable",
@@ -426,7 +420,7 @@ impl<C: Comparator> Table<C> {
         if opts.paranoid_checks {
             opt.verify_checksums = true;
         }
-        let index_contents = read_block_content(file.as_ref(), &opt, &mut footer.index_handle)?;
+        let index_contents = read_block_content(&file, &opt, &mut footer.index_handle)?;
         let index_block = Block::new(index_contents);
         let r = Table {
             options: opts.clone(),
@@ -444,13 +438,13 @@ impl<C: Comparator> Table<C> {
         Ok(())
     }
 
-    pub(crate) fn new_iterator(&self, options: api::ReadOptions) -> TableIterator<C> {
+    pub(crate) fn new_iterator(&self, options: api::ReadOptions) -> TableIterator<R, C> {
         let index_block = self.index_block.clone();
         let index_iter = index_block.new_iterator(self.options.comparator.clone());
         TableIterator::new(
             options,
             index_iter,
-            self.file.as_ref(),
+            &self.file,
             self.options.comparator.clone(),
         )
     }
@@ -469,7 +463,7 @@ impl<C: Comparator> Table<C> {
             // todo: filter
             let mut handle = BlockHandle::default();
             let _ = BlockHandle::decode_from(handle_value, &mut handle)?;
-            let data_block = block_reader(self.file.as_ref(), options, iiter.value().unwrap())?;
+            let data_block = block_reader(&self.file, options, iiter.value().unwrap())?;
             let mut block_iter = data_block.new_iterator(self.options.comparator.clone());
             block_iter.seek(key)?;
             if block_iter.valid()? {
@@ -481,7 +475,7 @@ impl<C: Comparator> Table<C> {
 }
 
 fn block_reader(
-    file: &dyn RandomAccessFile,
+    file: &impl RandomAccessFile,
     opts: &api::ReadOptions,
     index_value: &[u8],
 ) -> api::Result<Block> {
@@ -499,7 +493,7 @@ fn block_reader(
 }
 
 fn read_block_content(
-    file: &dyn RandomAccessFile,
+    file: &impl RandomAccessFile,
     opts: &api::ReadOptions,
     handle: &mut BlockHandle,
 ) -> api::Result<Vec<u8>> {
@@ -547,20 +541,20 @@ fn read_block_content(
 //
 // Uses a supplied function to convert an index_iter value into
 // an iterator over the contents of the corresponding block.
-pub struct TableIterator<'f, C: api::Comparator> {
+pub struct TableIterator<'f, R: RandomAccessFile, C: api::Comparator> {
     options: api::ReadOptions,
     index_iter: BlockIterator<C>,
     data_iter: Option<BlockIterator<C>>,
     data_block_handle: Vec<u8>,
     comparator: C,
-    file: &'f dyn RandomAccessFile,
+    file: &'f R,
 }
 
-impl<'f, C: Comparator> TableIterator<'f, C> {
+impl<'f, F: RandomAccessFile, C: Comparator> TableIterator<'f, F, C> {
     fn new(
         options: api::ReadOptions,
         index_iter: BlockIterator<C>,
-        file: &'f dyn RandomAccessFile,
+        file: &'f F,
         comparator: C,
     ) -> Self {
         TableIterator {
@@ -625,7 +619,9 @@ impl<'f, C: Comparator> TableIterator<'f, C> {
     }
 }
 
-impl<'f, C: Comparator> api::Iterator for TableIterator<'f, C> {
+impl<'f, F: RandomAccessFile, C: api::Comparator + 'static> api::Iterator
+    for TableIterator<'f, F, C>
+{
     fn next(&mut self) -> api::Result<()> {
         assert!(self.valid()?);
         self.data_iter.as_mut().unwrap().next()?;

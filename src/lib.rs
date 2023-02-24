@@ -11,7 +11,7 @@ mod table;
 mod util;
 
 #[derive(Clone)]
-pub struct Options<C: Comparator+'static> {
+pub struct Options<C: Comparator + 'static> {
     // Number of keys between restart points for delta encoding of keys.
     // This parameter can be changed dynamically.  Most clients should
     // leave this parameter alone.
@@ -480,17 +480,13 @@ impl Env {
         todo!()
     }
 
-    pub fn new_posix_random_access_file(
-        &self,
-        filename: &str,
-    ) -> api::Result<Box<dyn RandomAccessFile>> {
-        Ok(Box::new(PosixReadableFile {}))
+    pub fn new_posix_random_access_file(&self, filename: &str) -> api::Result<PosixReadableFile> {
+        todo!()
     }
 
     pub fn now_micros(&self) -> u64 {
         todo!()
     }
-    
 }
 
 pub struct PosixReadableFile {}

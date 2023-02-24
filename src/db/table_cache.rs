@@ -3,20 +3,20 @@ use crate::{
     db::version::{FileMetaData, GetStats},
     parse_internal_key,
     table::table::Table,
-    Env, Options, RandomAccessFile, ValueType,
+    Env, Options, PosixReadableFile, RandomAccessFile, ValueType,
 };
 
 use super::{filename::table_file_name, memtable::InternalKeyComparator};
 
-pub(crate) struct TableCache<C: api::Comparator+'static> {
+pub(crate) struct TableCache<C: api::Comparator + 'static> {
     dbname: &'static str,
     env: Env,
-    
+
     options: Options<C>,
     icmp: InternalKeyComparator<C>,
 
     // todo:cache
-    table: Option<Table<C>>,
+    table: Option<Table<PosixReadableFile, C>>,
 }
 
 impl<C: api::Comparator> TableCache<C> {
@@ -67,7 +67,11 @@ impl<C: api::Comparator> TableCache<C> {
         Ok(Box::new(iter))
     }
 
-    fn find_table(&self, file_number: u64, file_size: u64) -> api::Result<Table<C>> {
+    fn find_table(
+        &self,
+        file_number: u64,
+        file_size: u64,
+    ) -> api::Result<Table<PosixReadableFile, C>> {
         // todo: cache lookup
         let filename = table_file_name(self.dbname, file_number);
         let file = self.env.new_posix_random_access_file(filename)?;

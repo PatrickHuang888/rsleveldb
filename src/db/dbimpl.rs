@@ -30,7 +30,7 @@ fn clip_to_range<V: Ord>(mut v: V, minvalue: V, maxvalue: V) {
     }
 }
 
-fn sanitize_options<C: Comparator+'static>(
+fn sanitize_options<C: Comparator + 'static>(
     dbname: &str,
     internal_comparator: &InternalKeyComparator<C>,
     src: &Options<C>,

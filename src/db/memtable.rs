@@ -67,7 +67,7 @@ impl LookupKey {
     }
 }
 
-pub struct MemTable<C: Comparator+'static> {
+pub struct MemTable<C: Comparator + 'static> {
     table: Table<C>,
     comparator: KeyComparator<C>,
 }
@@ -168,7 +168,7 @@ impl<C: api::Comparator> MemTable<C> {
     }
 }
 
-pub(crate) struct MemTableIterator<'l, C: Comparator+'static> {
+pub(crate) struct MemTableIterator<'l, C: Comparator + 'static> {
     iter: TableIterator<'l, C>,
     scratch: Vec<u8>,
 }
@@ -221,11 +221,11 @@ impl<'l, C: api::Comparator> api::Iterator for MemTableIterator<'l, C> {
 }
 
 #[derive(Clone)]
-pub struct InternalKeyComparator<C:api::Comparator+'static> {
+pub struct InternalKeyComparator<C: api::Comparator + 'static> {
     user_comparator: &'static C,
 }
 
-impl<C: api::Comparator+'static> InternalKeyComparator<C> {
+impl<C: api::Comparator + 'static> InternalKeyComparator<C> {
     pub fn new(user_comparator: &'static C) -> Self {
         Self { user_comparator }
     }
@@ -234,13 +234,15 @@ impl<C: api::Comparator+'static> InternalKeyComparator<C> {
     }
 }
 
-impl<C: api::Comparator+'static> super::skiplist::Comparator<InternalKey> for InternalKeyComparator<C> {
+impl<C: api::Comparator + 'static> super::skiplist::Comparator<InternalKey>
+    for InternalKeyComparator<C>
+{
     fn compare(&self, a: &InternalKey, b: &InternalKey) -> cmp::Ordering {
         api::Comparator::compare(self, &a.rep, &b.rep)
     }
 }
 
-impl<C: api::Comparator+'static> api::Comparator for InternalKeyComparator<C> {
+impl<C: api::Comparator + 'static> api::Comparator for InternalKeyComparator<C> {
     fn name(&self) -> &'static str {
         "leveldb.InternalKeyComparator"
     }
@@ -319,11 +321,11 @@ fn encode_key(scratch: &mut Vec<u8>, key: &[u8]) {
 }
 
 #[derive(Clone)]
-struct KeyComparator<C:api::Comparator+'static> {
+struct KeyComparator<C: api::Comparator + 'static> {
     comparator: InternalKeyComparator<C>,
 }
 
-impl<C: api::Comparator+'static> super::skiplist::Comparator<Vec<u8>> for KeyComparator<C> {
+impl<C: api::Comparator + 'static> super::skiplist::Comparator<Vec<u8>> for KeyComparator<C> {
     fn compare(&self, key_a: &Vec<u8>, key_b: &Vec<u8>) -> cmp::Ordering {
         // Internal keys are encoded as length-prefixed strings.
         let (a, _) = util::get_length_prefixed_slice(key_a).unwrap();

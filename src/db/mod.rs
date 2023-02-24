@@ -7,7 +7,7 @@ use std::{
 use crate::{
     api::{self, Comparator, Iterator, ReadOptions},
     table::table::TableBuilder,
-    util, Env, Options, SequenceNumber, WritableFile,
+    util, Env, Options, RandomAccessFile, SequenceNumber, WritableFile,
 };
 
 use self::{memtable::MemTableIterator, table_cache::TableCache, version::FileMetaData};
@@ -91,7 +91,7 @@ impl SnapshotList {
 // *meta will be filled with metadata about the generated table.
 // If no data is present in *iter, meta->file_size will be set to
 // zero, and no Table file will be produced.
-fn build_table<C: Comparator>(
+fn build_table<C: Comparator + 'static>(
     env: &Env,
     dbname: &str,
     options: &Options<C>,
@@ -105,7 +105,7 @@ fn build_table<C: Comparator>(
     let fname = filename::table_file_name(dbname, meta.number);
     let file = env.new_posix_writable_file(fname)?;
 
-    let mut builder = TableBuilder::new(file, options);
+    let mut builder = TableBuilder::new(file, options.clone());
     meta.smallest.decode_from(iter.key().unwrap());
     let mut key = Vec::new();
     while iter.valid().unwrap() {
