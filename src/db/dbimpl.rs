@@ -322,7 +322,7 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
 
     // REQUIRES: mutex_ is held
     // REQUIRES: this thread is currently at the front of the writer queue
-    fn make_room_for_write(&mut self, guard: &MutexGuard<u8>, force: bool) -> api::Result<()> {
+    fn make_room_for_write(&mut self, force: bool) -> api::Result<()> {
         /* guard;
           assert!(!self.writers.is_empty());
           let allow_delay= !force;
@@ -364,7 +364,7 @@ impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
     }
 
     fn get(&mut self, options: &ReadOptions, key: &[u8], value: &mut Vec<u8>) -> api::Result<()> {
-        let _lock = MutexLock::new(&self.mutex);
+        self.mutex.lock();
 
         let snaphsot: SequenceNumber;
         match &options.snapshot {
@@ -377,7 +377,7 @@ impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
         }
 
         // Unlock while reading from files and memtables
-        drop(_lock);
+        unsafe {self.mutex.unlock();}
 
         // First look in the memtable, then in the immutable memtable (if any).
         let lkey = LookupKey::new(key, snaphsot);
@@ -421,40 +421,46 @@ impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
         self.write(options, batch)
     }
 
-    fn write(&mut self, options: &WriteOptions, updates: WriteBatch) -> api::Result<()> {
-        /* let mut lock = self.guard.lock().unwrap();
+    fn write(&mut self, options: &WriteOptions, updates: Option<WriteBatch>) -> api::Result<()> {
+        self.mutex.lock();
 
         self.writers
-            .push_back(Writer::new(Some(updates), options.sync));
+            .push_back(Writer::new(updates, options.sync));
         let w = self.writers.back().unwrap();
 
-        //todo:
-        /* while !w.done && w != self.writers.front().unwrap() {
-            _guard = w.cv.wait(_guard).unwrap();
-        } */
+        let mu = parking_lot::Mutex::const_new(self.mutex, w.done);
+        let guard= mu.lock();
+        
+        while !w.done{
+            match self.writers.front() {
+                None => {
+                    w.cv.wait(&mut guard);
+                },
+                Some(front) => {
+                    if w!=front {
+                        w.cv.wait(&mut guard);
+                    }
+                }
+            }
+        }
         if w.done {
             return w.status.clone();
         }
 
         // May temporarily unlock and wait.
-        // at front and !done
-        let current = self.writers.pop_front().unwrap();
-
-        let mut status;
-        //let status = self.make_room_for_write(&guard, w.batch.is_none());
-        let mut last_sequence = lock.vset.last_sequence();
-
-        // none updates for compactions
-        match &current.batch {
-            None => {}
-            Some(_) => {
-                let (mut write_batch, writtens) =
+        let mut status = self.make_room_for_write(w.batch.is_none());
+        let mut last_sequence = self.vset.last_sequence();
+        let last_writer= w;
+        
+        // none updates is for compactions
+        if status.is_ok() && updates.is_some() {
+                /* let (mut write_batch, writtens) =
                     build_batch_group(lock, &mut self.writers, current);
                 write_batch.set_sequence(last_sequence + 1);
                 last_sequence += write_batch.count() as u64;
+                */
+                    unsafe{self.mutex.unlock();}
 
-
-                    drop(lock);
                     // Add to log and apply to memtable.  We can release the lock
                     // during this phase since &w is currently responsible for logging
                     // and protects against concurrent loggers and concurrent writes
@@ -465,29 +471,38 @@ impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
                         //self.log_file.sync()?;
                     }
                     //status = write_batch.insert_into(&mut self.mem);
-                    let lock_1= self.guard.lock().unwrap();
+                    
+                    self.mutex.lock();
 
                     // todo: sync error
 
 
                 // ?tmp_batch.clear()
 
-                lock_1.vset.set_last_sequence(last_sequence);
+                self.vset.set_last_sequence(last_sequence);
+            
+        }
 
-                for mut w in writtens {
-                    w.status = status.clone();
-                    w.done = true;
-                    w.cv.notify_one();
+        loop {
+            if let Some(mut ready) = self.writers.pop_front() {
+                if &ready != w {
+                    ready.status= status;
+                    ready.done = true;
+                    ready.cv.notify_one();
+                }
+                if &ready == last_writer {
+                    break;
                 }
             }
         }
 
         // Notify new head of write queue
-        if let Some(front) = self.writers.front() {
+        if !self.writers.is_empty() {
+            let front= self.writers.front().unwrap();
             front.cv.notify_one();
-        }; */
+        };
 
-        Ok(())
+        status
     }
 }
 
@@ -557,7 +572,7 @@ pub struct Writer {
     batch: Option<WriteBatch>,
     sync: bool,
     done: bool,
-    cv: Condvar,
+    cv: parking_lot::Condvar,
     status: api::Result<()>,
 }
 
@@ -567,7 +582,7 @@ impl Writer {
             batch,
             sync,
             done: false,
-            cv: Condvar::new(),
+            cv: parking_lot::Condvar::new(),
             status: Ok(()),
         }
     }
