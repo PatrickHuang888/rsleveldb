@@ -79,6 +79,18 @@ impl<'a> Drop for MutexLock<'a> {
     }
 }
 
+struct ManualCompaction {
+    level: u32,
+    begin: InternalKey,
+    end: InternalKey,
+    done: bool,
+}
+
+fn table_cache_size<C: Comparator>(sanitized_options: &Options<C>) -> usize {
+    // Reserve ten files or so for other uses and give the rest to TableCache.
+    sanitized_options.max_open_files - NUM_NON_TABLE_CACHE_FILES
+}
+
 struct DBImpl<C: Comparator + Send + Sync + 'static> {
     internal_comparator: InternalKeyComparator<C>,
     options: Options<C>,
@@ -86,7 +98,7 @@ struct DBImpl<C: Comparator + Send + Sync + 'static> {
     env: Env,
 
     // State below is protected by mutex_
-    mutex: parking_lot::RawMutex,
+    mutex: parking_lot::Mutex<()>,
 
     writers: collections::VecDeque<Writer>,
     log: log::Writer<PosixWritableFile>,
@@ -254,7 +266,7 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
         edit: &mut VersionEdit,
         base: Option<Arc<Version<C>>>,
     ) -> api::Result<()> {
-        assert!(self.mutex.is_locked());
+        /* assert!(self.mutex.is_locked());
 
         let mut mem = &mut self.mem;
         if write_imem {
@@ -312,7 +324,7 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
         let mut stats = CompactionStats::default();
         stats.micros = self.env.now_micros() - start_micros;
         stats.bytes_written = meta.file_size;
-        self.stats[level as usize].add(&stats);
+        self.stats[level as usize].add(&stats); */
         Ok(())
     }
 
@@ -346,18 +358,6 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
     fn remove_obsolete_files(&mut self) {}
 }
 
-struct ManualCompaction {
-    level: u32,
-    begin: InternalKey,
-    end: InternalKey,
-    done: bool,
-}
-
-fn table_cache_size<C: Comparator>(sanitized_options: &Options<C>) -> usize {
-    // Reserve ten files or so for other uses and give the rest to TableCache.
-    sanitized_options.max_open_files - NUM_NON_TABLE_CACHE_FILES
-}
-
 impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
     fn open(options: &Options<C>, dbname: &str) -> api::Result<Self> {
         todo!()
@@ -377,7 +377,9 @@ impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
         }
 
         // Unlock while reading from files and memtables
-        unsafe {self.mutex.unlock();}
+        unsafe {
+            self.mutex.raw().unlock();
+        }
 
         // First look in the memtable, then in the immutable memtable (if any).
         let lkey = LookupKey::new(key, snaphsot);
@@ -418,26 +420,25 @@ impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
     fn put(&mut self, options: &WriteOptions, key: &[u8], value: &[u8]) -> api::Result<()> {
         let mut batch = WriteBatch::new();
         batch.put(key, value);
-        self.write(options, batch)
+        self.write(options, Some(batch))
     }
 
     fn write(&mut self, options: &WriteOptions, updates: Option<WriteBatch>) -> api::Result<()> {
-        self.mutex.lock();
+        let w = Writer::new(updates, options.sync);
 
-        self.writers
-            .push_back(Writer::new(updates, options.sync));
+        let mut guard = self.mutex.lock();
+
+        self.writers.push_back(w);
+
         let w = self.writers.back().unwrap();
-
-        let mu = parking_lot::Mutex::const_new(self.mutex, w.done);
-        let guard= mu.lock();
-        
-        while !w.done{
+        while !w.done {
             match self.writers.front() {
                 None => {
-                    w.cv.wait(&mut guard);
-                },
+                    // ??
+                    unreachable!();
+                }
                 Some(front) => {
-                    if w!=front {
+                    if w != front {
                         w.cv.wait(&mut guard);
                     }
                 }
@@ -448,57 +449,57 @@ impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
         }
 
         // May temporarily unlock and wait.
-        let mut status = self.make_room_for_write(w.batch.is_none());
+        //let mut status = self.make_room_for_write(w.batch.is_none());
+        let mut status = Ok(());
         let mut last_sequence = self.vset.last_sequence();
-        let last_writer= w;
-        
+
         // none updates is for compactions
-        if status.is_ok() && updates.is_some() {
-                /* let (mut write_batch, writtens) =
-                    build_batch_group(lock, &mut self.writers, current);
-                write_batch.set_sequence(last_sequence + 1);
-                last_sequence += write_batch.count() as u64;
-                */
-                    unsafe{self.mutex.unlock();}
+        if status.is_ok() {
+            let mut write_batch = build_batch_group(&mut self.writers);
+            write_batch.set_sequence(last_sequence + 1);
+            last_sequence += write_batch.count() as u64;
 
-                    // Add to log and apply to memtable.  We can release the lock
-                    // during this phase since &w is currently responsible for logging
-                    // and protects against concurrent loggers and concurrent writes
-                    // into mem_.
-                    status = self.log.add_record(write_batch.contents());
-                    if options.sync {
-                        //todo:
-                        //self.log_file.sync()?;
-                    }
-                    //status = write_batch.insert_into(&mut self.mem);
-                    
-                    self.mutex.lock();
+            unsafe {
+                self.mutex.raw().unlock();
+            }
 
-                    // todo: sync error
+            // Add to log and apply to memtable.  We can release the lock
+            // during this phase since &w is currently responsible for logging
+            // and protects against concurrent loggers and concurrent writes
+            // into mem_.
+            //status = self.log.add_record(write_batch.contents());
+            //if options.sync {
+            //todo:
+            //self.log_file.sync()?;
+            //}
+            status = write_batch.insert_into(&mut self.mem);
 
+            self.mutex.lock();
 
-                // ?tmp_batch.clear()
+            // todo: sync error
 
-                self.vset.set_last_sequence(last_sequence);
-            
+            // ?tmp_batch.clear()
+
+            self.vset.set_last_sequence(last_sequence);
         }
 
         loop {
-            if let Some(mut ready) = self.writers.pop_front() {
-                if &ready != w {
-                    ready.status= status;
-                    ready.done = true;
-                    ready.cv.notify_one();
-                }
-                if &ready == last_writer {
+            if let Some(mut front) = self.writers.pop_front() {
+                if front.handled {
+                    front.status = status.clone();
+                    front.done = true;
+                    front.cv.notify_one();
+                } else {
+                    self.writers.push_front(front);
                     break;
                 }
+            } else {
+                unreachable!()
             }
         }
 
         // Notify new head of write queue
-        if !self.writers.is_empty() {
-            let front= self.writers.front().unwrap();
+        if let Some(front) = self.writers.front() {
             front.cv.notify_one();
         };
 
@@ -508,19 +509,13 @@ impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
 
 // REQUIRES: Writer list must be non-empty
 // REQUIRES: First writer must have a non-null batch
-fn build_batch_group(
-    writers_queue: &mut collections::VecDeque<Writer>,
-    first: Writer,
-) -> (WriteBatch, Vec<Writer>) {
-    //assert!(!first.batch.is_none());
-    let first_batch = first.batch.as_ref().unwrap();
-    let mut size = first_batch.byte_size();
-
-    let mut batch = WriteBatch::new();
-    batch.append(first_batch);
-    let mut writers = Vec::new();
-    let first_sync = first.sync;
-    writers.push(first);
+fn build_batch_group(writers: &mut std::collections::VecDeque<Writer>) -> WriteBatch {
+    assert!(!writers.is_empty());
+    let front = writers.front_mut().unwrap();
+    assert!(front.batch.is_some());
+    front.handled = true;
+    let result = front.batch.as_ref().unwrap().clone();
+    let mut size = result.byte_size();
 
     // Allow the group to grow up to a maximum size, but if the
     // original write is small, limit the growth so we do not slow
@@ -530,7 +525,7 @@ fn build_batch_group(
         max_size = size + (128 << 10);
     }
 
-    loop {
+    /* loop {
         match writers_queue.front() {
             None => break,
             Some(n) => {
@@ -563,9 +558,9 @@ fn build_batch_group(
                 writers.push(writers_queue.pop_front().unwrap());
             }
         }
-    }
+    } */
 
-    (batch, writers)
+    result
 }
 
 pub struct Writer {
@@ -573,6 +568,7 @@ pub struct Writer {
     sync: bool,
     done: bool,
     cv: parking_lot::Condvar,
+    handled: bool,
     status: api::Result<()>,
 }
 
@@ -582,6 +578,7 @@ impl Writer {
             batch,
             sync,
             done: false,
+            handled: false,
             cv: parking_lot::Condvar::new(),
             status: Ok(()),
         }

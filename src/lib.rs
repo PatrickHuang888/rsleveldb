@@ -234,13 +234,13 @@ pub trait DB<C: Comparator>: Sized {
     // Apply the specified updates to the database.
     // Returns OK on success, non-OK on failure.
     // Note: consider setting options.sync = true.
-    fn write(&mut self, options: &WriteOptions, updates: WriteBatch) -> api::Result<()>;
+    fn write(&mut self, options: &WriteOptions, updates: Option<WriteBatch>) -> api::Result<()>;
 }
 
 // WriteBatch header has an 8-byte sequence number followed by a 4-byte count.
 const WRITEBATCH_HEADER: usize = 12;
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone)]
 pub struct WriteBatch {
     space: Vec<u8>,
 }
@@ -356,14 +356,17 @@ impl WriteBatch {
         self.space.len()
     }
 
-    /* fn insert_into(&self, memtable: &mut db::memtable::MemTable) -> api::Result<()> {
+    fn insert_into<C: api::Comparator>(
+        &self,
+        memtable: &mut db::memtable::MemTable<C>,
+    ) -> api::Result<()> {
         let mut inserter = db::write_batch::MemTableInserter {
             sequence: self.sequence(),
             mem: memtable,
         };
         self.iterate(&mut inserter)?;
         Ok(())
-    } */
+    }
 }
 
 pub trait Handler {

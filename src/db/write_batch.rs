@@ -6,8 +6,8 @@ use crate::{
 use super::memtable::MemTable;
 
 pub(crate) struct MemTableInserter<'a, C: api::Comparator + 'static> {
-    sequence: SequenceNumber,
-    mem: &'a mut MemTable<C>,
+    pub(crate) sequence: SequenceNumber,
+    pub(crate) mem: &'a mut MemTable<C>,
 }
 impl<'a, C: api::Comparator> Handler for MemTableInserter<'a, C> {
     fn put(&mut self, key: &[u8], value: &[u8]) {
