@@ -1,6 +1,7 @@
-use std::sync::Arc;
+use std::{env, fs::FileType, sync::Arc};
 
 use api::{ByteswiseComparator, Comparator, Error, ReadOptions, WriteOptions};
+use db::filename;
 
 mod api;
 mod config;
@@ -93,6 +94,8 @@ pub struct Options<C: Comparator + 'static> {
     // If non-null, use the specified cache for blocks.
     // If null, leveldb will automatically create and use an 8MB internal cache.
     block_cache: Option<Arc<dyn Cache>>,
+
+    env: &'static dyn Env,
 }
 
 pub const NUM_NON_TABLE_CACHE_FILES: usize = 10;
@@ -110,6 +113,7 @@ impl Options<ByteswiseComparator> {
             max_file_size: 2 * 1024 * 1024,
             //info_log: None,
             block_cache: None,
+            env: &PosixEnv {},
         }
     }
 }
@@ -203,14 +207,7 @@ pub trait Cache: Sync + Send {}
 // A DB is a persistent ordered map from keys to values.
 // A DB is safe for concurrent access from multiple threads without
 // any external synchronization.
-pub trait DB<C: Comparator>: Sized {
-    // Open the database with the specified "name".
-    // Stores a pointer to a heap-allocated database in *dbptr and returns
-    // OK on success.
-    // Stores nullptr in *dbptr and returns a non-OK status on error.
-    // Caller should delete *dbptr when it is no longer needed.
-    fn open(options: &Options<C>, dbname: &str) -> api::Result<Self>;
-
+pub trait DB<C: Comparator + Send + Sync + 'static> {
     // If the database contains an entry for "key" store the
     // corresponding value in *value and return OK.
     //
@@ -235,6 +232,43 @@ pub trait DB<C: Comparator>: Sized {
     // Returns OK on success, non-OK on failure.
     // Note: consider setting options.sync = true.
     fn write(&mut self, options: &WriteOptions, updates: Option<WriteBatch>) -> api::Result<()>;
+}
+
+// Destroy the contents of the specified database.
+// Be very careful using this method.
+//
+// Note: For backwards compatibility, if DestroyDB is unable to list the
+// database files, Status::OK() will still be returned masking this failure.
+pub fn destroy_db<C: api::Comparator>(
+    dbname: &'static str,
+    options: &Options<C>,
+) -> api::Result<()> {
+    let env = options.env;
+    let lockname = lock_file_name(dbname);
+    env.lock_file(lockname)?;
+    let mut result = Ok(());
+    for filename in env.get_children(dbname) {
+        let (ok, tp) = filename::parse_file_name(filename);
+        if ok && tp != filename::FileType::DB_LOCK_FILE {
+            // Lock file will be deleted at end
+            let mut path = dbname.to_string();
+            path.push('/');
+            path.push_str(filename);
+            result = env.remove_file(path.as_str());
+        }
+    }
+    env.unlock_file(lockname);
+    env.remove_file(lockname);
+    env.remove_dir(dbname);
+    result
+}
+
+// Return the name of the lock file for the db named by
+// "dbname".  The result will be prefixed with "dbname".
+pub(crate) fn lock_file_name(dbname: &str) -> &str {
+    let mut s = dbname.to_string();
+    s.push_str("/LOCK");
+    s.as_str()
 }
 
 // WriteBatch header has an 8-byte sequence number followed by a 4-byte count.
@@ -470,26 +504,57 @@ fn extract_user_key(internal_key: &[u8]) -> &[u8] {
     return &internal_key[..internal_key.len() - 8];
 }
 
-pub struct Env {}
-impl Env {
-    pub fn new_posix_writable_file(&self, filename: &str) -> api::Result<PosixWritableFile> {
+struct PosixEnv {}
+impl Env for PosixEnv {
+    fn new_posix_random_access_file(&self, filename: &str) -> api::Result<PosixReadableFile> {
         todo!()
     }
-
+    fn new_posix_writable_file(&self, filename: &str) -> api::Result<PosixWritableFile> {
+        todo!()
+    }
+    fn now_micros(&self) -> u64 {
+        todo!()
+    }
     fn remove_file(&self, filename: &str) -> api::Result<()> {
         todo!()
     }
     fn rename_file(&self, s: &str, t: &str) -> api::Result<()> {
         todo!()
     }
-
-    pub fn new_posix_random_access_file(&self, filename: &str) -> api::Result<PosixReadableFile> {
+    fn lock_file(&self, lockname: &str) -> api::Result<()> {
+        todo!()
+    }
+    fn get_children(&self, dir:&str) -> Vec<&str> {
+        //let Ok(paths) = std::fs::read_dir(dbname)
         todo!()
     }
 
-    pub fn now_micros(&self) -> u64 {
+    fn unlock_file(&self, lockname: &str) -> api::Result<()> {
         todo!()
     }
+
+    fn remove_dir(&self, dir:&str) -> api::Result<()> {
+        todo!()
+    }
+}
+
+pub trait Env {
+    fn new_posix_writable_file(&self, filename: &str) -> api::Result<PosixWritableFile>;
+
+    fn remove_file(&self, filename: &str) -> api::Result<()>;
+    fn rename_file(&self, s: &str, t: &str) -> api::Result<()>;
+
+    fn new_posix_random_access_file(&self, filename: &str) -> api::Result<PosixReadableFile>;
+
+    fn now_micros(&self) -> u64;
+
+    fn lock_file(&self, lockname: &str) -> api::Result<()>;
+
+    fn get_children(&self, dir: &str) -> Vec<&str>;
+
+    fn unlock_file(&self, lockname: &str) -> api::Result<()>;
+
+    fn remove_dir(&self, dir:&str) -> api::Result<()>;
 }
 
 pub struct PosixReadableFile {}

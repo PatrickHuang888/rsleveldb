@@ -21,12 +21,12 @@ impl WritableFile for Oops {
     }
 }
 
-pub fn write_string_to_file_sync(env: &Env, data: &[u8], fname: &str) -> api::Result<()> {
+pub fn write_string_to_file_sync(env: &dyn Env, data: &[u8], fname: &str) -> api::Result<()> {
     do_write_string_to_file(env, data, fname, true)
 }
 
 pub fn do_write_string_to_file(
-    env: &Env,
+    env: &dyn Env,
     data: &[u8],
     fname: &str,
     should_sync: bool,

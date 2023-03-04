@@ -13,7 +13,7 @@ use crate::{
 use self::{memtable::MemTableIterator, table_cache::TableCache, version::FileMetaData};
 
 mod dbimpl;
-mod filename;
+pub(crate) mod filename;
 mod log;
 pub mod memtable;
 mod skiplist;
@@ -92,7 +92,7 @@ impl SnapshotList {
 // If no data is present in *iter, meta->file_size will be set to
 // zero, and no Table file will be produced.
 fn build_table<C: Comparator + 'static>(
-    env: &Env,
+    env: &impl Env,
     dbname: &str,
     options: &Options<C>,
     iter: &mut MemTableIterator<C>,

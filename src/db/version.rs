@@ -573,7 +573,6 @@ pub(crate) struct VersionSet<C: api::Comparator + 'static> {
     descriptor_log: Option<log::Writer<PosixWritableFile>>,
     dbname: String,
     manifest_file_number: u64,
-    env: Env,
 
     versions: Vec<Arc<Version<C>>>,
 
@@ -830,7 +829,7 @@ impl<C: api::Comparator + 'static> VersionSet<C> {
             // first call to LogAndApply (when opening the database).
             new_manifest_file =
                 filename::descriptor_file_name(&self.dbname, self.manifest_file_number);
-            let log_file = self.env.new_posix_writable_file(&new_manifest_file)?;
+            let log_file = self.options.env.new_posix_writable_file(&new_manifest_file)?;
             self.descriptor_log = Some(log::Writer::new(log_file));
             r = self.write_snapshot();
         }
@@ -855,7 +854,7 @@ impl<C: api::Comparator + 'static> VersionSet<C> {
         // If we just created a new descriptor file, install it by writing a
         // new CURRENT file that points to it.
         if r.is_ok() && !new_manifest_file.is_empty() {
-            set_current_file(&self.env, self.dbname.as_str(), self.manifest_file_number)?;
+            set_current_file(self.options.env, self.dbname.as_str(), self.manifest_file_number)?;
         }
 
         mu.lock();

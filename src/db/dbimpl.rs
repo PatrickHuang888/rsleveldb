@@ -95,7 +95,6 @@ struct DBImpl<C: Comparator + Send + Sync + 'static> {
     internal_comparator: InternalKeyComparator<C>,
     options: Options<C>,
     dbname: String,
-    env: Env,
 
     // State below is protected by mutex_
     mutex: parking_lot::Mutex<()>,
@@ -126,6 +125,10 @@ struct DBImpl<C: Comparator + Send + Sync + 'static> {
 }
 
 impl<C: api::Comparator + Send + Sync> DBImpl<C> {
+    fn open(options: &Options<C>, dbname: &str) -> api::Result<Self> {
+        todo!()
+    }
+
     /* fn background_call(&mut self) {
         let _lock = MutexLock::new(&self.mutex);
 
@@ -359,10 +362,6 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
 }
 
 impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
-    fn open(options: &Options<C>, dbname: &str) -> api::Result<Self> {
-        todo!()
-    }
-
     fn get(&mut self, options: &ReadOptions, key: &[u8], value: &mut Vec<u8>) -> api::Result<()> {
         self.mutex.lock();
 
@@ -606,5 +605,23 @@ impl CompactionStats {
         self.micros += c.micros;
         self.bytes_read += c.bytes_read;
         self.bytes_written += c.bytes_written;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+
+    use crate::{api::ByteswiseComparator, DB};
+
+    struct DBTest {
+        db: Box<dyn DB<ByteswiseComparator>>,
+        dbname: &'static str,
+    }
+
+    impl DBTest {
+        fn new() -> Self {
+            let tmp_dir = env::temp_dir().to_str();
+        }
     }
 }

@@ -10,7 +10,6 @@ use super::{filename::table_file_name, memtable::InternalKeyComparator};
 
 pub(crate) struct TableCache<C: api::Comparator + 'static> {
     dbname: &'static str,
-    env: Env,
 
     options: Options<C>,
     icmp: InternalKeyComparator<C>,
@@ -74,7 +73,7 @@ impl<C: api::Comparator> TableCache<C> {
     ) -> api::Result<Table<PosixReadableFile, C>> {
         // todo: cache lookup
         let filename = table_file_name(self.dbname, file_number);
-        let file = self.env.new_posix_random_access_file(filename)?;
+        let file = self.options.env.new_posix_random_access_file(filename)?;
         let table = crate::table::table::Table::open(&self.options, file, file_size)?;
         Ok(table)
     }

@@ -14,7 +14,7 @@ pub fn descriptor_file_name(dbname: &str, number: u64) -> String {
     format!("{}/MANIFEST-{:06}", dbname, number)
 }
 
-pub fn set_current_file(env: &Env, dbname: &str, descriptor_number: u64) -> api::Result<()> {
+pub fn set_current_file(env: &dyn Env, dbname: &str, descriptor_number: u64) -> api::Result<()> {
     // Remove leading "dbname/" and add newline to manifest file name
     let manifest = descriptor_file_name(dbname, descriptor_number);
     let mut contents = manifest.clone();
@@ -44,4 +44,29 @@ fn temp_file_name(dbname: &str, number: u64) -> String {
 
 fn make_file_name(dbname: &str, number: u64, suffix: &str) -> String {
     format!("{}/{:06}.{}", dbname, number, suffix)
+}
+
+#[derive(PartialEq)]
+pub(crate) enum FileType {
+    LOG_FILE,
+    DB_LOCK_FILE,
+    TABLE_FILE,
+    DESCRIPTOR_FILE,
+    CURRENT_FILE,
+    TEMP_FILE,
+    INFO_LOG_FILE,
+}
+
+// If filename is a leveldb file, store the type of the file in *type.
+// The number encoded in the filename is stored in *number.  If the
+// filename was successfully parsed, returns true.  Else return false.
+// Owned filenames have the form:
+//    dbname/CURRENT
+//    dbname/LOCK
+//    dbname/LOG
+//    dbname/LOG.old
+//    dbname/MANIFEST-[0-9]+
+//    dbname/[0-9]+.(log|sst|ldb)
+pub(crate) fn parse_file_name(filename: &str) -> (bool, FileType) {
+    todo!()
 }

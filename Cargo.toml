@@ -11,6 +11,7 @@ crc = "2.1.0"
 rand = "0.8.5"
 snap = "1"
 parking_lot = "0.12"
+file-lock = "2.1.9"
 
 
 [dev-dependencies]
