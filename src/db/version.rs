@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use parking_lot::lock_api::RawMutex;
 
@@ -822,15 +822,19 @@ impl<C: api::Comparator + 'static> VersionSet<C> {
 
         // Initialize new descriptor log file if necessary by creating
         // a temporary file that contains a snapshot of the current version.
-        let mut new_manifest_file = "".to_string();
+        let mut new_manifest_file = None;
         let mut r = Ok(());
         if self.descriptor_log.is_none() {
             // No reason to unlock *mu here since we only hit this path in the
             // first call to LogAndApply (when opening the database).
-            new_manifest_file =
+            let manifest_file =
                 filename::descriptor_file_name(&self.dbname, self.manifest_file_number);
-            let log_file = self.options.env.new_posix_writable_file(&new_manifest_file)?;
+            let log_file = self
+                .options
+                .env
+                .new_posix_writable_file(manifest_file.as_path())?;
             self.descriptor_log = Some(log::Writer::new(log_file));
+            new_manifest_file = Some(manifest_file);
             r = self.write_snapshot();
         }
 
@@ -853,8 +857,12 @@ impl<C: api::Comparator + 'static> VersionSet<C> {
 
         // If we just created a new descriptor file, install it by writing a
         // new CURRENT file that points to it.
-        if r.is_ok() && !new_manifest_file.is_empty() {
-            set_current_file(self.options.env, self.dbname.as_str(), self.manifest_file_number)?;
+        if r.is_ok() && !new_manifest_file.is_none() {
+            set_current_file(
+                self.options.env,
+                self.dbname.as_str(),
+                self.manifest_file_number,
+            )?;
         }
 
         mu.lock();

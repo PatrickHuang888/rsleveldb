@@ -621,7 +621,8 @@ mod tests {
 
     impl DBTest {
         fn new() -> Self {
-            let tmp_dir = env::temp_dir().to_str();
+            todo!()
+            //let tmp_dir = env::temp_dir().to_str();
         }
     }
 }

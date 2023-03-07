@@ -103,7 +103,7 @@ fn build_table<C: Comparator + 'static>(
     iter.seek_to_first()?;
 
     let fname = filename::table_file_name(dbname, meta.number);
-    let file = env.new_posix_writable_file(fname)?;
+    let file = env.new_posix_writable_file(fname.as_path())?;
 
     let mut builder = TableBuilder::new(file, options.clone());
     meta.smallest.decode_from(iter.key().unwrap());

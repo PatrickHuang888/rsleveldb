@@ -1,7 +1,13 @@
-use std::{env, fs::FileType, sync::Arc};
+use std::{
+    env,
+    fs::{self, FileType},
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use api::{ByteswiseComparator, Comparator, Error, ReadOptions, WriteOptions};
 use db::filename;
+use file_lock::{FileLock, FileOptions};
 
 mod api;
 mod config;
@@ -245,30 +251,38 @@ pub fn destroy_db<C: api::Comparator>(
 ) -> api::Result<()> {
     let env = options.env;
     let lockname = lock_file_name(dbname);
-    env.lock_file(lockname)?;
+    let lock = env.lock_file(lockname.as_path())?;
     let mut result = Ok(());
-    for filename in env.get_children(dbname) {
-        let (ok, tp) = filename::parse_file_name(filename);
-        if ok && tp != filename::FileType::DB_LOCK_FILE {
+    let mut path = PathBuf::new();
+
+    let db_dir = Path::new(dbname);
+
+    let files = env.get_children(db_dir);
+    if files.is_err() {
+        // Ignore error in case directory does not exist
+        return Ok(());
+    }
+    for f in files.unwrap() {
+        let (tp, _) = filename::parse_file_name(f.as_path())?;
+        if tp != filename::FileType::DB_LOCK_FILE {
             // Lock file will be deleted at end
-            let mut path = dbname.to_string();
-            path.push('/');
-            path.push_str(filename);
-            result = env.remove_file(path.as_str());
+            path.clear();
+            path.push(db_dir);
+            path.push(&f);
+            result = env.remove_file(&path);
         }
     }
-    env.unlock_file(lockname);
-    env.remove_file(lockname);
-    env.remove_dir(dbname);
+    let _ = env.unlock_file(&lock);
+    let _ = env.remove_file(&lockname);
+    let _ = env.remove_dir(db_dir);
     result
 }
 
 // Return the name of the lock file for the db named by
 // "dbname".  The result will be prefixed with "dbname".
-pub(crate) fn lock_file_name(dbname: &str) -> &str {
-    let mut s = dbname.to_string();
-    s.push_str("/LOCK");
-    s.as_str()
+pub(crate) fn lock_file_name(dbname: &str) -> PathBuf {
+    let p = Path::new(dbname);
+    p.join("LOCK")
 }
 
 // WriteBatch header has an 8-byte sequence number followed by a 4-byte count.
@@ -506,55 +520,66 @@ fn extract_user_key(internal_key: &[u8]) -> &[u8] {
 
 struct PosixEnv {}
 impl Env for PosixEnv {
-    fn new_posix_random_access_file(&self, filename: &str) -> api::Result<PosixReadableFile> {
+    fn new_posix_random_access_file(&self, filename: &Path) -> api::Result<PosixReadableFile> {
         todo!()
     }
-    fn new_posix_writable_file(&self, filename: &str) -> api::Result<PosixWritableFile> {
+    fn new_posix_writable_file(&self, filename: &Path) -> api::Result<PosixWritableFile> {
         todo!()
     }
     fn now_micros(&self) -> u64 {
         todo!()
     }
-    fn remove_file(&self, filename: &str) -> api::Result<()> {
+    fn remove_file(&self, filename: &Path) -> api::Result<()> {
+        fs::remove_file(filename)?;
+        Ok(())
+    }
+    fn rename_file(&self, s: &Path, t: &Path) -> api::Result<()> {
         todo!()
     }
-    fn rename_file(&self, s: &str, t: &str) -> api::Result<()> {
-        todo!()
-    }
-    fn lock_file(&self, lockname: &str) -> api::Result<()> {
-        todo!()
-    }
-    fn get_children(&self, dir:&str) -> Vec<&str> {
-        //let Ok(paths) = std::fs::read_dir(dbname)
-        todo!()
-    }
-
-    fn unlock_file(&self, lockname: &str) -> api::Result<()> {
-        todo!()
+    fn lock_file(&self, lockname: &Path) -> api::Result<FileLock> {
+        let should_block = true;
+        let options = FileOptions::new().write(true).create(true);
+        let lock = FileLock::lock(lockname, should_block, options)?;
+        Ok(lock)
     }
 
-    fn remove_dir(&self, dir:&str) -> api::Result<()> {
-        todo!()
+    fn get_children(&self, dir: &Path) -> api::Result<Vec<PathBuf>> {
+        let mut result = vec![];
+        for entry in std::fs::read_dir(dir)? {
+            result.push(entry?.path())
+        }
+        Ok(result)
+    }
+
+    fn unlock_file(&self, lock: &FileLock) -> api::Result<()> {
+        lock.unlock()?;
+        Ok(())
+    }
+
+    fn remove_dir(&self, dir: &Path) -> api::Result<()> {
+        fs::remove_dir(dir)?;
+        Ok(())
     }
 }
 
 pub trait Env {
-    fn new_posix_writable_file(&self, filename: &str) -> api::Result<PosixWritableFile>;
+    fn new_posix_writable_file(&self, filename: &Path) -> api::Result<PosixWritableFile>;
 
-    fn remove_file(&self, filename: &str) -> api::Result<()>;
-    fn rename_file(&self, s: &str, t: &str) -> api::Result<()>;
+    fn remove_file(&self, filename: &Path) -> api::Result<()>;
 
-    fn new_posix_random_access_file(&self, filename: &str) -> api::Result<PosixReadableFile>;
+    fn rename_file(&self, s: &Path, t: &Path) -> api::Result<()>;
+
+    fn new_posix_random_access_file(&self, filename: &Path) -> api::Result<PosixReadableFile>;
 
     fn now_micros(&self) -> u64;
 
-    fn lock_file(&self, lockname: &str) -> api::Result<()>;
+    fn lock_file(&self, lockname: &Path) -> api::Result<FileLock>;
 
-    fn get_children(&self, dir: &str) -> Vec<&str>;
+    fn get_children(&self, dir: &Path) -> api::Result<Vec<PathBuf>>;
 
-    fn unlock_file(&self, lockname: &str) -> api::Result<()>;
+    fn unlock_file(&self, lock: &FileLock) -> api::Result<()>;
 
-    fn remove_dir(&self, dir:&str) -> api::Result<()>;
+    fn remove_dir(&self, dir: &Path) -> api::Result<()>;
 }
 
 pub struct PosixReadableFile {}

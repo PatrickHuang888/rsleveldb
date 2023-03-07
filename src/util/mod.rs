@@ -1,4 +1,4 @@
-use std::{cell::RefCell, fmt, rc::Rc, sync::Arc};
+use std::{cell::RefCell, fmt, path::Path, rc::Rc, sync::Arc};
 
 use crc::{Crc, CRC_32_ISCSI};
 use rand::{rngs::ThreadRng, thread_rng, Rng};
@@ -21,14 +21,14 @@ impl WritableFile for Oops {
     }
 }
 
-pub fn write_string_to_file_sync(env: &dyn Env, data: &[u8], fname: &str) -> api::Result<()> {
+pub fn write_string_to_file_sync(env: &dyn Env, data: &[u8], fname: &Path) -> api::Result<()> {
     do_write_string_to_file(env, data, fname, true)
 }
 
 pub fn do_write_string_to_file(
     env: &dyn Env,
     data: &[u8],
-    fname: &str,
+    fname: &Path,
     should_sync: bool,
 ) -> api::Result<()> {
     let mut file = env.new_posix_writable_file(fname)?;
