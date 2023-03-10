@@ -9,7 +9,7 @@ use crate::{
 use super::{filename::table_file_name, memtable::InternalKeyComparator};
 
 pub(crate) struct TableCache<C: api::Comparator + 'static> {
-    dbname: &'static str,
+    dbname: String,
 
     options: Options<C>,
     icmp: InternalKeyComparator<C>,
@@ -19,8 +19,13 @@ pub(crate) struct TableCache<C: api::Comparator + 'static> {
 }
 
 impl<C: api::Comparator> TableCache<C> {
-    pub(crate) fn new(dbname: &str, options: &Options<C>, entries: usize) -> Self {
-        todo!()
+    pub(crate) fn new(dbname: String, options: &Options<C>) -> Self {
+        TableCache {
+            dbname,
+            options: options.clone(),
+            icmp: InternalKeyComparator::new(options.comparator),
+            table: None,
+        }
     }
 
     // If a seek to internal key "k" in specified file finds an entry,
@@ -72,7 +77,7 @@ impl<C: api::Comparator> TableCache<C> {
         file_size: u64,
     ) -> api::Result<Table<PosixReadableFile, C>> {
         // todo: cache lookup
-        let filename = table_file_name(self.dbname, file_number);
+        let filename = table_file_name(&self.dbname, file_number);
         let file = self
             .options
             .env

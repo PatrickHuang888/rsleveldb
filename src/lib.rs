@@ -40,6 +40,9 @@ pub struct Options<C: Comparator + 'static> {
     // efficiently detect that and will switch to uncompressed mode.
     compression: CompressionType,
 
+    // If true, the database will be created if it is missing.
+    create_if_missing: bool,
+
     // Comparator used to define the order of keys in the table.
     // Default: a comparator that uses lexicographic byte-wise ordering
     //
@@ -117,7 +120,7 @@ impl Options<ByteswiseComparator> {
             max_open_files: 1000,
             write_buffer_size: 4 * 1024 * 1024,
             max_file_size: 2 * 1024 * 1024,
-            //info_log: None,
+            create_if_missing: false,
             block_cache: None,
             env: &PosixEnv {},
         }
@@ -247,6 +250,7 @@ pub trait DB<C: Comparator + Send + Sync + 'static> {
 // database files, Status::OK() will still be returned masking this failure.
 pub fn destroy_db<C: api::Comparator>(
     dbname: &'static str,
+    home_path: &Path,
     options: &Options<C>,
 ) -> api::Result<()> {
     let env = options.env;

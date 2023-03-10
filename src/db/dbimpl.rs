@@ -1,8 +1,9 @@
 use std::cell::RefCell;
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::{atomic, Arc, Condvar, Mutex, MutexGuard};
 
-use std::collections::{self};
+use std::collections::{self, VecDeque};
 use std::thread;
 
 use parking_lot::lock_api::RawMutex;
@@ -96,37 +97,51 @@ struct DBImpl<C: Comparator + Send + Sync + 'static> {
     options: Options<C>,
     dbname: String,
 
+    // table_cache_ provides its own synchronization
+    //table_cache: Arc<TableCache<C>>,
+
     // State below is protected by mutex_
     mutex: parking_lot::Mutex<()>,
 
-    writers: collections::VecDeque<Writer>,
-    log: log::Writer<PosixWritableFile>,
+    writers: VecDeque<Writer>,
+    //log: log::Writer<PosixWritableFile>,
     //log_file: Arc<RefCell<W>>,
-    // table_cache_ provides its own synchronization
-    table_cache: TableCache<C>,
-
     vset: VersionSet<C>,
 
     mem: MemTable<C>,
     imem: Option<MemTable<C>>,
 
     shutting_down: atomic::AtomicBool,
-    logfile_number: u64,
+    //logfile_number: u64,
     // Set of table files to protect from deletion because they are
     // part of ongoing compactions.
-    pending_outputs: Vec<u64>,
-    stats: [CompactionStats; config::NUM_LEVELS as usize],
-    mannual_compaction: Option<ManualCompaction>,
+    //pending_outputs: Vec<u64>,
+    //stats: [CompactionStats; config::NUM_LEVELS as usize],
+    //mannual_compaction: Option<ManualCompaction>,
     // Has a background compaction been scheduled or is running?
-    background_compaction_scheduled: bool,
-    background_work_finished_signal: parking_lot::Condvar,
+    //background_compaction_scheduled: bool,
+    //background_work_finished_signal: parking_lot::Condvar,
     // Have we encountered a background error in paranoid mode?
-    bg_error: Option<api::Error>,
+    //bg_error: Option<api::Error>,
 }
 
 impl<C: api::Comparator + Send + Sync> DBImpl<C> {
-    fn open(options: &Options<C>, dbname: &str) -> api::Result<Self> {
-        todo!()
+    fn new(options: &Options<C>, home_path: &Path, dbname: &str) -> Self {
+        let dbname = dbname.to_string();
+        //let tcache = Arc::new(TableCache::new(dbname.clone(), options));
+        //todo: options sanitize
+        DBImpl {
+            dbname: dbname.clone(),
+            internal_comparator: InternalKeyComparator::new(options.comparator),
+            options: options.clone(),
+            mutex: parking_lot::Mutex::new(()),
+            writers: VecDeque::new(),
+            mem: MemTable::new(InternalKeyComparator::new(options.comparator)),
+            imem: None,
+            shutting_down: atomic::AtomicBool::new(true),
+            //table_cache: todo!(),
+            vset: VersionSet::new(dbname, options),
+        }
     }
 
     /* fn background_call(&mut self) {
@@ -175,7 +190,7 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
     fn background_compaction(&mut self) {
         assert!(self.mutex.is_locked());
 
-        if self.imem.is_some() {
+        /* if self.imem.is_some() {
             self.compact_memtable();
             return;
         }
@@ -198,9 +213,9 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
             } */
         } else {
             oc = self.vset.pick_compaction();
-        }
+        } */
 
-        match &mut oc {
+        /* match &mut oc {
             None => {
                 // Nothing to do
             }
@@ -225,7 +240,7 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
                     self.remove_obsolete_files();
                 } */
             }
-        }
+        }*/
     }
 
     fn compact_memtable(&mut self) {
@@ -233,9 +248,9 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
         assert!(self.imem.is_some());
 
         // Save the contents of the memtable as a new Table
-        let mut edit = VersionEdit::default();
+        /* let mut edit = VersionEdit::default();
         let base = self.vset.current().clone();
-        let mut r = self.write_level0_table(true, &mut edit, Some(base));
+        let mut r = self.write_level0_table(true, &mut edit, Some(base)); */
 
         /* if r.is_ok() && self.shutting_down.load(atomic::Ordering::Acquire) {
             r = Err(api::Error::IOError(
@@ -506,6 +521,19 @@ impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
     }
 }
 
+pub fn open<C: api::Comparator + Send + Sync + 'static>(
+    options: &Options<C>,
+    home_path: &Path,
+    dbname: &str,
+) -> api::Result<impl DB<C>> {
+    let db = DBImpl::new(options, home_path, dbname);
+    let _ = db.mutex.lock();
+    //todo: recover
+
+    unsafe { db.mutex.raw().unlock() };
+    Ok(db)
+}
+
 // REQUIRES: Writer list must be non-empty
 // REQUIRES: First writer must have a non-null batch
 fn build_batch_group(writers: &mut std::collections::VecDeque<Writer>) -> WriteBatch {
@@ -612,7 +640,11 @@ impl CompactionStats {
 mod tests {
     use std::env;
 
-    use crate::{api::ByteswiseComparator, DB};
+    use crate::{api::{ByteswiseComparator, ReadOptions, self}, destroy_db, Options, DB};
+
+    use super::open;
+
+    const TEST_DBNAME: &'static str = "db_test";
 
     struct DBTest {
         db: Box<dyn DB<ByteswiseComparator>>,
@@ -621,8 +653,40 @@ mod tests {
 
     impl DBTest {
         fn new() -> Self {
-            todo!()
-            //let tmp_dir = env::temp_dir().to_str();
+            let tmp_dir = env::temp_dir();
+            let options = Options::default();
+            let _ = destroy_db(TEST_DBNAME, &tmp_dir, &options);
+            let db = open(&options, &tmp_dir, TEST_DBNAME);
+            assert!(db.is_ok());
+            DBTest {
+                db: Box::new(db.unwrap()),
+                dbname: TEST_DBNAME,
+            }
         }
+
+        fn get(&mut self, k:&str) -> String {
+            let options= ReadOptions::default();
+            let mut v= vec![];
+            match self.db.get(&options, k.as_bytes(), &mut v) {
+                Ok(())=> {
+
+                },
+                Err(e) => {
+                    if e==api::Error::NotFound {
+                        return "NOT_FOUND".to_string();
+                    }else {
+                        return e.to_string();
+                    }
+                }
+            }
+            std::str::from_utf8(&v).unwrap().to_string()
+        }
+    }
+
+    #[test]
+    fn test_empty() {
+        let mut test=DBTest::new();
+        let v= test.get("foot");
+        assert_eq!(&v, "NOT_FOUND");
     }
 }

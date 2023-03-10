@@ -84,27 +84,28 @@ pub(crate) struct Version<C: api::Comparator + 'static> {
     /* next: Option<Rc<RefCell<Version>>>,
     prev: Option<Rc<RefCell<Version>>>, */
     index: i32,
-    table_cache: Arc<TableCache<C>>,
+    //table_cache: Arc<TableCache<C>>,
 }
 
 impl<C: api::Comparator + 'static> Version<C> {
-    fn new(icmp: InternalKeyComparator<C>) -> Self {
-        /* Version {
-            user_cmp,
+    fn new(options: &Options<C>, icmp: InternalKeyComparator<C>) -> Self {
+        Version {
+            options: options.clone(),
+            icmp,
             files: Default::default(),
             file_to_compact: None,
             file_to_compact_level: -1,
             compaction_score: -1.,
             compaction_level: -1,
             index: -1,
-        } */
-        todo!()
+            //table_cache,
+        }
     }
 
     // Lookup the value for key.  If found, store it in *val and
     // return OK.  Else return a non-OK status.  Fills *stats.
     // REQUIRES: lock is not held
-    pub fn get(
+    /* pub fn get(
         &self,
         options: &ReadOptions,
         key: &LookupKey,
@@ -150,7 +151,7 @@ impl<C: api::Comparator + 'static> Version<C> {
             None => Err(api::Error::NotFound),
             Some(f) => Ok((f, level)),
         }
-    }
+    } */
 
     // Call func(arg, level, f) for every file that overlaps user_key in
     // order from newest to oldest.  If an invocation of func returns
@@ -578,9 +579,31 @@ pub(crate) struct VersionSet<C: api::Comparator + 'static> {
 
     options: Options<C>,
     icmp: InternalKeyComparator<C>,
+    //table_cache:Arc<TableCache<C>>,
 }
 
 impl<C: api::Comparator + 'static> VersionSet<C> {
+    pub(crate) fn new(dbname: String, options: &Options<C>) -> Self {
+        let compact_pointer = [vec![], vec![], vec![], vec![], vec![], vec![], vec![]];
+        let mut vset = VersionSet {
+            last_sequence: 0,
+            current_index: -1,
+            log_number: 0,
+            next_file_number: 2,
+            prev_log_number: 0,
+            compact_pointer,
+            descriptor_log: None,
+            dbname,
+            manifest_file_number: 0,
+            versions: vec![],
+            options: options.clone(),
+            icmp: InternalKeyComparator::new(options.comparator),
+        };
+        let mut v = Version::new(options, vset.icmp.clone());
+        vset.append_version(v);
+        vset
+    }
+
     // Returns true iff some level needs a compaction.
     pub(crate) fn needs_compaction(&self) -> bool {
         let v = &self.versions[self.current_index as usize];
@@ -812,7 +835,7 @@ impl<C: api::Comparator + 'static> VersionSet<C> {
         edit.next_file_number = Some(self.next_file_number);
         edit.last_sequence = Some(self.last_sequence);
 
-        let mut v = Version::new(self.icmp.clone());
+        let mut v = Version::new(&self.options, self.icmp.clone());
         {
             let mut builder = VersionSetBuilder::new(self, self.current_index as usize);
             builder.apply(edit);
