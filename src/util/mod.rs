@@ -160,16 +160,14 @@ pub fn encode_fixed32(dst: &mut [u8], v: u32) {
 
 pub fn decode_fixed64(src: &[u8]) -> u64 {
     assert_eq!(src.len(), 8);
-    let mut value: u64 = 0;
-    value = src[0] as u64
+    src[0] as u64
         | (src[1] as u64) << 8
         | (src[2] as u64) << 16
         | (src[3] as u64) << 24
         | (src[4] as u64) << 32
         | (src[5] as u64) << 40
         | (src[6] as u64) << 48
-        | (src[7] as u64) << 56;
-    value
+        | (src[7] as u64) << 56
 }
 
 pub fn decode_fixed32(src: &[u8]) -> u32 {

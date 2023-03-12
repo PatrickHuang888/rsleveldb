@@ -306,8 +306,10 @@ impl WriteBatch {
 
     // Store the mapping "key->value" in the database.
     pub fn put(&mut self, key: &[u8], value: &[u8]) {
-        //self.space.push(ValueType::TypeValue)
-        todo!()
+        self.set_count(self.count() + 1);
+        self.space.push(ValueType::TypeValue as u8);
+        util::put_length_prefixed_slice(&mut self.space, key);
+        util::put_length_prefixed_slice(&mut self.space, value);
     }
 
     // Copies the operations in "source" to this batch.
@@ -393,13 +395,15 @@ impl WriteBatch {
     }
 
     fn set_sequence(&mut self, seq: SequenceNumber) {
-        util::encode_fixed64(&mut self.space[0..7], seq);
+        util::encode_fixed64(&mut self.space[0..8], seq);
     }
 
+    // Return the number of entries in the batch.
     fn count(&self) -> u32 {
         util::decode_fixed32(&self.space[8..12])
     }
 
+    // Set the count for the number of entries in the batch.
     fn set_count(&mut self, n: u32) {
         util::encode_fixed32(&mut self.space[8..12], n)
     }

@@ -175,6 +175,7 @@ impl Error {
     }
 }
 
+#[derive(Default)]
 pub struct WriteOptions {
     // If true, the write will be flushed from the operating system
     // buffer cache (by calling WritableFile::Sync()) before the write

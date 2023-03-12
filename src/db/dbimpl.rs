@@ -378,7 +378,7 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
 
 impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
     fn get(&mut self, options: &ReadOptions, key: &[u8], value: &mut Vec<u8>) -> api::Result<()> {
-        self.mutex.lock();
+        let _ = self.mutex.lock();
 
         let snaphsot: SequenceNumber;
         match &options.snapshot {
@@ -409,14 +409,14 @@ impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
                         /* let current = self.vset.current();
                         let stats = current.get(options, &lkey, value)?; */
 
-                        self.mutex.lock();
+                        let _ = self.mutex.lock();
 
                         // todo:
                         //if self.vset.current_mut().unwrap().update_stats(stats) {
-                        todo!();
                         //self.maybe_schedmule_compaction();
                         //}
                         //return Ok(());
+                        return Err(api::Error::NotFound);
                     }
                 }
                 _ => {
@@ -445,15 +445,17 @@ impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
         self.writers.push_back(w);
 
         let w = self.writers.back().unwrap();
-        while !w.done {
+        loop {
             match self.writers.front() {
                 None => {
                     // ??
                     unreachable!();
                 }
                 Some(front) => {
-                    if w != front {
+                    if !w.done && w != front {
                         w.cv.wait(&mut guard);
+                    } else {
+                        break;
                     }
                 }
             }
@@ -488,7 +490,7 @@ impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
             //}
             status = write_batch.insert_into(&mut self.mem);
 
-            self.mutex.lock();
+            let _ = self.mutex.lock();
 
             // todo: sync error
 
@@ -498,17 +500,17 @@ impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
         }
 
         loop {
-            if let Some(mut front) = self.writers.pop_front() {
+            if let Some(mut front) = self.writers.front_mut() {
                 if front.handled {
                     front.status = status.clone();
                     front.done = true;
                     front.cv.notify_one();
+                    let _ = self.writers.pop_front();
                 } else {
-                    self.writers.push_front(front);
                     break;
                 }
             } else {
-                unreachable!()
+                break; // no write
             }
         }
 
@@ -640,7 +642,10 @@ impl CompactionStats {
 mod tests {
     use std::env;
 
-    use crate::{api::{ByteswiseComparator, ReadOptions, self}, destroy_db, Options, DB};
+    use crate::{
+        api::{self, ByteswiseComparator, ReadOptions, WriteOptions},
+        destroy_db, Options, DB,
+    };
 
     use super::open;
 
@@ -664,29 +669,40 @@ mod tests {
             }
         }
 
-        fn get(&mut self, k:&str) -> String {
-            let options= ReadOptions::default();
-            let mut v= vec![];
+        fn get(&mut self, k: &str) -> String {
+            let options = ReadOptions::default();
+            let mut v = vec![];
             match self.db.get(&options, k.as_bytes(), &mut v) {
-                Ok(())=> {
-
-                },
+                Ok(()) => {}
                 Err(e) => {
-                    if e==api::Error::NotFound {
+                    if e == api::Error::NotFound {
                         return "NOT_FOUND".to_string();
-                    }else {
+                    } else {
                         return e.to_string();
                     }
                 }
             }
             std::str::from_utf8(&v).unwrap().to_string()
         }
+
+        fn put(&mut self, k: &str, v: &str) -> api::Result<()> {
+            self.db
+                .put(&WriteOptions::default(), k.as_bytes(), v.as_bytes())
+        }
     }
 
     #[test]
     fn test_empty() {
-        let mut test=DBTest::new();
-        let v= test.get("foot");
+        let mut test = DBTest::new();
+        let v = test.get("foo");
         assert_eq!(&v, "NOT_FOUND");
+    }
+
+    #[test]
+    fn test_empty_key() {
+        let mut test = DBTest::new();
+        let r = test.put("", "v1");
+        assert!(r.is_ok(), "result {:?}", r.err().unwrap());
+        assert_eq!("v1", test.get(""));
     }
 }

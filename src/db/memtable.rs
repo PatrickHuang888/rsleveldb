@@ -16,7 +16,7 @@ use super::skiplist::{Comparator as SkipListComparator, Iterator, SkipList, Skip
 type Table<C> = SkipList<KeyComparator<C>, Vec<u8>>;
 type TableIterator<'l, C> = SkipListIterator<'l, KeyComparator<C>, Vec<u8>>;
 
-const LookupKeySpaceSize: usize = 200;
+const LOOKUP_KEY_SPACE_SIZE: usize = 200;
 
 pub struct LookupKey {
     // We construct a char array of the form:
@@ -42,14 +42,14 @@ const VALUE_TYPE_FOR_SEEK: ValueType = ValueType::TypeValue;
 impl LookupKey {
     pub fn new(user_key: &[u8], s: SequenceNumber) -> Self {
         let mut needed = user_key.len() + 13; // A conservative estimate
-        if needed <= LookupKeySpaceSize {
-            needed = LookupKeySpaceSize;
+        if needed <= LOOKUP_KEY_SPACE_SIZE {
+            needed = LOOKUP_KEY_SPACE_SIZE;
         }
         let mut space = Vec::with_capacity(needed);
         util::put_varint32(&mut space, (user_key.len() + 8) as u32);
         let kstart = space.len();
         space.extend_from_slice(user_key);
-        util::encode_fixed64(&mut space, pack_sequence_and_type(s, VALUE_TYPE_FOR_SEEK));
+        util::put_fixed64(&mut space, pack_sequence_and_type(s, VALUE_TYPE_FOR_SEEK));
         let end = space.len();
         LookupKey { kstart, end, space }
     }

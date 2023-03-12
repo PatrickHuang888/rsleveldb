@@ -812,7 +812,7 @@ mod test {
 
     #[test]
     fn test_random_read() {
-        let N = 500;
+        const N: i32 = 500;
         let mut write_rnd = util::Random::new(301);
         let mut test = LogTest::new();
         for i in 0..N {
