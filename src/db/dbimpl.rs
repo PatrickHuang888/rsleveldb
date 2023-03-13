@@ -689,6 +689,10 @@ mod tests {
             self.db
                 .put(&WriteOptions::default(), k.as_bytes(), v.as_bytes())
         }
+
+        fn delete(&mut self, k:&str) -> api::Result<()> {
+            self.db.delete(&WriteOptions::default(), k.as_bytes())
+        }
     }
 
     #[test]
@@ -730,6 +734,18 @@ mod tests {
         test.put("foo", "v3")?;
         assert_eq!("v2", test.get("bar"));
         assert_eq!("v3", test.get("foo"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_put_delete_get() -> api::Result<()> {
+        let mut test = DBTest::new();
+        test.put("foo", "v1")?;
+        assert_eq!("v1", test.get("foo"));
+        test.put("foo", "v2")?;
+        assert_eq!("v2", test.get("foo"));
+        test.delete("foo")?;
+        assert_eq!("NOT_FOUND", test.get("foo"));
         Ok(())
     }
 }
