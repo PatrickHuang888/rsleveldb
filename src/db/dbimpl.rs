@@ -704,7 +704,19 @@ mod tests {
         let r = test.put("", "v1");
         assert!(r.is_ok(), "result {:?}", r.err().unwrap());
         assert_eq!("v1", test.get(""));
-        let r = test.put("", "v2");
+        let _ = test.put("", "v2");
         assert_eq!("v2", test.get(""));
+    }
+
+    #[test]
+    fn test_empty_value() -> api::Result<()>{
+        let mut test = DBTest::new();
+        test.put("key", "v1")?;
+        assert_eq!("v1", test.get("key"));
+        test.put("key", "")?;
+        assert_eq!("", test.get("key"));
+        test.put("key", "v2")?;
+        assert_eq!("v2", test.get("key"));
+        Ok(())
     }
 }
