@@ -326,7 +326,9 @@ impl WriteBatch {
 
     // If the database contains a mapping for "key", erase it.  Else do nothing.
     pub fn delete(&mut self, key: &[u8]) {
-        todo!()
+        self.set_count(self.count() + 1);
+        self.space.push(ValueType::TypeDeletion as u8);
+        util::put_length_prefixed_slice(&mut self.space, key);
     }
 
     // Clear all updates buffered in this batch.

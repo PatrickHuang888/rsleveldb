@@ -428,7 +428,9 @@ impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
     }
 
     fn delete(&mut self, options: &WriteOptions, key: &[u8]) -> api::Result<()> {
-        todo!()
+        let mut batch = WriteBatch::new();
+        batch.delete(key);
+        self.write(options, Some(batch))
     }
 
     fn put(&mut self, options: &WriteOptions, key: &[u8], value: &[u8]) -> api::Result<()> {
