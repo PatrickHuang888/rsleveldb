@@ -704,5 +704,7 @@ mod tests {
         let r = test.put("", "v1");
         assert!(r.is_ok(), "result {:?}", r.err().unwrap());
         assert_eq!("v1", test.get(""));
+        let r = test.put("", "v2");
+        assert_eq!("v2", test.get(""));
     }
 }
