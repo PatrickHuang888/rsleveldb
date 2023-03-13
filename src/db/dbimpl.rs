@@ -719,4 +719,17 @@ mod tests {
         assert_eq!("v2", test.get("key"));
         Ok(())
     }
+
+    #[test]
+    fn test_read_write() -> api::Result<()> {
+        let mut test = DBTest::new();
+        test.put("foo", "v1")?;
+        assert_eq!("v1", test.get("foo"));
+        test.put("bar", "v2")?;
+        assert_eq!("v2", test.get("bar"));
+        test.put("foo", "v3")?;
+        assert_eq!("v2", test.get("bar"));
+        assert_eq!("v3", test.get("foo"));
+        Ok(())
+    }
 }
