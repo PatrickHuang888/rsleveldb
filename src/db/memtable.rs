@@ -76,7 +76,7 @@ impl<C: api::Comparator> MemTable<C> {
     pub fn new(internal_cmp: InternalKeyComparator<C>) -> Self {
         let head_key = vec![0];
         let key_cmp = KeyComparator {
-            comparator: internal_cmp,
+            icmp: internal_cmp,
         };
         let comparator = key_cmp.clone();
         let table = Table::new(key_cmp, &head_key);
@@ -105,10 +105,10 @@ impl<C: api::Comparator> MemTable<C> {
                 .map_err(|_| api::Error::Corruption("decode key".to_string()))?;
             let key_end = key_start + (key_length as usize);
             if self
-                .comparator
+                .comparator.icmp.user_comparator
                 .compare(
-                    &entry[key_start..key_end - 8].to_vec(),
-                    &key.user_key().to_vec(),
+                    &entry[key_start..key_end - 8],
+                    &key.user_key(),
                 )
                 .is_eq()
             {
@@ -322,7 +322,7 @@ fn encode_key(scratch: &mut Vec<u8>, key: &[u8]) {
 
 #[derive(Clone)]
 struct KeyComparator<C: api::Comparator + 'static> {
-    comparator: InternalKeyComparator<C>,
+    icmp: InternalKeyComparator<C>,
 }
 
 impl<C: api::Comparator + 'static> super::skiplist::Comparator<Vec<u8>> for KeyComparator<C> {
@@ -330,6 +330,6 @@ impl<C: api::Comparator + 'static> super::skiplist::Comparator<Vec<u8>> for KeyC
         // Internal keys are encoded as length-prefixed strings.
         let (a, _) = util::get_length_prefixed_slice(key_a).unwrap();
         let (b, _) = util::get_length_prefixed_slice(key_b).unwrap();
-        api::Comparator::compare(&self.comparator, a, b)
+        api::Comparator::compare(&self.icmp, a, b)
     }
 }
