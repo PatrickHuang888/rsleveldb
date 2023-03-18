@@ -4,7 +4,7 @@ use std::{
     sync::{
         atomic::{AtomicPtr, AtomicUsize, Ordering},
         Arc,
-    },
+    }, mem,
 };
 
 use rand::{thread_rng, Rng};
@@ -25,9 +25,25 @@ impl Copy<[u8]> for [u8] {
     }
 } */
 
-struct Node<K: Clone> {
+pub(crate) trait SizeOf {
+    fn size(&self) -> usize;
+}
+
+struct Node<K: Clone+SizeOf> {
     key: K,
     nexts: Vec<AtomicPtr<Node<K>>>,
+}
+
+impl SizeOf for [u8] {
+    fn size(&self) -> usize {
+        self.len()
+    }
+}
+
+impl SizeOf for u64 {
+    fn size(&self) -> usize {
+        mem::align_of::<u64>()
+    }
 }
 
 /* impl<'a, K:PartialEq> PartialEq for Node<'a, K> {
@@ -36,16 +52,16 @@ struct Node<K: Clone> {
     }
 } */
 
-impl<K: Clone> Node<K> {
-    fn new(k: &K, height: usize) -> Self {
+impl<K: Clone+SizeOf> Node<K> {
+    fn new(k: &K, height: usize) -> (Self, usize) {
         let mut nexts = Vec::with_capacity(height);
         for _ in 0..height {
             nexts.push(AtomicPtr::default());
         }
-        Node {
+        (Node {
             key: k.clone(),
             nexts,
-        }
+        }, mem::size_of::<Node>()+mem::size_of::<AtomicPtr>() * height + k.size())  // todo: not quite sure memory usage
     }
 
     fn next(&self, n: usize) -> *mut Node<K> {
@@ -72,24 +88,22 @@ impl<K: Clone> Node<K> {
 
 const MAX_HEIGHT: usize = 12;
 
-pub struct SkipList<C: Comparator<K>, K: PartialEq + Clone> {
+pub(crate) struct SkipList<C: Comparator<K>, K: PartialEq + Clone+SizeOf> {
     comparator: C,
     max_height: AtomicUsize,
     head: Node<K>,
-    //head_ptr: *mut Node<K>,
+    memory_usage:AtomicUsize,
 }
 
-impl<C: Comparator<K>, K: PartialEq + Clone> SkipList<C, K> {
-    pub fn new(cmp: C, head_key: &K) -> Self {
-        let head = Node::new(head_key, MAX_HEIGHT); // head with any key will do
-        let mut list = SkipList {
+impl<C: Comparator<K>, K: PartialEq + Clone+SizeOf> SkipList<C, K> {
+    pub(crate) fn new(cmp: C, head_key: &K) -> Self {
+        let (head, mem_size) = Node::new(head_key, MAX_HEIGHT); // head with any key will do
+        SkipList {
             comparator: cmp,
             max_height: AtomicUsize::new(1),
             head,
-            //head_ptr: null_mut(),
-        };
-        //list.head_ptr = &mut list.head;
-        list
+            memory_usage:AtomicUsize::new(mem_size)
+        }
     }
 
     fn random_height(&mut self) -> usize {
@@ -106,7 +120,11 @@ impl<C: Comparator<K>, K: PartialEq + Clone> SkipList<C, K> {
         height
     }
 
-    pub fn insert(&mut self, key: &K) {
+    pub(crate) fn memory_usage(&self) -> usize {
+        self.memory_usage.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn insert(&mut self, key: &K) {
         let mut prevs = vec![ptr::null_mut(); MAX_HEIGHT];
 
         let i_ptr = self.find_greater_or_equal(key, &mut prevs);
@@ -132,7 +150,8 @@ impl<C: Comparator<K>, K: PartialEq + Clone> SkipList<C, K> {
             self.max_height.store(height, Ordering::Relaxed);
         }
 
-        let x = Box::new(Node::new(key, height));
+        let (n, mem_size) = Node::new(key, height);
+        let x = Box::new(n);
         for i in 0..height {
             assert!(!prevs[i].is_null());
             let prev_i = unsafe { prevs[i].as_ref().unwrap() };
@@ -145,6 +164,7 @@ impl<C: Comparator<K>, K: PartialEq + Clone> SkipList<C, K> {
             let prev_i = unsafe { prevs[i].as_ref().unwrap() };
             prev_i.set_next(i, x_ptr);
         }
+        self.memory_usage.fetch_add(mem_size, Ordering::Relaxed);
     }
 
     fn contains(&mut self, key: &K) -> bool {
@@ -268,7 +288,7 @@ impl<C: Comparator<K>, K: PartialEq + Clone> SkipList<C, K> {
     }
 }
 
-impl<C: Comparator<K>, K: PartialEq + Clone> Drop for SkipList<C, K> {
+impl<C: Comparator<K>, K: PartialEq + Clone+SizeOf> Drop for SkipList<C, K> {
     fn drop(&mut self) {
         let mut n_ptr = self.head.next(0);
         loop {
@@ -291,12 +311,12 @@ pub trait Iterator<K: PartialEq> {
     fn key(&self) -> &K;
 }
 
-pub struct SkipListIterator<'a, C: Comparator<K>, K: PartialEq + Clone> {
+pub struct SkipListIterator<'a, C: Comparator<K>, K: PartialEq + Clone+SizeOf> {
     list: &'a mut SkipList<C, K>,
     n_ptr: *mut Node<K>,
 }
 
-impl<'a, C: Comparator<K>, K: PartialEq + Clone> Iterator<K> for SkipListIterator<'a, C, K> {
+impl<'a, C: Comparator<K>, K: PartialEq + Clone+SizeOf> Iterator<K> for SkipListIterator<'a, C, K> {
     // Advances to the next position.
     // REQUIRES: Valid()
     fn next(&mut self) {
@@ -414,8 +434,9 @@ mod tests {
         for _ in 0..N {
             let key = rnd.gen::<u64>() % R;
             if keys.insert(key) {
-                list.insert(&key)
+                list.insert(&key);
             }
+            println!("memory {}", list.memory_usage());
         }
 
         for i in 0..R {

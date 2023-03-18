@@ -108,8 +108,8 @@ struct DBImpl<C: Comparator + Send + Sync + 'static> {
     //log_file: Arc<RefCell<W>>,
     vset: VersionSet<C>,
 
-    mem: MemTable<C>,
-    imem: Option<MemTable<C>>,
+    mem_tables: VecDeque<MemTable<C>>,
+    mem_indicator: usize,
 
     shutting_down: atomic::AtomicBool,
     //logfile_number: u64,
@@ -136,8 +136,11 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
             options: options.clone(),
             mutex: parking_lot::Mutex::new(()),
             writers: VecDeque::new(),
-            mem: MemTable::new(InternalKeyComparator::new(options.comparator)),
-            imem: None,
+            mem_tables: VecDeque::from([MemTable::new(InternalKeyComparator::new(
+                options.comparator,
+            ))]),
+
+            mem_indicator: 0,
             shutting_down: atomic::AtomicBool::new(true),
             //table_cache: todo!(),
             vset: VersionSet::new(dbname, options),
@@ -245,7 +248,6 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
 
     fn compact_memtable(&mut self) {
         assert!(self.mutex.is_locked());
-        assert!(self.imem.is_some());
 
         // Save the contents of the memtable as a new Table
         /* let mut edit = VersionEdit::default();
@@ -350,35 +352,12 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
         todo!()
     }
 
-    // REQUIRES: mutex_ is held
-    // REQUIRES: this thread is currently at the front of the writer queue
-    fn make_room_for_write(&mut self, force: bool) -> api::Result<()> {
-        /* guard;
-          assert!(!self.writers.is_empty());
-          let allow_delay= !force;
-
-          loop {
-              if allow_delay && self.versions.num_level_files(0) >= config::L0_SlowdownWritesTrigger {
-                  // We are getting close to hitting a hard limit on the number of
-        // L0 files.  Rather than delaying a single write by several
-        // seconds when we hit the hard limit, start delaying each
-        // individual write by 1ms to reduce latency variance.  Also,
-        // this delay hands over some CPU to the compaction thread in
-        // case it is sharing the same core as the writer.
-
-              }
-          }
-          */
-        // todo:
-        Ok(())
-    }
-
     fn remove_obsolete_files(&mut self) {}
 }
 
 impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
     fn get(&mut self, options: &ReadOptions, key: &[u8], value: &mut Vec<u8>) -> api::Result<()> {
-        let _ = self.mutex.lock();
+        let guard = self.mutex.lock();
 
         let snaphsot: SequenceNumber;
         match &options.snapshot {
@@ -391,23 +370,33 @@ impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
         }
 
         // Unlock while reading from files and memtables
-        unsafe {
-            self.mutex.raw().unlock();
-        }
+        drop(guard);
 
         // First look in the memtable, then in the immutable memtable (if any).
         let lkey = LookupKey::new(key, snaphsot);
 
-        if let Some(e) = self.mem.get(&lkey, value).err() {
+        if let Some(e) = self.mem_tables[0].get(&lkey, value).err() {
             match e {
                 Error::InternalNotFound(deleted) => {
                     if deleted {
                         return Err(api::Error::NotFound);
                     } else {
-                        // todo: imm get
-
-                        /* let current = self.vset.current();
-                        let stats = current.get(options, &lkey, value)?; */
+                        if let Some(e) = self.mem_tables[1].get(&lkey, value).err() {
+                            match e {
+                                Error::InternalNotFound(deleted) => {
+                                    if deleted {
+                                        return Err(api::Error::NotFound);
+                                    } else {
+                                        // todo:
+                                        /* let current = self.vset.current();
+                                        let stats = current.get(options, &lkey, value)?; */
+                                    }
+                                }
+                                _ => {
+                                    return Err(e);
+                                }
+                            }
+                        }
 
                         let _ = self.mutex.lock();
 
@@ -467,8 +456,8 @@ impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
         }
 
         // May temporarily unlock and wait.
-        //let mut status = self.make_room_for_write(w.batch.is_none());
-        let mut status = Ok(());
+        let mut status =
+            make_room_for_write(&mut self.mem_tables, &self.options, w.batch.is_none());
         let mut last_sequence = self.vset.last_sequence();
 
         // none updates is for compactions
@@ -477,9 +466,7 @@ impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
             write_batch.set_sequence(last_sequence + 1);
             last_sequence += write_batch.count() as u64;
 
-            unsafe {
-                self.mutex.raw().unlock();
-            }
+            drop(guard);
 
             // Add to log and apply to memtable.  We can release the lock
             // during this phase since &w is currently responsible for logging
@@ -490,7 +477,7 @@ impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
             //todo:
             //self.log_file.sync()?;
             //}
-            status = write_batch.insert_into(&mut self.mem);
+            status = write_batch.insert_into(&mut self.mem_tables[0]);
 
             let _ = self.mutex.lock();
 
@@ -536,6 +523,32 @@ pub fn open<C: api::Comparator + Send + Sync + 'static>(
 
     unsafe { db.mutex.raw().unlock() };
     Ok(db)
+}
+
+// REQUIRES: mutex_ is held
+// REQUIRES: this thread is currently at the front of the writer queue
+fn make_room_for_write<C: api::Comparator>(
+    mem_tables: &mut VecDeque<MemTable<C>>,
+    options: &Options<C>,
+    force: bool,
+) -> api::Result<()> {
+    loop {
+        if !force && mem_tables[0].approximate_memory_usage() <= options.write_buffer_size {
+            // There is room in current memtable
+            break;
+        } else {
+            // Attempt to switch to a new memtable and trigger compaction of old
+            print!("switch");
+            mem_tables.push_front(MemTable::new(InternalKeyComparator::new(
+                options.comparator,
+            )));
+            // todo: maybe schdule compation
+            if mem_tables.len() > 2 {
+                mem_tables.pop_back();
+            }
+        }
+    }
+    Ok(())
 }
 
 // REQUIRES: Writer list must be non-empty
@@ -659,9 +672,8 @@ mod tests {
     }
 
     impl DBTest {
-        fn new() -> Self {
+        fn new(options:&Options<ByteswiseComparator>) -> Self {
             let tmp_dir = env::temp_dir();
-            let options = Options::default();
             let _ = destroy_db(TEST_DBNAME, &tmp_dir, &options);
             let db = open(&options, &tmp_dir, TEST_DBNAME);
             assert!(db.is_ok());
@@ -692,21 +704,23 @@ mod tests {
                 .put(&WriteOptions::default(), k.as_bytes(), v.as_bytes())
         }
 
-        fn delete(&mut self, k:&str) -> api::Result<()> {
+        fn delete(&mut self, k: &str) -> api::Result<()> {
             self.db.delete(&WriteOptions::default(), k.as_bytes())
         }
     }
 
     #[test]
     fn test_empty() {
-        let mut test = DBTest::new();
+        let options= Options::default();
+        let mut test = DBTest::new(&options);
         let v = test.get("foo");
         assert_eq!(&v, "NOT_FOUND");
     }
 
     #[test]
     fn test_empty_key() {
-        let mut test = DBTest::new();
+        let options= Options::default();
+        let mut test = DBTest::new(&options);
         let r = test.put("", "v1");
         assert!(r.is_ok(), "result {:?}", r.err().unwrap());
         assert_eq!("v1", test.get(""));
@@ -715,8 +729,9 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_value() -> api::Result<()>{
-        let mut test = DBTest::new();
+    fn test_empty_value() -> api::Result<()> {
+        let options= Options::default();
+        let mut test = DBTest::new(&options);
         test.put("key", "v1")?;
         assert_eq!("v1", test.get("key"));
         test.put("key", "")?;
@@ -728,7 +743,8 @@ mod tests {
 
     #[test]
     fn test_read_write() -> api::Result<()> {
-        let mut test = DBTest::new();
+        let options= Options::default();
+        let mut test = DBTest::new(&options);
         test.put("foo", "v1")?;
         assert_eq!("v1", test.get("foo"));
         test.put("bar", "v2")?;
@@ -741,13 +757,38 @@ mod tests {
 
     #[test]
     fn test_put_delete_get() -> api::Result<()> {
-        let mut test = DBTest::new();
+        let options= Options::default();
+        let mut test = DBTest::new(&options);
         test.put("foo", "v1")?;
         assert_eq!("v1", test.get("foo"));
         test.put("foo", "v2")?;
         assert_eq!("v2", test.get("foo"));
         test.delete("foo")?;
         assert_eq!("NOT_FOUND", test.get("foo"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_immutable_layer() -> api::Result<()>{
+        let mut options= Options::default();
+        options.write_buffer_size= 100_000;
+        let mut test = DBTest::new(&options);
+        test.put("foo", "v1")?;
+        assert_eq!("v1", test.get("foo"));
+
+        let mut k1= String::new();
+        for _ in 0..10_000 {
+            k1.push('x');
+        }
+        let mut k2= String::new();
+        for _ in 0..100_000 {
+            k2.push('y');
+        } 
+        test.put("k1", &k1)?;
+        test.put("k2", &k2)?;
+        
+        assert_eq!("v1", test.get("foo"));
+
         Ok(())
     }
 }

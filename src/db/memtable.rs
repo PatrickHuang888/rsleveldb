@@ -67,26 +67,28 @@ impl LookupKey {
     }
 }
 
-pub struct MemTable<C: Comparator + 'static> {
+pub(crate) struct MemTable<C: Comparator + 'static> {
     table: Table<C>,
     comparator: KeyComparator<C>,
 }
 
 impl<C: api::Comparator> MemTable<C> {
-    pub fn new(internal_cmp: InternalKeyComparator<C>) -> Self {
+    pub(crate) fn new(internal_cmp: InternalKeyComparator<C>) -> Self {
         let head_key = vec![0];
-        let key_cmp = KeyComparator {
-            icmp: internal_cmp,
-        };
+        let key_cmp = KeyComparator { icmp: internal_cmp };
         let comparator = key_cmp.clone();
         let table = Table::new(key_cmp, &head_key);
         MemTable { comparator, table }
     }
 
+    pub(crate) fn approximate_memory_usage(&self) -> usize {
+        self.table.memory_usage()
+    }
+
     // If memtable contains a value for key, store it in value and return true.
     // If memtable contains a deletion for key, store a NotFound() error in status and return true.
     // Else, return false.
-    pub fn get(&mut self, key: &LookupKey, value: &mut Vec<u8>) -> api::Result<()> {
+    pub(crate) fn get(&mut self, key: &LookupKey, value: &mut Vec<u8>) -> api::Result<()> {
         let memkey = key.memtable_key();
         let mut iter = self.table.new_iterator();
         iter.seek(&Vec::from(memkey));
@@ -105,11 +107,10 @@ impl<C: api::Comparator> MemTable<C> {
                 .map_err(|_| api::Error::Corruption("decode key".to_string()))?;
             let key_end = key_start + (key_length as usize);
             if self
-                .comparator.icmp.user_comparator
-                .compare(
-                    &entry[key_start..key_end - 8],
-                    &key.user_key(),
-                )
+                .comparator
+                .icmp
+                .user_comparator
+                .compare(&entry[key_start..key_end - 8], &key.user_key())
                 .is_eq()
             {
                 // correct user key
