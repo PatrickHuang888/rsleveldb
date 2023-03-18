@@ -404,8 +404,7 @@ impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
                         //if self.vset.current_mut().unwrap().update_stats(stats) {
                         //self.maybe_schedmule_compaction();
                         //}
-                        //return Ok(());
-                        return Err(api::Error::NotFound);
+                        return Ok(());
                     }
                 }
                 _ => {
@@ -538,7 +537,6 @@ fn make_room_for_write<C: api::Comparator>(
             break;
         } else {
             // Attempt to switch to a new memtable and trigger compaction of old
-            print!("switch");
             mem_tables.push_front(MemTable::new(InternalKeyComparator::new(
                 options.comparator,
             )));
@@ -672,7 +670,7 @@ mod tests {
     }
 
     impl DBTest {
-        fn new(options:&Options<ByteswiseComparator>) -> Self {
+        fn new(options: &Options<ByteswiseComparator>) -> Self {
             let tmp_dir = env::temp_dir();
             let _ = destroy_db(TEST_DBNAME, &tmp_dir, &options);
             let db = open(&options, &tmp_dir, TEST_DBNAME);
@@ -711,7 +709,7 @@ mod tests {
 
     #[test]
     fn test_empty() {
-        let options= Options::default();
+        let options = Options::default();
         let mut test = DBTest::new(&options);
         let v = test.get("foo");
         assert_eq!(&v, "NOT_FOUND");
@@ -719,7 +717,7 @@ mod tests {
 
     #[test]
     fn test_empty_key() {
-        let options= Options::default();
+        let options = Options::default();
         let mut test = DBTest::new(&options);
         let r = test.put("", "v1");
         assert!(r.is_ok(), "result {:?}", r.err().unwrap());
@@ -730,7 +728,7 @@ mod tests {
 
     #[test]
     fn test_empty_value() -> api::Result<()> {
-        let options= Options::default();
+        let options = Options::default();
         let mut test = DBTest::new(&options);
         test.put("key", "v1")?;
         assert_eq!("v1", test.get("key"));
@@ -743,7 +741,7 @@ mod tests {
 
     #[test]
     fn test_read_write() -> api::Result<()> {
-        let options= Options::default();
+        let options = Options::default();
         let mut test = DBTest::new(&options);
         test.put("foo", "v1")?;
         assert_eq!("v1", test.get("foo"));
@@ -757,7 +755,7 @@ mod tests {
 
     #[test]
     fn test_put_delete_get() -> api::Result<()> {
-        let options= Options::default();
+        let options = Options::default();
         let mut test = DBTest::new(&options);
         test.put("foo", "v1")?;
         assert_eq!("v1", test.get("foo"));
@@ -769,24 +767,24 @@ mod tests {
     }
 
     #[test]
-    fn test_from_immutable_layer() -> api::Result<()>{
-        let mut options= Options::default();
-        options.write_buffer_size= 100_000;
+    fn test_from_immutable_layer() -> api::Result<()> {
+        let mut options = Options::default();
+        options.write_buffer_size = 100_000;
         let mut test = DBTest::new(&options);
         test.put("foo", "v1")?;
         assert_eq!("v1", test.get("foo"));
 
-        let mut k1= String::new();
-        for _ in 0..10_000 {
+        let mut k1 = String::new();
+        for _ in 0..100_000 {
             k1.push('x');
         }
-        let mut k2= String::new();
+        let mut k2 = String::new();
         for _ in 0..100_000 {
             k2.push('y');
-        } 
+        }
         test.put("k1", &k1)?;
         test.put("k2", &k2)?;
-        
+
         assert_eq!("v1", test.get("foo"));
 
         Ok(())
