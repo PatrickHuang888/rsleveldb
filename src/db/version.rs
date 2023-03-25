@@ -803,9 +803,8 @@ impl<C: api::Comparator + 'static> VersionSet<C> {
 
     // Allocate and return a new file number
     pub fn new_file_number(&mut self) -> u64 {
-        let r = self.next_file_number;
         self.next_file_number += 1;
-        r
+        self.next_file_number
     }
 
     // Apply *edit to the current version to form a new descriptor that
@@ -1204,14 +1203,14 @@ pub(crate) struct VersionEdit {
     new_files: Vec<(i32, Arc<FileMetaData>)>,
 
     comparator_name: Option<String>,
-    log_number: Option<u64>,
-    prev_log_number: Option<u64>,
+    pub(crate) log_number: Option<u64>,
+    pub(crate) prev_log_number: Option<u64>,
     next_file_number: Option<u64>,
     last_sequence: Option<SequenceNumber>,
 }
 
 impl VersionEdit {
-    fn new() -> Self {
+    /* fn new() -> Self {
         VersionEdit {
             compact_pointers: Vec::new(),
             deleted_files: Vec::new(),
@@ -1222,7 +1221,7 @@ impl VersionEdit {
             next_file_number: None,
             last_sequence: None,
         }
-    }
+    } */
 
     fn set_compact_pointer(&mut self, level: i32, key: InternalKey) {
         self.compact_pointers.push((level, key));
@@ -1231,7 +1230,7 @@ impl VersionEdit {
     // Add the specified file at the specified number.
     // REQUIRES: This version has not been saved (see VersionSet::SaveTo)
     // REQUIRES: "smallest" and "largest" are smallest and largest keys in file
-    pub fn add_file(
+    pub(crate) fn add_file(
         &mut self,
         level: i32,
         number: u64,

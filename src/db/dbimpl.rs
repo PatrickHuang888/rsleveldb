@@ -92,6 +92,9 @@ fn table_cache_size<C: Comparator>(sanitized_options: &Options<C>) -> usize {
     sanitized_options.max_open_files - NUM_NON_TABLE_CACHE_FILES
 }
 
+const MEM_TABLE_INDEX: usize = 0;
+const IMEM_TABLE_INDEX: usize = 1;
+
 struct DBImpl<C: Comparator + Send + Sync + 'static> {
     internal_comparator: InternalKeyComparator<C>,
     options: Options<C>,
@@ -115,8 +118,8 @@ struct DBImpl<C: Comparator + Send + Sync + 'static> {
     //logfile_number: u64,
     // Set of table files to protect from deletion because they are
     // part of ongoing compactions.
-    //pending_outputs: Vec<u64>,
-    //stats: [CompactionStats; config::NUM_LEVELS as usize],
+    pending_outputs: Vec<u64>,
+    stats: [CompactionStats; config::NUM_LEVELS as usize],
     //mannual_compaction: Option<ManualCompaction>,
     // Has a background compaction been scheduled or is running?
     //background_compaction_scheduled: bool,
@@ -144,6 +147,8 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
             shutting_down: atomic::AtomicBool::new(true),
             //table_cache: todo!(),
             vset: VersionSet::new(dbname, options),
+            pending_outputs: todo!(),
+            stats: todo!(),
         }
     }
 
@@ -248,13 +253,14 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
 
     fn compact_memtable(&mut self) {
         assert!(self.mutex.is_locked());
+        assert!(self.mem_tables.len()==2);
 
         // Save the contents of the memtable as a new Table
-        /* let mut edit = VersionEdit::default();
+        let mut edit = VersionEdit::default();
         let base = self.vset.current().clone();
-        let mut r = self.write_level0_table(true, &mut edit, Some(base)); */
+        let mut r = self.write_level0_table( &mut edit, Some(base));
 
-        /* if r.is_ok() && self.shutting_down.load(atomic::Ordering::Acquire) {
+        if r.is_ok() && self.shutting_down.load(atomic::Ordering::Acquire) {
             r = Err(api::Error::IOError(
                 "Deleting DB during memtable compaction".to_string(),
             ));
@@ -262,57 +268,51 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
 
         // Replace immutable memtable with the generated Table
         if r.is_ok() {
-            edit.set_prev_log_number(0);
-            edit.set_log_number(self.logfile_number); // Earlier logs no longer needed
+            edit.prev_log_number= Some(0);
+            //edit.set_log_number(self.logfile_number); // Earlier logs no longer needed
             r = self.vset.log_and_apply(&self.mutex, &mut edit);
         }
 
         match r {
             Ok(_) => {
                 // Commit to the new state
-                self.imem = None;
+                self.mem_tables.remove(IMEM_TABLE_INDEX);
                 self.remove_obsolete_files();
             }
             Err(e) => {
                 self.record_background_error(e);
             }
-        } */
+        }
     }
 
     fn write_level0_table(
         &mut self,
-        write_imem: bool,
-        //mem: &mut MemTable<C>,
         edit: &mut VersionEdit,
         base: Option<Arc<Version<C>>>,
     ) -> api::Result<()> {
-        /* assert!(self.mutex.is_locked());
+        assert!(self.mutex.is_locked());
 
-        let mut mem = &mut self.mem;
-        if write_imem {
-            mem = self.imem.as_mut().unwrap();
-        }
+        let mem = &mut self.mem_tables[MEM_TABLE_INDEX];
+        let mut it = mem.new_iterator();
 
-        let start_micros = self.env.now_micros();
+        let start_micros = self.options.env.now_micros();
         let mut meta = FileMetaData::default();
         meta.number = self.vset.new_file_number();
         self.pending_outputs.push(meta.number);
-        let mut it = mem.new_iterator();
 
         // todo: log
 
-        unsafe { self.mutex.unlock() };
+        unsafe { self.mutex.force_unlock() };
 
         build_table(
-            &self.env,
-            self.dbname.as_str(),
+            &self.dbname,
             &self.options,
             &mut it,
             &mut meta,
-            &mut self.table_cache,
+            //&mut self.table_cache,
         )?;
 
-        self.mutex.lock();
+        let _ = self.mutex.lock();
 
         // todo: log
 
@@ -342,9 +342,9 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
         }
 
         let mut stats = CompactionStats::default();
-        stats.micros = self.env.now_micros() - start_micros;
+        stats.micros = self.options.env.now_micros() - start_micros;
         stats.bytes_written = meta.file_size;
-        self.stats[level as usize].add(&stats); */
+        self.stats[level as usize].add(&stats);
         Ok(())
     }
 

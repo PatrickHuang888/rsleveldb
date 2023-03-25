@@ -92,18 +92,17 @@ impl SnapshotList {
 // If no data is present in *iter, meta->file_size will be set to
 // zero, and no Table file will be produced.
 fn build_table<C: Comparator + 'static>(
-    env: &impl Env,
     dbname: &str,
     options: &Options<C>,
     iter: &mut MemTableIterator<C>,
     meta: &mut FileMetaData,
-    table_cache: &mut TableCache<C>,
+    //table_cache: &mut TableCache<C>,
 ) -> api::Result<()> {
     meta.file_size = 0;
     iter.seek_to_first()?;
 
     let fname = filename::table_file_name(dbname, meta.number);
-    let file = env.new_posix_writable_file(fname.as_path())?;
+    let file = options.env.new_posix_writable_file(&fname)?;
 
     let mut builder = TableBuilder::new(file, options.clone());
     meta.smallest.decode_from(iter.key().unwrap());
@@ -126,7 +125,7 @@ fn build_table<C: Comparator + 'static>(
     builder.writer.close()?;
 
     // Verify that the table is usable
-    let _ = table_cache.new_iterator(&ReadOptions::default(), meta.number, meta.file_size)?;
+    //let _ = table_cache.new_iterator(&ReadOptions::default(), meta.number, meta.file_size)?;
 
     Ok(())
 }
