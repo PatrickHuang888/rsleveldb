@@ -10,6 +10,7 @@ use parking_lot::lock_api::RawMutex;
 
 use crate::api::{self, Comparator, Error, ReadOptions, WriteOptions};
 use crate::config::NUM_LEVELS;
+use crate::db::filename::FileType;
 use crate::db::version::VersionEdit;
 use crate::{
     config, util, Env, InternalKey, Options, PosixWritableFile, SequenceNumber, WritableFile,
@@ -253,12 +254,12 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
 
     fn compact_memtable(&mut self) {
         assert!(self.mutex.is_locked());
-        assert!(self.mem_tables.len()==2);
+        assert!(self.mem_tables.len() == 2);
 
         // Save the contents of the memtable as a new Table
         let mut edit = VersionEdit::default();
         let base = self.vset.current().clone();
-        let mut r = self.write_level0_table( &mut edit, Some(base));
+        let mut r = self.write_level0_table(&mut edit, Some(base));
 
         if r.is_ok() && self.shutting_down.load(atomic::Ordering::Acquire) {
             r = Err(api::Error::IOError(
@@ -268,7 +269,7 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
 
         // Replace immutable memtable with the generated Table
         if r.is_ok() {
-            edit.prev_log_number= Some(0);
+            edit.prev_log_number = Some(0);
             //edit.set_log_number(self.logfile_number); // Earlier logs no longer needed
             r = self.vset.log_and_apply(&self.mutex, &mut edit);
         }
@@ -302,7 +303,7 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
 
         // todo: log
 
-        unsafe { self.mutex.force_unlock() };
+        unsafe { self.mutex.raw().unlock() };
 
         build_table(
             &self.dbname,
@@ -312,7 +313,7 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
             //&mut self.table_cache,
         )?;
 
-        let _ = self.mutex.lock();
+        unsafe { self.mutex.raw().lock() };
 
         // todo: log
 
@@ -352,12 +353,71 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
         todo!()
     }
 
-    fn remove_obsolete_files(&mut self) {}
+    // Delete any unneeded files and stale in-memory entries.
+    fn remove_obsolete_files(&mut self) {
+        assert!(self.mutex.is_locked());
+
+        // todo: no bg error
+
+        // Make a set of all of the live files
+        let live = &mut self.pending_outputs;
+        self.vset.add_live_files(live);
+
+        let mut file_to_delete = vec![];
+        let dir = util::get_dir_from_dbname(&self.dbname);
+        if let Ok(filenames) = self.options.env.get_children(&dir) {
+            // Ignoring errors on purpose
+
+            for f in filenames {
+                if let Ok((ft, number)) = super::filename::parse_file_name(&f) {
+                    let keep;
+                    match ft {
+                        FileType::LOG_FILE => {
+                            keep = (number >= self.vset.log_number)
+                                || (number == self.vset.prev_log_number);
+                        }
+                        FileType::DESCRIPTOR_FILE => {
+                            // Keep my manifest file, and any newer incarnations'
+                            // (in case there is a race that allows other incarnations)
+                            keep = number >= self.vset.manifest_file_number;
+                        }
+                        FileType::TABLE_FILE => {
+                            keep = live.iter().position(|num| *num == number).is_some();
+                        }
+                        FileType::TEMP_FILE => {
+                            // Any temp files that are currently being written to must
+                            // be recorded in pending_outputs_, which is inserted into "live"
+                            keep = live.iter().position(|num| *num == number).is_some();
+                        }
+                        _ => {
+                            keep = true;
+                        }
+                    }
+
+                    if !keep {
+                        file_to_delete.push(f);
+                        // todo: table_cache evict number
+
+                        // todo: log delete
+                    }
+                }
+            }
+        }
+
+        // While deleting all files unblock other threads. All files being deleted
+        // have unique names which will not collide with newly created files and
+        // are therefore safe to delete while allowing other threads to proceed.
+        unsafe { self.mutex.raw().unlock() }
+        for f in file_to_delete {
+            let _ = self.options.env.remove_file(&f);
+        }
+        unsafe { self.mutex.raw().lock() }
+    }
 }
 
 impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
     fn get(&mut self, options: &ReadOptions, key: &[u8], value: &mut Vec<u8>) -> api::Result<()> {
-        let guard = self.mutex.lock();
+        let mut guard= self.mutex.lock();
 
         let snaphsot: SequenceNumber;
         match &options.snapshot {
@@ -398,7 +458,7 @@ impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
                             }
                         }
 
-                        let _ = self.mutex.lock();
+                        guard= self.mutex.lock();
 
                         // todo:
                         //if self.vset.current_mut().unwrap().update_stats(stats) {
@@ -478,7 +538,7 @@ impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
             //}
             status = write_batch.insert_into(&mut self.mem_tables[0]);
 
-            let _ = self.mutex.lock();
+            guard= self.mutex.lock();
 
             // todo: sync error
 
@@ -517,10 +577,8 @@ pub fn open<C: api::Comparator + Send + Sync + 'static>(
     dbname: &str,
 ) -> api::Result<impl DB<C>> {
     let db = DBImpl::new(options, home_path, dbname);
-    let _ = db.mutex.lock();
     //todo: recover
 
-    unsafe { db.mutex.raw().unlock() };
     Ok(db)
 }
 

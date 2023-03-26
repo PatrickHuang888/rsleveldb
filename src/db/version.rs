@@ -481,7 +481,7 @@ impl<C: api::Comparator + 'static> Compaction<C> {
             level,
             inputs,
             grandparents: Vec::new(),
-            edit: VersionEdit::new(),
+            edit: VersionEdit::default(),
             input_version: None,
         }
     }
@@ -564,16 +564,16 @@ fn target_file_size<C: api::Comparator>(options: &Options<C>) -> usize {
 pub(crate) struct VersionSet<C: api::Comparator + 'static> {
     last_sequence: u64,
     current_index: i32,
-    log_number: u64,
+    pub(super) log_number: u64,
     next_file_number: u64,
-    prev_log_number: u64, // 0 or backing store for memtable being compacted
+    pub(super) prev_log_number: u64, // 0 or backing store for memtable being compacted
 
     // Per-level key at which the next compaction at that level should start.
     // Either an empty string, or a valid InternalKey.
     compact_pointer: [Vec<u8>; config::NUM_LEVELS as usize],
     descriptor_log: Option<log::Writer<PosixWritableFile>>,
     dbname: String,
-    manifest_file_number: u64,
+    pub(super) manifest_file_number: u64,
 
     versions: Vec<Arc<Version<C>>>,
 
@@ -602,6 +602,19 @@ impl<C: api::Comparator + 'static> VersionSet<C> {
         let mut v = Version::new(options, vset.icmp.clone());
         vset.append_version(v);
         vset
+    }
+
+    // Add all files listed in any live version to *live.
+    // May also mutate some internal state.
+    pub(super) fn add_live_files(&self, live: &mut Vec<u64>) {
+        for v in &self.versions {
+            for level in 0..config::NUM_LEVELS {
+                let files = &v.files[level as usize];
+                for f in files {
+                    live.push(f.number);
+                }
+            }
+        }
     }
 
     // Returns true iff some level needs a compaction.
@@ -814,7 +827,7 @@ impl<C: api::Comparator + 'static> VersionSet<C> {
     // REQUIRES: no other thread concurrently calls LogAndApply()
     pub fn log_and_apply(
         &mut self,
-        mu: &parking_lot::RawMutex,
+        mutex: &parking_lot::Mutex<()>,
         edit: &mut VersionEdit,
     ) -> api::Result<()> {
         match edit.log_number {
@@ -862,7 +875,7 @@ impl<C: api::Comparator + 'static> VersionSet<C> {
 
         // Unlock during expensive MANIFEST log write
         // rethink:
-        unsafe { mu.unlock() };
+        unsafe { mutex.force_unlock() };
 
         // Write new record to MANIFEST log
         if r.is_ok() {
@@ -887,7 +900,7 @@ impl<C: api::Comparator + 'static> VersionSet<C> {
             )?;
         }
 
-        mu.lock();
+        let _ = mutex.lock();
 
         // Install the new version
         match &r {

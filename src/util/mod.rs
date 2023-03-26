@@ -1,4 +1,10 @@
-use std::{cell::RefCell, fmt, path::Path, rc::Rc, sync::Arc};
+use std::{
+    cell::RefCell,
+    fmt,
+    path::{Path, PathBuf},
+    rc::Rc,
+    sync::Arc,
+};
 
 use crc::{Crc, CRC_32_ISCSI};
 use rand::{rngs::ThreadRng, thread_rng, Rng};
@@ -309,3 +315,7 @@ impl EmptyIterator {
 }
 
 pub const MAX_VARINT_LEN64: usize = 10 + 10;
+
+pub(crate) fn get_dir_from_dbname(dbname: &str) -> PathBuf {
+    PathBuf::from(dbname)
+}
