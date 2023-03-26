@@ -827,9 +827,11 @@ impl<C: api::Comparator + 'static> VersionSet<C> {
     // REQUIRES: no other thread concurrently calls LogAndApply()
     pub fn log_and_apply(
         &mut self,
-        mutex: &parking_lot::Mutex<()>,
+        mutex: &parking_lot::RawMutex,
         edit: &mut VersionEdit,
     ) -> api::Result<()> {
+        assert!(mutex.is_locked());
+
         match edit.log_number {
             None => {
                 edit.log_number = Some(self.log_number);
@@ -874,12 +876,11 @@ impl<C: api::Comparator + 'static> VersionSet<C> {
         }
 
         // Unlock during expensive MANIFEST log write
-        // rethink:
-        unsafe { mutex.force_unlock() };
+        unsafe{mutex.unlock()}
 
         // Write new record to MANIFEST log
         if r.is_ok() {
-            let mut record = Vec::new();
+            let record = Vec::new();
             // todo:
             //edit.encode_to(&mut record);
             r = self.descriptor_log.as_mut().unwrap().add_record(&record);
@@ -900,15 +901,14 @@ impl<C: api::Comparator + 'static> VersionSet<C> {
             )?;
         }
 
-        let _ = mutex.lock();
+        mutex.lock();
 
         // Install the new version
         match &r {
             Ok(_) => {
                 self.append_version(v);
-                // todo:
-                //self.log_number = edit.log_number.unwrap();
-                //self.prev_log_number = edit.prev_log_number.unwrap();
+                self.log_number = edit.log_number.unwrap();
+                self.prev_log_number = edit.prev_log_number.unwrap();
             }
             Err(e) => {
                 // todo: remove new_manifest_file when error
@@ -919,7 +919,6 @@ impl<C: api::Comparator + 'static> VersionSet<C> {
     }
 
     fn append_version(&mut self, mut v: Version<C>) {
-        //let rv= Rc::new(RefCell::new(v));
         // Make "v" current
         let index = self.versions.len();
         v.index = index as i32;

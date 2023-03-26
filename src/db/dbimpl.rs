@@ -63,24 +63,6 @@ fn sanitize_options<C: Comparator + 'static>(
     result
 }
 
-struct MutexLock<'a> {
-    mu: &'a parking_lot::RawMutex,
-}
-
-impl<'a> MutexLock<'a> {
-    fn new(mu: &'a parking_lot::RawMutex) -> Self {
-        let ml = MutexLock { mu };
-        ml.mu.lock();
-        ml
-    }
-}
-
-impl<'a> Drop for MutexLock<'a> {
-    fn drop(&mut self) {
-        unsafe { self.mu.unlock() };
-    }
-}
-
 struct ManualCompaction {
     level: u32,
     begin: InternalKey,
@@ -116,7 +98,7 @@ struct DBImpl<C: Comparator + Send + Sync + 'static> {
     mem_indicator: usize,
 
     shutting_down: atomic::AtomicBool,
-    //logfile_number: u64,
+    logfile_number: u64,
     // Set of table files to protect from deletion because they are
     // part of ongoing compactions.
     pending_outputs: Vec<u64>,
@@ -150,6 +132,7 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
             vset: VersionSet::new(dbname, options),
             pending_outputs: todo!(),
             stats: todo!(),
+            logfile_number: todo!(),
         }
     }
 
@@ -270,7 +253,7 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
         // Replace immutable memtable with the generated Table
         if r.is_ok() {
             edit.prev_log_number = Some(0);
-            //edit.set_log_number(self.logfile_number); // Earlier logs no longer needed
+            edit.log_number= Some(self.logfile_number); // Earlier logs no longer needed
             r = self.vset.log_and_apply(&self.mutex, &mut edit);
         }
 
