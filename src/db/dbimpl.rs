@@ -254,7 +254,7 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
         if r.is_ok() {
             edit.prev_log_number = Some(0);
             edit.log_number= Some(self.logfile_number); // Earlier logs no longer needed
-            r = self.vset.log_and_apply(&self.mutex, &mut edit);
+            r = self.vset.log_and_apply(unsafe{&self.mutex.raw()}, &mut edit);
         }
 
         match r {

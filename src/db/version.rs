@@ -860,7 +860,7 @@ impl<C: api::Comparator + 'static> VersionSet<C> {
         // Initialize new descriptor log file if necessary by creating
         // a temporary file that contains a snapshot of the current version.
         let mut new_manifest_file = None;
-        let mut r = Ok(());
+        let mut r:Result<(), api::Error>;
         if self.descriptor_log.is_none() {
             // No reason to unlock *mu here since we only hit this path in the
             // first call to LogAndApply (when opening the database).
@@ -881,11 +881,11 @@ impl<C: api::Comparator + 'static> VersionSet<C> {
         // Write new record to MANIFEST log
         if r.is_ok() {
             let record = Vec::new();
-            // todo:
-            //edit.encode_to(&mut record);
-            r = self.descriptor_log.as_mut().unwrap().add_record(&record);
+            edit.encode_to(&mut record);
+            let descriptor_log= self.descriptor_log.as_mut().unwrap();
+            r = descriptor_log.add_record(&record);
             if r.is_ok() {
-                r = self.descriptor_log.as_mut().unwrap().sync();
+                r = descriptor_log.sync();
             }
 
             // todo:log
@@ -894,11 +894,11 @@ impl<C: api::Comparator + 'static> VersionSet<C> {
         // If we just created a new descriptor file, install it by writing a
         // new CURRENT file that points to it.
         if r.is_ok() && !new_manifest_file.is_none() {
-            set_current_file(
+            r = set_current_file(
                 self.options.env,
-                self.dbname.as_str(),
+                &self.dbname,
                 self.manifest_file_number,
-            )?;
+            );
         }
 
         mutex.lock();
@@ -1281,26 +1281,26 @@ impl VersionEdit {
             util::put_varint64(dst, last_sequence);
         }
 
-        self.compact_pointers.iter().for_each(|(level, key)| {
+        for (level, key) in self.compact_pointers {
             util::put_varint32(dst, Tag::CompactPointer as u32);
-            util::put_varint32(dst, *level as u32);
+            util::put_varint32(dst, level as u32);
             util::put_length_prefixed_slice(dst, &key.rep);
-        });
+        }
 
-        self.deleted_files.iter().for_each(|(level, file_number)| {
+        for (level, file_number) in self.deleted_files{
             util::put_varint32(dst, Tag::DeletedFile as u32);
-            util::put_varint32(dst, *level as u32);
-            util::put_varint64(dst, *file_number);
-        });
+            util::put_varint32(dst, level as u32);
+            util::put_varint64(dst, file_number);
+        }
 
-        self.new_files.iter().for_each(|(level, f)| {
+        for (level, f) in self.new_files{
             util::put_varint32(dst, Tag::NewFile as u32);
-            util::put_varint32(dst, *level as u32);
+            util::put_varint32(dst, level as u32);
             util::put_varint64(dst, f.number);
             util::put_varint64(dst, f.file_size);
             util::put_length_prefixed_slice(dst, &f.smallest.rep);
             util::put_length_prefixed_slice(dst, &f.largest.rep);
-        });
+        }
     }
 
     fn decode_from(src: &[u8]) -> api::Result<Self> {
