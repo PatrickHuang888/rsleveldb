@@ -51,9 +51,13 @@ fn temp_file_name(dbname: &str, number: u64) -> PathBuf {
     make_file_name(dbname, number, "dbtmp")
 }
 
+pub(super) fn log_file_name(dbname: &str, number: u64) -> PathBuf {
+    assert!(number > 0);
+    make_file_name(dbname, number, "log")
+}
+
 fn make_file_name(dbname: &str, number: u64, suffix: &str) -> PathBuf {
-    todo!()
-    //format!("{}/{:06}.{}", dbname, number, suffix)
+    PathBuf::from(format!("{}/{:06}.{}", dbname, number, suffix))
 }
 
 #[derive(PartialEq)]

@@ -572,7 +572,7 @@ impl Env for PosixEnv {
     }
 }
 
-pub trait Env {
+pub trait Env:Sync {
     fn new_posix_writable_file(&self, filename: &Path) -> api::Result<PosixWritableFile>;
 
     fn remove_file(&self, filename: &Path) -> api::Result<()>;

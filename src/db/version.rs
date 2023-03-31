@@ -604,6 +604,15 @@ impl<C: api::Comparator + 'static> VersionSet<C> {
         vset
     }
 
+    // Arrange to reuse "file_number" unless a newer file number has
+    // already been allocated.
+    // REQUIRES: "file_number" was returned by a call to NewFileNumber().
+    pub(super) fn reuse_file_number(&mut self, file_number: u64) {
+        if self.next_file_number == file_number + 1 {
+            self.next_file_number = file_number;
+        }
+    }
+
     // Add all files listed in any live version to *live.
     // May also mutate some internal state.
     pub(super) fn add_live_files(&self, live: &mut Vec<u64>) {
@@ -860,29 +869,29 @@ impl<C: api::Comparator + 'static> VersionSet<C> {
         // Initialize new descriptor log file if necessary by creating
         // a temporary file that contains a snapshot of the current version.
         let mut new_manifest_file = None;
-        let mut r:Result<(), api::Error>;
+        let mut r: Result<(), api::Error> = Ok(());
         if self.descriptor_log.is_none() {
             // No reason to unlock *mu here since we only hit this path in the
             // first call to LogAndApply (when opening the database).
             let manifest_file =
                 filename::descriptor_file_name(&self.dbname, self.manifest_file_number);
-            let log_file = self
+            let descriptor_file = self
                 .options
                 .env
                 .new_posix_writable_file(manifest_file.as_path())?;
-            self.descriptor_log = Some(log::Writer::new(log_file));
+            self.descriptor_log = Some(log::Writer::new(descriptor_file));
             new_manifest_file = Some(manifest_file);
             r = self.write_snapshot();
         }
 
         // Unlock during expensive MANIFEST log write
-        unsafe{mutex.unlock()}
+        unsafe { mutex.unlock() }
 
         // Write new record to MANIFEST log
         if r.is_ok() {
-            let record = Vec::new();
+            let mut record = Vec::new();
             edit.encode_to(&mut record);
-            let descriptor_log= self.descriptor_log.as_mut().unwrap();
+            let descriptor_log = self.descriptor_log.as_mut().unwrap();
             r = descriptor_log.add_record(&record);
             if r.is_ok() {
                 r = descriptor_log.sync();
@@ -894,11 +903,7 @@ impl<C: api::Comparator + 'static> VersionSet<C> {
         // If we just created a new descriptor file, install it by writing a
         // new CURRENT file that points to it.
         if r.is_ok() && !new_manifest_file.is_none() {
-            r = set_current_file(
-                self.options.env,
-                &self.dbname,
-                self.manifest_file_number,
-            );
+            r = set_current_file(self.options.env, &self.dbname, self.manifest_file_number);
         }
 
         mutex.lock();
@@ -910,8 +915,10 @@ impl<C: api::Comparator + 'static> VersionSet<C> {
                 self.log_number = edit.log_number.unwrap();
                 self.prev_log_number = edit.prev_log_number.unwrap();
             }
-            Err(e) => {
-                // todo: remove new_manifest_file when error
+            Err(_) => {
+                if let Some(new_manifest_file) = new_manifest_file {
+                    let _ = self.options.env.remove_file(&new_manifest_file);
+                }
             }
         }
 
@@ -1281,21 +1288,21 @@ impl VersionEdit {
             util::put_varint64(dst, last_sequence);
         }
 
-        for (level, key) in self.compact_pointers {
+        for (level, key) in &self.compact_pointers {
             util::put_varint32(dst, Tag::CompactPointer as u32);
-            util::put_varint32(dst, level as u32);
+            util::put_varint32(dst, *level as u32);
             util::put_length_prefixed_slice(dst, &key.rep);
         }
 
-        for (level, file_number) in self.deleted_files{
+        for (level, file_number) in &self.deleted_files {
             util::put_varint32(dst, Tag::DeletedFile as u32);
-            util::put_varint32(dst, level as u32);
-            util::put_varint64(dst, file_number);
+            util::put_varint32(dst, *level as u32);
+            util::put_varint64(dst, *file_number);
         }
 
-        for (level, f) in self.new_files{
+        for (level, f) in &self.new_files {
             util::put_varint32(dst, Tag::NewFile as u32);
-            util::put_varint32(dst, level as u32);
+            util::put_varint32(dst, *level as u32);
             util::put_varint64(dst, f.number);
             util::put_varint64(dst, f.file_size);
             util::put_length_prefixed_slice(dst, &f.smallest.rep);

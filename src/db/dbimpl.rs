@@ -90,7 +90,7 @@ struct DBImpl<C: Comparator + Send + Sync + 'static> {
     mutex: parking_lot::Mutex<()>,
 
     writers: VecDeque<Writer>,
-    //log: log::Writer<PosixWritableFile>,
+    log: Option<log::Writer<PosixWritableFile>>,
     //log_file: Arc<RefCell<W>>,
     vset: VersionSet<C>,
 
@@ -105,10 +105,10 @@ struct DBImpl<C: Comparator + Send + Sync + 'static> {
     stats: [CompactionStats; config::NUM_LEVELS as usize],
     //mannual_compaction: Option<ManualCompaction>,
     // Has a background compaction been scheduled or is running?
-    //background_compaction_scheduled: bool,
-    //background_work_finished_signal: parking_lot::Condvar,
+    background_compaction_scheduled: bool,
+    background_work_finished_signal: parking_lot::Condvar,
     // Have we encountered a background error in paranoid mode?
-    //bg_error: Option<api::Error>,
+    bg_error: Option<api::Error>,
 }
 
 impl<C: api::Comparator + Send + Sync> DBImpl<C> {
@@ -130,14 +130,18 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
             shutting_down: atomic::AtomicBool::new(true),
             //table_cache: todo!(),
             vset: VersionSet::new(dbname, options),
-            pending_outputs: todo!(),
+            pending_outputs: vec![],
             stats: todo!(),
             logfile_number: todo!(),
+            background_work_finished_signal: parking_lot::Condvar::new(),
+            bg_error: None,
+            log: None,
+            background_compaction_scheduled:false,
         }
     }
 
-    /* fn background_call(&mut self) {
-        let _lock = MutexLock::new(&self.mutex);
+    fn background_job(&mut self) {
+        let _guard= self.mutex.lock();
 
         assert_eq!(self.background_compaction_scheduled, true);
 
@@ -153,41 +157,36 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
 
         // Previous compaction may have produced too many files in a level,
         // so reschedule another compaction if needed.
-        self.maybe_schedmule_compaction();
+        self.maybe_schedule_compaction();
         self.background_work_finished_signal.notify_all();
     }
 
-    fn maybe_schedmule_compaction(&mut self) {
+    fn maybe_schedule_compaction(&mut self) {
         assert!(self.mutex.is_locked());
-
         if self.background_compaction_scheduled {
             // Already scheduled
-        } else if self.shutting_down.load(atomic::Ordering::Acquire) {
-            // DB is being deleted; no more background compactions
-        } else if !self.bg_error.is_none() {
-            // DB is being deleted; no more background compactions
-        } else if self.imem.is_none()
-            && self.mannual_compaction.is_none()
-            && !self.vset.needs_compaction()
-        {
+        }else if self.shutting_down.load(atomic::Ordering::Acquire) {
+            // Db is being deleted; no more background compactions
+        }else if !self.bg_error.is_none() {
+            // Already got an error; no more changes
+        } else if !self.has_imm() && !self.vset.needs_compaction() {
             // No work to be done
-        } else {
-            self.background_compaction_scheduled = true;
-            thread::spawn(move|| {
-                self.background_call();
-            });
+        }else {
+            self.background_compaction_scheduled= true;
+            //todo: self.background_job()
+            let handler= thread::spawn(||self.background_job());
         }
-    }*/
+    }
 
     fn background_compaction(&mut self) {
         assert!(self.mutex.is_locked());
 
-        /* if self.imem.is_some() {
+        if self.has_imm() {
             self.compact_memtable();
             return;
         }
 
-        let is_manual = false;
+        /*let is_manual = false;
         let mut oc: Option<Compaction<C>> = None;
         if let Some(manual) = &mut self.mannual_compaction {
             todo!()
@@ -253,8 +252,10 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
         // Replace immutable memtable with the generated Table
         if r.is_ok() {
             edit.prev_log_number = Some(0);
-            edit.log_number= Some(self.logfile_number); // Earlier logs no longer needed
-            r = self.vset.log_and_apply(unsafe{&self.mutex.raw()}, &mut edit);
+            edit.log_number = Some(self.logfile_number); // Earlier logs no longer needed
+            r = self
+                .vset
+                .log_and_apply(unsafe { &self.mutex.raw() }, &mut edit);
         }
 
         match r {
@@ -267,6 +268,26 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
                 self.record_background_error(e);
             }
         }
+    }
+
+    fn test_compact_mem_table(&mut self) -> api::Result<()> {
+        let mut r = self.write(&WriteOptions::default(), None);
+        if r.is_ok() {
+            // Wait until the compaction completes
+            let mut guard = self.mutex.lock();
+            while self.has_imm() && self.bg_error.is_none() {
+                self.background_work_finished_signal.wait(&mut guard);
+            }
+            if self.has_imm() {
+                r = Err(self.bg_error.as_ref().unwrap().clone());
+            }
+        }
+        r
+    }
+
+    fn has_imm(&self) -> bool {
+        assert!(self.mutex.is_locked());
+        self.mem_tables.len() == 2
     }
 
     fn write_level0_table(
@@ -400,7 +421,7 @@ impl<C: api::Comparator + Send + Sync> DBImpl<C> {
 
 impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
     fn get(&mut self, options: &ReadOptions, key: &[u8], value: &mut Vec<u8>) -> api::Result<()> {
-        let mut guard= self.mutex.lock();
+        let mut guard = self.mutex.lock();
 
         let snaphsot: SequenceNumber;
         match &options.snapshot {
@@ -441,11 +462,11 @@ impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
                             }
                         }
 
-                        guard= self.mutex.lock();
+                        guard = self.mutex.lock();
 
                         // todo:
                         //if self.vset.current_mut().unwrap().update_stats(stats) {
-                        //self.maybe_schedmule_compaction();
+                        //self.maybe_schedule_compaction();
                         //}
                         return Ok(());
                     }
@@ -471,6 +492,7 @@ impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
     }
 
     fn write(&mut self, options: &WriteOptions, updates: Option<WriteBatch>) -> api::Result<()> {
+        let mut force = updates.is_none();
         let w = Writer::new(updates, options.sync);
 
         let mut guard = self.mutex.lock();
@@ -497,31 +519,76 @@ impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
             return w.status.clone();
         }
 
-        // May temporarily unlock and wait.
-        let mut status =
-            make_room_for_write(&mut self.mem_tables, &self.options, w.batch.is_none());
-        let mut last_sequence = self.vset.last_sequence();
+        // make room for write
+        // may temporarily unlock and wait.
+        // REQUIRES: this thread is currently at the front of the writer queue
+        let mut status = Ok(());
+        loop {
+            if !self.bg_error.is_none() {
+                status = Err(self.bg_error.as_ref().unwrap().clone());
+                break;
+            } else if !force
+                && self.mem_tables[0].approximate_memory_usage() <= self.options.write_buffer_size
+            {
+                // There is room in current memtable
+                break;
+            } else if self.has_imm() {
+                // We have filled up the current memtable, but the previous
+                // one is still being compacted, so we wait.
+                // todo: log wait
+                self.background_work_finished_signal.wait(&mut guard);
+            }
+            // todo: too many fevel-0 files
+            else {
+                // Attempt to switch to a new memtable and trigger compaction of old
+                assert!(self.vset.prev_log_number == 0);
+                let new_log_number = self.vset.new_file_number();
+                let f_name = super::filename::log_file_name(&self.dbname, new_log_number);
+                match self.options.env.new_posix_writable_file(&f_name) {
+                    Ok(lfile) => {
+                        self.log = Some(log::Writer::new(lfile));
+                        self.logfile_number = new_log_number;
 
-        // none updates is for compactions
-        if status.is_ok() {
+                        self.mem_tables
+                            .push_front(MemTable::new(InternalKeyComparator::new(
+                                self.options.comparator,
+                            )));
+                        if self.mem_tables.len() > 2 {
+                            self.mem_tables.pop_back();
+                        }
+                        force = false; // Do not force another compaction if have room
+                        self.maybe_schedule_compaction();
+                    }
+                    Err(e) => {
+                        // Avoid chewing through file number space in a tight loop.
+                        self.vset.reuse_file_number(new_log_number);
+                        status = Err(e);
+                        break;
+                    }
+                }
+            }
+        }
+
+        let mut last_sequence = self.vset.last_sequence();
+        if status.is_ok() && !force{
             let mut write_batch = build_batch_group(&mut self.writers);
             write_batch.set_sequence(last_sequence + 1);
             last_sequence += write_batch.count() as u64;
 
-            drop(guard);
-
-            // Add to log and apply to memtable.  We can release the lock
-            // during this phase since &w is currently responsible for logging
-            // and protects against concurrent loggers and concurrent writes
-            // into mem_.
-            //status = self.log.add_record(write_batch.contents());
-            //if options.sync {
-            //todo:
-            //self.log_file.sync()?;
-            //}
-            status = write_batch.insert_into(&mut self.mem_tables[0]);
-
-            guard= self.mutex.lock();
+            {
+                unsafe { self.mutex.raw().unlock() }
+                // Add to log and apply to memtable.  We can release the lock
+                // during this phase since &w is currently responsible for logging
+                // and protects against concurrent loggers and concurrent writes
+                // into mem_.
+                //status = self.log.add_record(write_batch.contents());
+                //if options.sync {
+                //todo:
+                //self.log_file.sync()?;
+                //}
+                status = write_batch.insert_into(&mut self.mem_tables[0]);
+                unsafe { self.mutex.raw().lock() }
+            }
 
             // todo: sync error
 
@@ -552,6 +619,7 @@ impl<C: Comparator + Send + Sync> DB<C> for DBImpl<C> {
 
         status
     }
+
 }
 
 pub fn open<C: api::Comparator + Send + Sync + 'static>(
@@ -563,31 +631,6 @@ pub fn open<C: api::Comparator + Send + Sync + 'static>(
     //todo: recover
 
     Ok(db)
-}
-
-// REQUIRES: mutex_ is held
-// REQUIRES: this thread is currently at the front of the writer queue
-fn make_room_for_write<C: api::Comparator>(
-    mem_tables: &mut VecDeque<MemTable<C>>,
-    options: &Options<C>,
-    force: bool,
-) -> api::Result<()> {
-    loop {
-        if !force && mem_tables[0].approximate_memory_usage() <= options.write_buffer_size {
-            // There is room in current memtable
-            break;
-        } else {
-            // Attempt to switch to a new memtable and trigger compaction of old
-            mem_tables.push_front(MemTable::new(InternalKeyComparator::new(
-                options.comparator,
-            )));
-            // todo: maybe schdule compation
-            if mem_tables.len() > 2 {
-                mem_tables.pop_back();
-            }
-        }
-    }
-    Ok(())
 }
 
 // REQUIRES: Writer list must be non-empty
